@@ -46,6 +46,10 @@ backend/            FastAPI app, managed with uv
   tests/              pytest, including tests against a real zeta serve
 web/                Vite + React + TypeScript (pnpm)
   src/lib/transcript.ts   the event reducer (unit tested)
+  src/lib/view.ts         derived view: tool groups, run phase, durations
+  src/styles/tokens.css   every color, size, and timing
+  src/dev/                the scripted fixture route (dev server only)
+  e2e/                    Playwright screenshots and axe checks
   src/lib/useSessionSocket.ts  socket, auth, reconnect-by-cursor
   src/components/         start page, session page, cards, composer
 scripts/smoke_e2e.py  end-to-end check with --provider fake
@@ -66,10 +70,31 @@ make backend       # http://127.0.0.1:8777, prints an access token once
 make web           # http://localhost:5173, proxies /api to the backend
 ```
 
-The backend prints its access token once at start-up. Paste it into the field
-on the gamma start page (it is kept in that tab's `sessionStorage` only). For a
-fixed token in development, export `GAMMA_ACCESS_TOKEN`, or give the web dev
-server `VITE_GAMMA_TOKEN` so the field is pre-filled.
+`make dev` makes a new random token for each run and gives it to the backend
+(`GAMMA_ACCESS_TOKEN`) and to the web dev server (`VITE_GAMMA_TOKEN`), so the
+page opens already authenticated. The token is not written to disk.
+
+When you run the parts separately, the backend prints its access token once
+at start-up. Paste it into the token screen (it is kept in that tab's
+`sessionStorage` only). A pasted token that the backend rejects is forgotten.
+
+### Using the UI
+
+| key | action |
+| --- | --- |
+| Enter / Shift+Enter | send / new line |
+| Cmd/Ctrl+K or `/` | focus the composer |
+| Cmd/Ctrl+Enter | approve the pending tool call |
+| Cmd/Ctrl+Shift+Enter | always allow that tool (protocol 1.1) |
+| Esc | deny the pending approval, else stop the running turn (not while the composer holds text) |
+
+While a turn runs, a message steers that turn. The theme follows the system;
+the button in the top bar forces light or dark.
+
+In the dev server, `#/fixture`, `#/fixture/streaming`, and `#/fixture/empty`
+show the session screen over a scripted transcript with tool calls, failures,
+denials, and a pending approval. The fake provider cannot call tools, so this
+is the way to see those states. Production builds do not include it.
 
 ## Configuration
 
@@ -111,6 +136,14 @@ All settings come from `GAMMA_*` environment variables (or `backend/.env`).
 ```sh
 make test          # backend pytest, web vitest, build, lint, typecheck
 make smoke         # end-to-end: real backend + real zeta serve --provider fake
+```
+
+Browser checks (screenshots in light and dark at 1440x900 and 390x844, and
+axe accessibility checks) run against a running dev setup whose backend allows
+the `fake` provider:
+
+```sh
+cd web && GAMMA_WEB_URL=http://localhost:5173 pnpm e2e   # screenshots go to /tmp/gamma-screens
 ```
 
 Backend tests drive a real `zeta serve --provider fake` (no API keys) for the

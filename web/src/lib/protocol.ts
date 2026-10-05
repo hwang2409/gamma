@@ -64,7 +64,7 @@ export interface CreateSessionBody {
 /** Frames the backend sends over the session WebSocket. */
 export type ServerFrame =
   | { type: "snapshot"; session: SessionView; replay_from: number }
-  | { type: "event"; cursor: number; event: string; payload: Record<string, unknown> }
+  | { type: "event"; cursor: number; at: number; event: string; payload: Record<string, unknown> }
   | { type: "ack"; command: string; result: Record<string, unknown> }
   | { type: "error"; message: string; command: string | null }
   | { type: "pong" };

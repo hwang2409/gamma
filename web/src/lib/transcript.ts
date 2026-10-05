@@ -35,11 +35,16 @@ export interface ToolItem {
   kind: "tool";
   id: string;
   cursor: number;
+  /** The zeta tool call id; approvals refer to the tool by it. */
+  callId: string;
   name: string;
   args: Record<string, unknown>;
   output: string;
   result: string | null;
   phase: ToolPhase;
+  /** Publish time (epoch seconds) of `tool_start` and `tool_end`. */
+  startedAt: number;
+  endedAt: number | null;
 }
 
 export type ApprovalPhase = "pending" | "approved" | "denied" | "closed";
@@ -75,6 +80,12 @@ export interface TranscriptState {
   /** Id of the assistant item that deltas append to, if any. */
   openAssistantId: string | null;
   closed: boolean;
+  /**
+   * Publish time (epoch seconds) of the event that started the current run,
+   * and of the event that ended it. A new run clears `runEndedAt`.
+   */
+  runStartedAt: number | null;
+  runEndedAt: number | null;
 }
 
 export const emptyTranscript: TranscriptState = {
@@ -84,10 +95,14 @@ export const emptyTranscript: TranscriptState = {
   items: [],
   openAssistantId: null,
   closed: false,
+  runStartedAt: null,
+  runEndedAt: null,
 };
 
 export interface GammaEvent {
   cursor: number;
+  /** Publish time on the backend, epoch seconds. */
+  at: number;
   event: string;
   payload: Record<string, unknown>;
 }
@@ -138,7 +153,7 @@ function applyEvent(state: TranscriptState, event: GammaEvent): TranscriptState 
   const { payload } = event;
   switch (event.event) {
     case "gamma_user_message":
-      return addItem(closeStream(next), {
+      return addItem(closeStream(payload.mode === "steer" ? next : startRun(next, event.at)), {
         kind: "user",
         id: `user-${event.cursor}`,
         cursor: event.cursor,
@@ -147,7 +162,7 @@ function applyEvent(state: TranscriptState, event: GammaEvent): TranscriptState 
       });
 
     case "gamma_session_closed":
-      return { ...closeStream(next), state: "idle", closed: true };
+      return { ...endRun(closeStream(next), event.at), state: "idle", closed: true };
 
     case "gamma_approval_decision":
       return decideApproval(
@@ -159,7 +174,7 @@ function applyEvent(state: TranscriptState, event: GammaEvent): TranscriptState 
 
     case "turn_start":
     case "agent_start":
-      return { ...closeStream(next), state: "running" };
+      return { ...startRun(closeStream(next), event.at), state: "running" };
 
     case "message_start":
       return { ...closeStream(next), state: "running" };
@@ -174,13 +189,13 @@ function applyEvent(state: TranscriptState, event: GammaEvent): TranscriptState 
       return { ...next, usage: asRecord(payload.usage) };
 
     case "tool_start":
-      return startTool(next, event.cursor, toolCall(payload.tool_call));
+      return startTool(next, event.cursor, event.at, toolCall(payload.tool_call));
 
     case "tool_output":
       return appendToolOutput(next, toolCall(payload.tool_call).id, text(payload.output));
 
     case "tool_end":
-      return endTool(next, toolCall(payload.tool_call), payload.tool_result);
+      return endTool(next, event.at, toolCall(payload.tool_call), payload.tool_result);
 
     case "approval_request":
       return requestApproval(next, event.cursor, text(payload.request_id), toolCall(payload.tool_call));
@@ -189,16 +204,22 @@ function applyEvent(state: TranscriptState, event: GammaEvent): TranscriptState 
       return closeApprovalFor(next, toolCall(payload.tool_call).id);
 
     case "turn_end":
-    case "agent_end":
+      // zeta ends every model turn; the run itself ends at `agent_end`.
       return { ...closeStream(next), state: "idle" };
 
+    case "agent_end":
+      return { ...endRun(closeStream(next), event.at), state: "idle" };
+
     case "turn_aborted":
-      return addItem({ ...closeStream(next), state: "idle" }, notice(event.cursor, "info", "Turn aborted."));
+      return addItem(
+        { ...endRun(closeStream(next), event.at), state: "idle" },
+        notice(event.cursor, "info", "Turn aborted."),
+      );
 
     case "error": {
       const error = asRecord(payload.error);
       return addItem(
-        { ...closeStream(next), state: "idle" },
+        { ...endRun(closeStream(next), event.at), state: "idle" },
         notice(
           event.cursor,
           "error",
@@ -246,6 +267,21 @@ function approvalItem(cursor: number, requestId: string, call: ToolCall): Approv
     phase: "pending",
     scope: null,
   };
+}
+
+/** A run starts once: the first of the user's send, `agent_start`, or `turn_start`. */
+function startRun(state: TranscriptState, at: number): TranscriptState {
+  if (state.runStartedAt !== null && state.runEndedAt === null) {
+    return state;
+  }
+  return { ...state, runStartedAt: at, runEndedAt: null };
+}
+
+function endRun(state: TranscriptState, at: number): TranscriptState {
+  if (state.runStartedAt === null || state.runEndedAt !== null) {
+    return state;
+  }
+  return { ...state, runEndedAt: at };
 }
 
 function closeStream(state: TranscriptState): TranscriptState {
@@ -323,7 +359,12 @@ function commitMessage(
   });
 }
 
-function startTool(state: TranscriptState, cursor: number, call: ToolCall): TranscriptState {
+function startTool(
+  state: TranscriptState,
+  cursor: number,
+  at: number,
+  call: ToolCall,
+): TranscriptState {
   const existing = state.items.find((item) => item.kind === "tool" && item.id === toolId(call.id));
   const base = closeStream(state);
   if (existing) {
@@ -333,11 +374,14 @@ function startTool(state: TranscriptState, cursor: number, call: ToolCall): Tran
     kind: "tool",
     id: toolId(call.id),
     cursor,
+    callId: call.id,
     name: call.name,
     args: call.arguments,
     output: "",
     result: null,
     phase: "running",
+    startedAt: at,
+    endedAt: null,
   });
 }
 
@@ -349,7 +393,12 @@ function appendToolOutput(
   return updateTool(state, callId, (item) => ({ ...item, output: item.output + output }));
 }
 
-function endTool(state: TranscriptState, call: ToolCall, rawResult: unknown): TranscriptState {
+function endTool(
+  state: TranscriptState,
+  at: number,
+  call: ToolCall,
+  rawResult: unknown,
+): TranscriptState {
   const result = asRecord(rawResult);
   const isError = result.is_error === true;
   const canceled = result.is_canceled === true;
@@ -357,6 +406,7 @@ function endTool(state: TranscriptState, call: ToolCall, rawResult: unknown): Tr
     ...item,
     result: text(result.content),
     phase: isError ? "error" : canceled ? "denied" : "done",
+    endedAt: at,
   }));
 }
 

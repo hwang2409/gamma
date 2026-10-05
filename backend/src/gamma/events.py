@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import deque
 from collections.abc import AsyncIterator
 from typing import Any
@@ -24,11 +25,17 @@ DEFAULT_SUBSCRIBER_QUEUE = 500
 
 
 class GammaEvent(BaseModel):
-    """One broadcast event: a cursor plus the zeta event payload."""
+    """One broadcast event: a cursor, the publish time, and the zeta payload.
+
+    ``at`` is the wall-clock time (epoch seconds) the bus published the event.
+    It lets a client measure turn and tool durations that stay correct when
+    the event is replayed after a reconnect.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     cursor: int
+    at: float
     event: str
     payload: dict[str, Any] = {}
 
@@ -66,7 +73,7 @@ class EventBus:
         """Append an event to the buffer and hand it to every subscriber."""
 
         self._cursor += 1
-        record = GammaEvent(cursor=self._cursor, event=event, payload=payload or {})
+        record = GammaEvent(cursor=self._cursor, at=time.time(), event=event, payload=payload or {})
         self._buffer.append(record)
         for queue in list(self._subscribers):
             try:

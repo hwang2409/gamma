@@ -273,7 +273,7 @@ async def _pump_events(websocket: WebSocket, session: GammaSession, cursor: int)
         async for event in session.bus.subscribe(after_cursor=cursor):
             await websocket.send_text(
                 EventFrame(
-                    cursor=event.cursor, event=event.event, payload=event.payload
+                    cursor=event.cursor, at=event.at, event=event.event, payload=event.payload
                 ).model_dump_json()
             )
     except (WebSocketDisconnect, RuntimeError):

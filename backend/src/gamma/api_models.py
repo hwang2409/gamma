@@ -164,6 +164,7 @@ class SnapshotFrame(StrictModel):
 class EventFrame(StrictModel):
     type: Literal["event"] = "event"
     cursor: int
+    at: float
     event: str
     payload: dict[str, Any] = Field(default_factory=dict)
 

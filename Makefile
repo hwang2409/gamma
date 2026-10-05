@@ -15,11 +15,15 @@ install:
 	cd $(BACKEND) && uv sync --all-groups
 	cd $(WEB) && pnpm install
 
+# One random token per `make dev` run. The backend gets it as
+# GAMMA_ACCESS_TOKEN and Vite as VITE_GAMMA_TOKEN, so the page opens already
+# authenticated. It lives only in this process tree and is never written down.
 dev:
 	@echo "backend on http://127.0.0.1:8777, web on http://localhost:5173"
-	@trap 'kill 0' EXIT INT TERM; \
-	( cd $(BACKEND) && uv run python -m gamma ) & \
-	( cd $(WEB) && pnpm dev ) & \
+	@token=$$(openssl rand -hex 32); \
+	trap 'kill 0' EXIT INT TERM; \
+	( cd $(BACKEND) && GAMMA_ACCESS_TOKEN=$$token uv run python -m gamma ) & \
+	( cd $(WEB) && VITE_GAMMA_TOKEN=$$token pnpm dev ) & \
 	wait
 
 backend:
