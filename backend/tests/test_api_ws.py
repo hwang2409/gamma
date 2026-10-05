@@ -343,3 +343,66 @@ async def test_an_invalid_command_is_reported_and_the_socket_stays_open(
     await socket.send(json.dumps({"type": "ping"}))
     assert (await recv_until(socket, "pong"))["type"] == "pong"
     await socket.close()
+
+
+# --- derived state seen by a late tab ----------------------------------------
+
+
+async def test_a_snapshot_between_model_turns_is_still_running(harness: Harness) -> None:
+    """zeta ends each model turn with `turn_end`; only `agent_end` ends the run."""
+
+    session_id = await harness.create_session()
+    connection = harness.runtime.last
+    connection.emit("agent_start", data={})
+    connection.emit("turn_start", data={"turn": 1})
+    connection.emit("turn_end", data={"turn": 1, "tool_calls": 1})
+
+    socket = await harness.connect(session_id)
+    assert (await recv_until(socket, "snapshot"))["session"]["state"] == "running"
+    await socket.close()
+
+    connection.emit("agent_end", data={})
+    late = await harness.connect(session_id)
+    assert (await recv_until(late, "snapshot"))["session"]["state"] == "idle"
+    await late.close()
+
+
+async def test_a_snapshot_keeps_the_approval_details_zeta_resolved(harness: Harness) -> None:
+    session_id = await harness.create_session()
+    connection = harness.runtime.last
+    display = {"effective_cwd": "/work/acme", "resolved_path": "/work/acme/src/app.py"}
+    connection.emit("agent_start", data={})
+    connection.emit(
+        "approval_request",
+        request_id="r1",
+        tool_call={"id": "c1", "name": "edit", "arguments": {"path": "src/app.py"}},
+        delegated=False,
+        approval_display=display,
+    )
+
+    socket = await harness.connect(session_id)
+    snapshot = await recv_until(socket, "snapshot")
+    [pending] = snapshot["session"]["pending_approvals"]
+    assert pending["request_id"] == "r1"
+    assert pending["approval_display"]["effective_cwd"] == "/work/acme"
+    assert pending["approval_display"]["resolved_path"] == "/work/acme/src/app.py"
+    replayed = await recv_until(socket, "event")
+    while replayed["event"] != "approval_request":
+        replayed = await recv_until(socket, "event")
+    assert replayed["payload"]["approval_display"] == display
+    await socket.close()
+
+
+async def test_a_session_is_labelled_by_its_first_prompt(harness: Harness) -> None:
+    session_id = await harness.create_session()
+    socket = await harness.connect(session_id)
+    await recv_until(socket, "snapshot")
+    await socket.send(json.dumps({"type": "send", "text": "Fix the\n  health check"}))
+    await recv_until(socket, "ack")
+    await socket.send(json.dumps({"type": "send", "text": "and then the docs"}))
+    await recv_until(socket, "ack")
+    await socket.close()
+
+    async with httpx.AsyncClient(headers={TOKEN_HEADER: TOKEN}) as client:
+        listed = (await client.get(harness.url("/api/sessions"))).json()["sessions"]
+    assert [item["first_prompt"] for item in listed] == ["Fix the health check"]

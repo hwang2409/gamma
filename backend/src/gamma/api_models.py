@@ -82,6 +82,7 @@ class SessionView(StrictModel):
     created_at: float
     last_activity: float
     session_name: str | None = None
+    first_prompt: str | None = None
     capabilities: list[str] = Field(default_factory=list)
 
     @classmethod
@@ -101,6 +102,7 @@ class SessionView(StrictModel):
             created_at=snapshot.created_at,
             last_activity=snapshot.last_activity,
             session_name=(snapshot.metadata.name or None) if snapshot.metadata else None,
+            first_prompt=snapshot.first_prompt,
             capabilities=snapshot.capabilities,
         )
 

@@ -20,6 +20,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from pydantic import ValidationError
+
 from .config import Settings
 from .events import EventBus, GammaEvent
 from .policy import LaunchPolicy, PolicyError
@@ -28,7 +30,6 @@ from .zeta_protocol import (
     PendingApproval,
     SessionMetadata,
     StatusResult,
-    ToolCall,
     ZetaEvent,
     ZetaRpcError,
 )
@@ -37,9 +38,48 @@ logger = logging.getLogger(__name__)
 
 RunState = Literal["idle", "running", "tool"]
 
-RUNNING_EVENTS = frozenset({"turn_start", "message_start", "agent_start", "retry"})
-TOOL_EVENTS = frozenset({"tool_start", "tool_output", "approval_request"})
-IDLE_EVENTS = frozenset({"turn_end", "turn_aborted", "agent_end", "error"})
+# A run is one `send` (or steer-woken turn) from `agent_start` to `agent_end`.
+# zeta emits `turn_end` after every model turn inside a run ("`turn_end`
+# follows that turn's tool events, then `agent_end`"), so `turn_end` is not a
+# boundary: between two model turns the agent is still working, and
+# `status.state` stays `running` until "the active task ends".
+RUN_START_EVENTS = frozenset({"agent_start", "turn_start", "message_start", "retry"})
+# An abort and a loop failure also end the run; zeta then reports `idle`.
+RUN_END_EVENTS = frozenset({"agent_end", "turn_aborted", "error"})
+TOOL_ENTER_EVENTS = frozenset({"tool_start", "approval_request"})
+TOOL_EXIT_EVENTS = frozenset({"tool_end"})
+# The start page labels a session by its first prompt; this bounds the label.
+FIRST_PROMPT_MAX = 200
+
+
+def next_run_state(current: RunState, event: str, fields: dict[str, Any]) -> RunState:
+    """The run state after one zeta event, the way `zeta serve` derives `status.state`.
+
+    Events from a sub-agent (zeta forwards a child's tool and approval events
+    with ``data.agent_instance_id``) never move it: a foreground child runs
+    inside the parent's own tool call, and a background child does not change
+    the foreground state at all. Tool events only move the state inside an
+    open run.
+    """
+
+    if _from_sub_agent(fields):
+        return current
+    if event in RUN_START_EVENTS:
+        return "running"
+    if event in RUN_END_EVENTS:
+        return "idle"
+    if current == "idle":
+        return current
+    if event in TOOL_ENTER_EVENTS:
+        return "tool"
+    if event in TOOL_EXIT_EVENTS:
+        return "running"
+    return current
+
+
+def _from_sub_agent(fields: dict[str, Any]) -> bool:
+    data = fields.get("data")
+    return isinstance(data, dict) and isinstance(data.get("agent_instance_id"), str)
 
 
 class SessionError(Exception):
@@ -69,6 +109,7 @@ class SessionSnapshot:
     last_activity: float
     metadata: SessionMetadata | None = None
     capabilities: list[str] = field(default_factory=list)
+    first_prompt: str | None = None
 
 
 class GammaSession:
@@ -86,7 +127,8 @@ class GammaSession:
         self.last_activity = self.created_at
         self.state: RunState = "idle"
         self.usage: dict[str, Any] = {}
-        self.pending_approvals: dict[str, ToolCall] = {}
+        self.pending_approvals: dict[str, PendingApproval] = {}
+        self.first_prompt: str | None = None
         self.metadata: SessionMetadata | None = None
         self._connection: RuntimeConnection | None = None
         self._closed = False
@@ -118,16 +160,14 @@ class GammaSession:
             protocol_version=hello.protocol_version if hello else "unknown",
             state=self.state,
             usage=dict(self.usage),
-            pending_approvals=[
-                PendingApproval(request_id=request_id, tool_call=tool_call)
-                for request_id, tool_call in self.pending_approvals.items()
-            ],
+            pending_approvals=list(self.pending_approvals.values()),
             cursor=self.bus.cursor,
             oldest_cursor=self.bus.oldest_cursor,
             created_at=self.created_at,
             last_activity=self.last_activity,
             metadata=self.metadata,
             capabilities=list(hello.capabilities.requests) if hello else [],
+            first_prompt=self.first_prompt,
         )
 
     # --- event pump --------------------------------------------------------
@@ -138,34 +178,29 @@ class GammaSession:
         name = event.event
         fields = event.fields
         self.touch()
-        if name in RUNNING_EVENTS:
-            self.state = "running"
-        elif name in TOOL_EVENTS:
-            self.state = "tool"
-        elif name in IDLE_EVENTS:
-            self.state = "idle"
+        self.state = next_run_state(self.state, name, fields)
         if name == "usage":
             usage = fields.get("usage")
             if isinstance(usage, dict):
                 self.usage = usage
         elif name == "approval_request":
             request_id = fields.get("request_id")
-            tool_call = fields.get("tool_call")
-            if isinstance(request_id, str) and isinstance(tool_call, dict):
-                self.pending_approvals[request_id] = ToolCall.model_validate(tool_call)
+            if isinstance(request_id, str) and isinstance(fields.get("tool_call"), dict):
+                with contextlib.suppress(ValidationError):
+                    self.pending_approvals[request_id] = PendingApproval.model_validate(fields)
         elif name in ("approval_end", "tool_end"):
             tool_call = fields.get("tool_call")
             call_id = tool_call.get("id") if isinstance(tool_call, dict) else None
             self._resolve_approvals(call_id)
-        elif name in ("turn_end", "turn_aborted"):
+        elif name in ("agent_end", "turn_aborted"):
             self.pending_approvals.clear()
         self.bus.publish(name, fields)
 
     def _resolve_approvals(self, tool_call_id: str | None) -> None:
         if tool_call_id is None:
             return
-        for request_id, call in list(self.pending_approvals.items()):
-            if call.id == tool_call_id or request_id == tool_call_id:
+        for request_id, approval in list(self.pending_approvals.items()):
+            if approval.tool_call.id == tool_call_id or request_id == tool_call_id:
                 self.pending_approvals.pop(request_id, None)
 
     def publish_local(self, event: str, payload: dict[str, Any]) -> GammaEvent:
@@ -183,6 +218,8 @@ class GammaSession:
 
     async def send(self, text: str) -> dict[str, Any]:
         result = await self.call("send", {"text": text})
+        if self.first_prompt is None:
+            self.first_prompt = " ".join(text.split())[:FIRST_PROMPT_MAX]
         # zeta does not echo the user message, so gamma publishes it. Every
         # tab, including one that attaches later, then sees the same
         # conversation from the ring buffer alone.
@@ -222,7 +259,7 @@ class GammaSession:
         if status.usage:
             self.usage = status.usage
         self.pending_approvals = {
-            approval.request_id: approval.tool_call for approval in status.pending_approvals
+            approval.request_id: approval for approval in status.pending_approvals
         }
         if status.session is not None:
             self.metadata = status.session
