@@ -390,7 +390,8 @@
   justify-content: space-between;
   gap: var(--s-4);
   min-height: 24px;
-  padding: 0 var(--s-3);
+  /* the phase node sits on the transcript's spine line, its label on the gutter */
+  padding: 0 var(--s-3) 0 calc(var(--spine-x) - 4.5px);
   color: var(--ash);
   font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
@@ -399,7 +400,7 @@
 .run-phase {
   display: inline-flex;
   align-items: center;
-  gap: var(--s-2);
+  gap: calc(var(--gutter) - var(--spine-x) - 4.5px);
   min-width: 0;
 }
 
