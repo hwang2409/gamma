@@ -15,7 +15,7 @@ let nextCursor = 0;
 
 function event(name: string, payload: Record<string, unknown> = {}, cursor?: number): GammaEvent {
   nextCursor = cursor ?? nextCursor + 1;
-  return { cursor: nextCursor, event: name, payload };
+  return { cursor: nextCursor, at: 1000 + nextCursor, event: name, payload };
 }
 
 function apply(state: TranscriptState, ...events: GammaEvent[]): TranscriptState {
@@ -395,5 +395,77 @@ describe("session end and failures", () => {
   it("resets on demand", () => {
     const state = apply(fresh(), event("turn_start"));
     expect(transcriptReducer(state, { type: "reset" })).toEqual(emptyTranscript);
+  });
+});
+
+describe("run and tool timing", () => {
+  const call = { id: "tool-call-1", name: "bash", arguments: { command: "ls" } };
+
+  it("times a run from the user's send to agent_end, across model turns", () => {
+    let state = apply(
+      fresh(),
+      event("gamma_user_message", { text: "go", mode: "send" }, 1),
+      event("agent_start", {}, 2),
+      event("turn_start", {}, 3),
+      event("turn_end", {}, 4),
+      event("turn_start", {}, 5),
+    );
+    expect(state.runStartedAt).toBe(1001);
+    expect(state.runEndedAt).toBeNull();
+
+    state = apply(state, event("turn_end", {}, 6), event("agent_end", {}, 7));
+    expect(state.runStartedAt).toBe(1001);
+    expect(state.runEndedAt).toBe(1007);
+  });
+
+  it("does not restart the run on a steer", () => {
+    const state = apply(
+      fresh(),
+      event("gamma_user_message", { text: "go", mode: "send" }, 1),
+      event("gamma_user_message", { text: "faster", mode: "steer" }, 4),
+    );
+    expect(state.runStartedAt).toBe(1001);
+  });
+
+  it("starts a fresh run after the last one ended", () => {
+    const state = apply(
+      fresh(),
+      event("agent_start", {}, 1),
+      event("agent_end", {}, 2),
+      event("gamma_user_message", { text: "again", mode: "send" }, 5),
+    );
+    expect(state.runStartedAt).toBe(1005);
+    expect(state.runEndedAt).toBeNull();
+  });
+
+  it("ends the run on abort and on error", () => {
+    const aborted = apply(fresh(), event("agent_start", {}, 1), event("turn_aborted", {}, 3));
+    expect(aborted.runEndedAt).toBe(1003);
+    const failed = apply(
+      fresh(),
+      event("agent_start", {}, 1),
+      event("error", { error: { code: "x", message: "y" } }, 2),
+    );
+    expect(failed.runEndedAt).toBe(1002);
+  });
+
+  it("records when a tool starts and ends, keyed by its call id", () => {
+    const state = apply(
+      fresh(),
+      event("tool_start", { tool_call: call, data: {} }, 3),
+      event("tool_end", { tool_call: call, tool_result: { content: "ok" }, data: {} }, 8),
+    );
+    expect(tools(state)[0]).toMatchObject({ callId: "tool-call-1", startedAt: 1003, endedAt: 1008 });
+  });
+
+  it("keeps the first start time when a replay repeats tool_start", () => {
+    const state = apply(
+      fresh(),
+      event("tool_start", { tool_call: call, data: {} }, 3),
+      event("approval_request", { request_id: "r1", tool_call: call }, 4),
+      event("tool_start", { tool_call: call, data: {} }, 6),
+    );
+    expect(tools(state)[0]?.startedAt).toBe(1003);
+    expect(tools(state)[0]?.phase).toBe("running");
   });
 });
