@@ -5,7 +5,8 @@ handshake, request names, and event shapes lives here. The rest of gamma uses
 :class:`ZetaConnection` and the typed models below, so a change in the zeta
 protocol touches one module.
 
-Contract: ``docs/serve-protocol.md`` in the Zeta repository (https://github.com/hwang2409/zeta) (protocol 1.1).
+Contract: ``docs/serve-protocol.md`` (protocol 1.1) in the Zeta repository,
+https://github.com/hwang2409/zeta.
 """
 
 from __future__ import annotations
