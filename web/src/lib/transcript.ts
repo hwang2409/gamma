@@ -161,6 +161,7 @@ function applyEvent(state: TranscriptState, event: GammaEvent): TranscriptState 
   }
   const next = { ...state, cursor: event.cursor };
   const { payload } = event;
+  const delegated = isDelegated(payload);
   switch (event.event) {
     case "gamma_user_message":
       return addItem(closeStream(payload.mode === "steer" ? next : startRun(next, event.at)), {
@@ -184,10 +185,12 @@ function applyEvent(state: TranscriptState, event: GammaEvent): TranscriptState 
 
     case "turn_start":
     case "agent_start":
-      return { ...startRun(closeStream(next), event.at), state: "running" };
+      return delegated
+        ? next
+        : { ...startRun(closeStream(next), event.at), state: "running" };
 
     case "message_start":
-      return { ...closeStream(next), state: "running" };
+      return delegated ? next : { ...closeStream(next), state: "running" };
 
     case "assistant_delta":
       return appendDelta(next, event.cursor, text(payload.delta), text(payload.kind));
@@ -210,7 +213,7 @@ function applyEvent(state: TranscriptState, event: GammaEvent): TranscriptState 
     case "approval_request":
       return requestApproval(next, event.cursor, text(payload.request_id), toolCall(payload.tool_call), {
         display: approvalDisplay(payload.approval_display),
-        delegated: payload.delegated === true,
+        delegated,
       });
 
     case "approval_end":
@@ -222,18 +225,22 @@ function applyEvent(state: TranscriptState, event: GammaEvent): TranscriptState 
       return closeStream(next);
 
     case "agent_end":
-      return { ...endRun(closeStream(next), event.at), state: "idle" };
+      return delegated ? next : { ...endRun(closeStream(next), event.at), state: "idle" };
 
     case "turn_aborted":
       return addItem(
-        { ...endRun(closeStream(next), event.at), state: "idle" },
+        delegated
+          ? next
+          : { ...endRun(closeStream(next), event.at), state: "idle" },
         notice(event.cursor, "info", "Turn aborted."),
       );
 
     case "error": {
       const error = asRecord(payload.error);
       return addItem(
-        { ...endRun(closeStream(next), event.at), state: "idle" },
+        delegated
+          ? next
+          : { ...endRun(closeStream(next), event.at), state: "idle" },
         notice(
           event.cursor,
           "error",
@@ -459,7 +466,10 @@ function requestApproval(
   const existing = state.items.find(
     (item) => item.kind === "approval" && item.requestId === requestId,
   );
-  const base: TranscriptState = { ...closeStream(state), state: "tool" };
+  const base: TranscriptState = {
+    ...closeStream(state),
+    state: context.delegated ? state.state : "tool",
+  };
   if (existing) {
     return base;
   }
@@ -504,6 +514,14 @@ export function pendingApprovals(state: TranscriptState): ApprovalItem[] {
 }
 
 // --- payload readers -------------------------------------------------------
+
+function isDelegated(payload: Record<string, unknown>): boolean {
+  if (payload.delegated === true) {
+    return true;
+  }
+  const data = asRecord(payload.data);
+  return typeof data.agent_instance_id === "string";
+}
 
 function toolId(callId: string): string {
   return `tool-${callId}`;

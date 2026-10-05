@@ -274,6 +274,55 @@ describe("approval state", () => {
 
     expect(state.items.filter((item) => item.kind === "approval")).toHaveLength(1);
   });
+
+  it("records delegated approval without changing idle state", () => {
+    const state = apply(
+      fresh(),
+      event("approval_request", {
+        request_id: call.id,
+        tool_call: call,
+        delegated: true,
+        data: {},
+      }),
+    );
+
+    expect(state.state).toBe("idle");
+    expect(state.items.at(-1)).toMatchObject({ kind: "approval", delegated: true });
+  });
+
+  it("leaves a running state unchanged for delegated approval", () => {
+    const state = apply(
+      fresh(),
+      event("turn_start"),
+      event("approval_request", {
+        request_id: call.id,
+        tool_call: call,
+        data: { agent_instance_id: "child-1" },
+      }),
+    );
+
+    expect(state.state).toBe("running");
+  });
+
+  it("keeps a foreground run active for a delegated child end", () => {
+    const state = apply(
+      fresh(),
+      event("turn_start"),
+      event("agent_end", { data: { agent_instance_id: "child-1" } }),
+    );
+
+    expect(state.state).toBe("running");
+    expect(state.runEndedAt).toBeNull();
+  });
+
+  it("still moves a non-delegated approval to tool", () => {
+    const state = apply(
+      fresh(),
+      event("approval_request", { request_id: call.id, tool_call: call }),
+    );
+
+    expect(state.state).toBe("tool");
+  });
 });
 
 describe("reconnect replay", () => {
