@@ -77,13 +77,6 @@ def next_run_state(current: RunState, event: str, fields: dict[str, Any]) -> Run
     return current
 
 
-def _agent_instance_id(fields: dict[str, Any]) -> str | None:
-    data = fields.get("data")
-    if isinstance(data, dict) and isinstance(data.get("agent_instance_id"), str):
-        return data["agent_instance_id"]
-    return None
-
-
 def _from_sub_agent(fields: dict[str, Any]) -> bool:
     if fields.get("delegated") is True:
         return True
@@ -137,7 +130,6 @@ class GammaSession:
         self.state: RunState = "idle"
         self.usage: dict[str, Any] = {}
         self.pending_approvals: dict[str, PendingApproval] = {}
-        self._approval_agents: dict[str, str] = {}
         self.first_prompt: str | None = None
         self.metadata: SessionMetadata | None = None
         self._connection: RuntimeConnection | None = None
@@ -199,42 +191,12 @@ class GammaSession:
             request_id = fields.get("request_id")
             if isinstance(request_id, str) and isinstance(fields.get("tool_call"), dict):
                 with contextlib.suppress(ValidationError):
-                    agent_id = _agent_instance_id(fields)
-                    approval_fields = dict(fields)
-                    approval_fields["agent_instance_id"] = agent_id
-                    self.pending_approvals[request_id] = PendingApproval.model_validate(
-                        approval_fields
-                    )
-                    if agent_id is not None:
-                        self._approval_agents[request_id] = agent_id
-        elif name in ("approval_end", "tool_end"):
-            if not delegated:
-                tool_call = fields.get("tool_call")
-                call_id = tool_call.get("id") if isinstance(tool_call, dict) else None
-                self._resolve_approvals(call_id)
-        elif name in ("agent_end", "turn_aborted", "error"):
-            if delegated:
-                self._clear_delegated_approvals(_agent_instance_id(fields))
-            else:
-                self.pending_approvals.clear()
-                self._approval_agents.clear()
+                    self.pending_approvals[request_id] = PendingApproval.model_validate(fields)
+        elif name == "approval_end":
+            request_id = fields.get("request_id")
+            if isinstance(request_id, str):
+                self.pending_approvals.pop(request_id, None)
         self.bus.publish(name, fields)
-
-    def _resolve_approvals(self, tool_call_id: str | None) -> None:
-        if tool_call_id is None:
-            return
-        for request_id, approval in list(self.pending_approvals.items()):
-            if approval.tool_call.id == tool_call_id or request_id == tool_call_id:
-                self.pending_approvals.pop(request_id, None)
-                self._approval_agents.pop(request_id, None)
-
-    def _clear_delegated_approvals(self, agent_id: str | None) -> None:
-        if agent_id is None:
-            return
-        for request_id in list(self.pending_approvals):
-            if self._approval_agents.get(request_id) == agent_id:
-                self.pending_approvals.pop(request_id, None)
-                self._approval_agents.pop(request_id, None)
 
     def publish_local(self, event: str, payload: dict[str, Any]) -> GammaEvent:
         """Publish a gamma-generated event (not from zeta) on the same stream."""
@@ -275,7 +237,6 @@ class GammaSession:
             params["scope"] = scope
         result = await self.call("approve" if approve else "deny", params)
         self.pending_approvals.pop(request_id, None)
-        self._approval_agents.pop(request_id, None)
         self.publish_local(
             "gamma_approval_decision",
             {
@@ -294,11 +255,6 @@ class GammaSession:
             self.usage = status.usage
         self.pending_approvals = {
             approval.request_id: approval for approval in status.pending_approvals
-        }
-        self._approval_agents = {
-            approval.request_id: approval.agent_instance_id
-            for approval in status.pending_approvals
-            if approval.agent_instance_id is not None
         }
         if status.session is not None:
             self.metadata = status.session

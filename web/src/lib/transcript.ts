@@ -35,7 +35,7 @@ export interface ToolItem {
   kind: "tool";
   id: string;
   cursor: number;
-  /** The zeta tool call id; approvals refer to the tool by it. */
+  /** The zeta tool call id associated with this tool. */
   callId: string;
   name: string;
   args: Record<string, unknown>;
@@ -63,7 +63,7 @@ export interface ApprovalItem {
   display: ApprovalDisplay | null;
   /** True when a sub-agent asked. */
   delegated: boolean;
-  /** Child identity used to close an orphaned delegated approval. */
+  /** Child identity supplied for delegated approvals, when present. */
   agentInstanceId: string | null;
 }
 
@@ -137,9 +137,17 @@ export function transcriptReducer(
  * rewrites transcript items, because the replayed events do that.
  */
 function applySnapshot(state: TranscriptState, session: SessionView): TranscriptState {
-  let items = state.items;
+  const pendingIds = new Set(session.pending_approvals.map((approval) => approval.request_id));
+  let items: TranscriptItem[] = state.items.map((item) =>
+    item.kind === "approval" && item.phase === "pending" && !pendingIds.has(item.requestId)
+      ? { ...item, phase: "closed" }
+      : item,
+  );
   for (const approval of session.pending_approvals) {
-    if (!items.some((item) => item.kind === "approval" && item.requestId === approval.request_id)) {
+    const existing = items.some(
+      (item) => item.kind === "approval" && item.requestId === approval.request_id,
+    );
+    if (!existing) {
       items = [
         ...items,
         approvalItem(state.cursor, approval.request_id, approval.tool_call, {
@@ -217,24 +225,22 @@ function applyEvent(state: TranscriptState, event: GammaEvent): TranscriptState 
       return requestApproval(next, event.cursor, text(payload.request_id), toolCall(payload.tool_call), {
         display: approvalDisplay(payload.approval_display),
         delegated,
-        agentInstanceId: text(asRecord(payload.data).agent_instance_id),
+        agentInstanceId: text(payload.agent_instance_id),
       });
 
     case "approval_end":
-      return delegated ? next : closeApprovalFor(next, toolCall(payload.tool_call).id);
+      return closeApprovalFor(next, text(payload.request_id));
     case "turn_end":
       // zeta ends every model turn; the run itself ends at `agent_end`, so
       // the agent is still working here (the backend derives it the same way).
       return closeStream(next);
 
     case "agent_end":
-      return delegated
-        ? closeDelegatedApproval(next, text(asRecord(payload.data).agent_instance_id))
-        : { ...endRun(closeStream(next), event.at), state: "idle" };
+      return delegated ? next : { ...endRun(closeStream(next), event.at), state: "idle" };
     case "turn_aborted":
       return addItem(
         delegated
-          ? closeDelegatedApproval(next, text(asRecord(payload.data).agent_instance_id))
+          ? next
           : { ...endRun(closeStream(next), event.at), state: "idle" },
         notice(event.cursor, "info", "Turn aborted."),
       );
@@ -243,7 +249,7 @@ function applyEvent(state: TranscriptState, event: GammaEvent): TranscriptState 
       const error = asRecord(payload.error);
       return addItem(
         delegated
-          ? closeDelegatedApproval(next, text(asRecord(payload.data).agent_instance_id))
+          ? next
           : { ...endRun(closeStream(next), event.at), state: "idle" },
         notice(
           event.cursor,
@@ -486,23 +492,6 @@ function requestApproval(
   return addItem(withTool, approvalItem(cursor, requestId, call, context));
 }
 
-function closeDelegatedApproval(state: TranscriptState, agentInstanceId: string): TranscriptState {
-  if (!agentInstanceId) {
-    return state;
-  }
-  return {
-    ...state,
-    items: state.items.map((item) =>
-      item.kind === "approval" &&
-      item.delegated &&
-      item.agentInstanceId === agentInstanceId &&
-      item.phase === "pending"
-        ? { ...item, phase: "closed" }
-        : item,
-    ),
-  };
-}
-
 function decideApproval(
   state: TranscriptState,
   requestId: string,
@@ -519,12 +508,12 @@ function decideApproval(
   };
 }
 
-/** A disconnect aborts unresolved approvals, so a closed one stops asking. */
-function closeApprovalFor(state: TranscriptState, toolCallId: string): TranscriptState {
+/** A terminal approval event closes exactly its request. */
+function closeApprovalFor(state: TranscriptState, requestId: string): TranscriptState {
   return {
     ...state,
     items: state.items.map((item) =>
-      item.kind === "approval" && item.toolCallId === toolCallId && item.phase === "pending"
+      item.kind === "approval" && item.requestId === requestId && item.phase !== "closed"
         ? { ...item, phase: "closed" }
         : item,
     ),
