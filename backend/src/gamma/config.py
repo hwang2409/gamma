@@ -1,0 +1,89 @@
+"""Server-side configuration.
+
+Everything the browser must not choose lives here: which zeta binary runs,
+which providers and models are allowed, which directories a session may open,
+and the tool policy passed to ``zeta serve``.
+"""
+
+from __future__ import annotations
+
+import os
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+DEFAULT_MODELS: dict[str, list[str]] = {
+    "fake": ["offline", "faster"],
+    "claude": ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"],
+    "codex": ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.4-mini"],
+}
+
+
+class Settings(BaseSettings):
+    """Gamma backend settings, read from ``GAMMA_*`` environment variables."""
+
+    model_config = SettingsConfigDict(env_prefix="GAMMA_", env_file=".env", extra="ignore")
+
+    # transport
+    host: str = "127.0.0.1"
+    port: int = 8777
+    allowed_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
+
+    # auth: a random token is generated at startup when this is unset
+    access_token: str | None = None
+
+    # zeta harness
+    zeta_bin: str = "zeta"
+    allowed_providers: list[str] = Field(default_factory=lambda: ["fake", "claude", "codex"])
+    allowed_models: dict[str, list[str]] = Field(default_factory=lambda: dict(DEFAULT_MODELS))
+    allowed_roots: list[Path] = Field(default_factory=lambda: [Path.home() / "me" / "fun"])
+
+    # extra environment for every zeta serve child (for example ZETA_HOME)
+    zeta_env: dict[str, str] = Field(default_factory=dict)
+
+    # tool policy is server-side only in v0; the browser cannot change it
+    tools: str | None = None
+    disallowed_tools: str | None = None
+    require_tools: bool = False
+
+    # lifecycle
+    session_idle_timeout_seconds: float = 3600.0
+    max_sessions: int = 8
+    event_buffer_capacity: int = 1000
+    request_timeout_seconds: float = 30.0
+
+    @field_validator("allowed_origins", "allowed_providers", mode="before")
+    @classmethod
+    def _split_list(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip().startswith("["):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("allowed_roots", mode="before")
+    @classmethod
+    def _split_paths(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip().startswith("["):
+            return [item.strip() for item in value.split(os.pathsep) if item.strip()]
+        return value
+
+    @field_validator("allowed_roots")
+    @classmethod
+    def _resolve_roots(cls, value: list[Path]) -> list[Path]:
+        return [path.expanduser().resolve() for path in value]
+
+    def models_for(self, provider: str) -> list[str]:
+        return list(self.allowed_models.get(provider, []))
+
+    def default_model(self, provider: str) -> str | None:
+        models = self.models_for(provider)
+        return models[0] if models else None
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()
+
+
+__all__ = ["DEFAULT_MODELS", "Settings", "get_settings"]
