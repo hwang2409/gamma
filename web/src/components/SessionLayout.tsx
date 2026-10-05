@@ -67,6 +67,14 @@ export function SessionLayout({
   // The decided card stays for its exit (160ms, see .approval.is-leaving).
   const card = usePresence(approval, 160);
   const lastBlock = blocks.at(-1);
+  const firstTask = useMemo(() => {
+    for (const block of blocks) {
+      if (block.kind === "user" && block.item.mode !== "steer") {
+        return block.item.text;
+      }
+    }
+    return null;
+  }, [blocks]);
   const waiting =
     phase.kind === "thinking" &&
     !(lastBlock?.kind === "assistant" && lastBlock.item.streaming);
@@ -112,7 +120,10 @@ export function SessionLayout({
 
   return (
     <div className="session">
-      <SessionHeader session={session} ended={transcript.closed} onBack={onBack} onEnd={onEnd} />
+      <SessionHeader
+        session={session}
+        firstTask={firstTask}
+        ended={transcript.closed} onBack={onBack} onEnd={onEnd} />
       <main className="session-scroll" ref={scroll.scrollRef} tabIndex={-1}>
         <div className="session-column" ref={scroll.contentRef}>
           <Transcript blocks={blocks} now={now} waiting={waiting} cwd={session?.cwd} />

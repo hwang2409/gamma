@@ -7,17 +7,25 @@ import { ThemeToggle } from "./ThemeToggle";
 
 interface Props {
   session: SessionView | null;
+  /** The first task in the transcript; names the session before the backend has. */
+  firstTask: string | null;
   ended: boolean;
   onBack: () => void;
   onEnd: () => void;
 }
 
 /** What a session is called: its zeta name, else what was asked first. */
-export function sessionTitle(session: SessionView | null): string {
-  return session?.session_name || session?.first_prompt || "New session";
+export function sessionTitle(session: SessionView | null, firstTask: string | null = null): string {
+  return session?.session_name || session?.first_prompt || firstTask || "New session";
 }
 
-export function SessionHeader({ session, ended, onBack, onEnd }: Props): React.JSX.Element {
+export function SessionHeader({
+  session,
+  firstTask,
+  ended,
+  onBack,
+  onEnd,
+}: Props): React.JSX.Element {
   return (
     <header className="topbar">
       <button
@@ -30,7 +38,7 @@ export function SessionHeader({ session, ended, onBack, onEnd }: Props): React.J
         <Icon name="chevronLeft" />
       </button>
       <div className="topbar-title">
-        <h1>{sessionTitle(session)}</h1>
+        <h1>{sessionTitle(session, firstTask)}</h1>
         {session !== null && (
           <p className="topbar-meta">
             {session.cwd && (
