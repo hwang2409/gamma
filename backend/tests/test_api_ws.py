@@ -231,18 +231,28 @@ async def test_send_steer_abort_reach_the_harness(harness: Harness) -> None:
     socket = await harness.connect(session_id)
     await recv_until(socket, "snapshot")
     connection = harness.runtime.last
+    seen: list[dict[str, Any]] = []
+
+    async def collect(count: int) -> None:
+        while len(seen) < count:
+            seen.append(await recv_json(socket))
 
     await socket.send(json.dumps({"type": "send", "text": "hello"}))
-    ack = await recv_until(socket, "ack")
-    assert ack["command"] == "send"
-    assert ack["result"]["accepted"] is True
-
     await socket.send(json.dumps({"type": "steer", "text": "also tests"}))
-    assert (await recv_until(socket, "ack"))["command"] == "steer"
-
     await socket.send(json.dumps({"type": "abort"}))
-    assert (await recv_until(socket, "ack"))["result"] == {"aborted": True}
+    # one ready event, three acks, and two echoed user messages
+    await collect(6)
 
+    acks = [frame for frame in seen if frame["type"] == "ack"]
+    assert [frame["command"] for frame in acks] == ["send", "steer", "abort"]
+    assert acks[0]["result"]["accepted"] is True
+    assert acks[2]["result"] == {"aborted": True}
+
+    echoes = [frame["payload"] for frame in seen if frame.get("event") == "gamma_user_message"]
+    assert echoes == [
+        {"text": "hello", "mode": "send"},
+        {"text": "also tests", "mode": "steer"},
+    ]
     assert ("send", {"text": "hello"}) in connection.calls
     assert ("steer", {"text": "also tests"}) in connection.calls
     assert ("abort", {}) in connection.calls
@@ -279,6 +289,14 @@ async def test_approval_flows_through_and_clears_the_pending_entry(
         "approve",
         {"request_id": "tool-call-1", "scope": "always_tool"},
     ) in connection.calls
+    decision = await recv_until(socket, "event")
+    while decision["event"] != "gamma_approval_decision":
+        decision = await recv_until(socket, "event")
+    assert decision["payload"] == {
+        "request_id": "tool-call-1",
+        "decision": "approve",
+        "scope": "always_tool",
+    }
     await socket.close()
 
 

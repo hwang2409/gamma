@@ -182,10 +182,17 @@ class GammaSession:
         return await self._connection.call(method, params)
 
     async def send(self, text: str) -> dict[str, Any]:
-        return await self.call("send", {"text": text})
+        result = await self.call("send", {"text": text})
+        # zeta does not echo the user message, so gamma publishes it. Every
+        # tab, including one that attaches later, then sees the same
+        # conversation from the ring buffer alone.
+        self.publish_local("gamma_user_message", {"text": text, "mode": "send"})
+        return result
 
     async def steer(self, text: str) -> dict[str, Any]:
-        return await self.call("steer", {"text": text})
+        result = await self.call("steer", {"text": text})
+        self.publish_local("gamma_user_message", {"text": text, "mode": "steer"})
+        return result
 
     async def abort(self) -> dict[str, Any]:
         return await self.call("abort", {})
@@ -198,6 +205,14 @@ class GammaSession:
             params["scope"] = scope
         result = await self.call("approve" if approve else "deny", params)
         self.pending_approvals.pop(request_id, None)
+        self.publish_local(
+            "gamma_approval_decision",
+            {
+                "request_id": request_id,
+                "decision": "approve" if approve else "deny",
+                "scope": scope,
+            },
+        )
         return result
 
     async def status(self) -> StatusResult:
