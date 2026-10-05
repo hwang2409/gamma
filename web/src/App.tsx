@@ -9,6 +9,7 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 
 import { AuthScreen } from "./components/AuthScreen";
+import { Node } from "./components/Node";
 import { SessionPage } from "./components/SessionPage";
 import { StartPage } from "./components/StartPage";
 import { api, clearToken, isAuthError, readToken, writeToken } from "./lib/api";
@@ -74,7 +75,14 @@ function Shell(): React.JSX.Element {
 
   switch (auth.kind) {
     case "checking":
-      return <main className="splash" aria-busy="true" />;
+      return (
+        <main className="splash" aria-busy="true">
+          <p className="splash-note">
+            <Node kind="live" />
+            Connecting to the backend…
+          </p>
+        </main>
+      );
     case "needed":
       return (
         <AuthScreen
@@ -87,13 +95,19 @@ function Shell(): React.JSX.Element {
       );
     case "offline":
       return (
-        <main className="auth">
-          <div className="auth-card">
-            <p className="wordmark">gamma</p>
-            <h1>Backend unreachable</h1>
-            <p className="auth-help">{auth.message}</p>
-            <p className="auth-help">
-              Start it with <code>make dev</code> or <code>make backend</code>.
+        <main className="gate">
+          <div className="gate-body">
+            <p className="wordmark">
+              <Node kind="task" />
+              gamma
+            </p>
+            <h1>The backend is not running</h1>
+            <p className="gate-help">
+              Start it with <code>make dev</code> or <code>make backend</code>, then try again.
+            </p>
+            <p className="field-error">
+              <Node kind="error" />
+              {auth.message}
             </p>
             <button type="button" className="button primary block" onClick={() => void check()}>
               Try again

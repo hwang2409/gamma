@@ -28,6 +28,7 @@ export const fixtureSession: SessionView = {
   created_at: 0,
   last_activity: 0,
   session_name: "Fix the failing health check",
+  first_prompt: "The health check test fails on main. Find out why and fix it, then summarize the change.",
   capabilities: [],
 };
 
@@ -141,7 +142,7 @@ function script(variant: FixtureVariant): Step[] {
     ...say(DIAGNOSIS),
     commit(DIAGNOSIS),
     ["tool_start", call("t5", "edit", editArgs), 0.2],
-    ["approval_request", { request_id: "r5", ...call("t5", "edit", editArgs) }, 0.1],
+    ["approval_request", { request_id: "r5", ...call("t5", "edit", editArgs), approval_display: { effective_cwd: "/Users/ada/code/acme-api", resolved_path: "/Users/ada/code/acme-api/src/app.py" } }, 0.1],
     ["gamma_approval_decision", { request_id: "r5", decision: "approve", scope: "once" }, 3],
     ["tool_start", call("t5", "edit", editArgs), 0.05],
     ["tool_end", { ...call("t5", "edit", editArgs), tool_result: { content: "Edited src/app.py (1 replacement).", is_error: false } }, 0.2],
@@ -173,7 +174,7 @@ function script(variant: FixtureVariant): Step[] {
     ["tool_start", call("t12", "bash", { command: "pytest -q" }), 0.2],
     ["tool_output", { ...call("t12", "bash", { command: "pytest -q" }), output: "......" }, 0.3],
     ["tool_start", call("t13", "bash", commitArgs), 0.1],
-    ["approval_request", { request_id: "r13", ...call("t13", "bash", commitArgs) }, 0.1],
+    ["approval_request", { request_id: "r13", ...call("t13", "bash", commitArgs), approval_display: { effective_cwd: "/Users/ada/code/acme-api" } }, 0.1],
   ];
 }
 

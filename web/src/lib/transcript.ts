@@ -10,7 +10,7 @@
  *    final message never both appear.
  */
 
-import type { RunState, SessionView, ToolCall } from "./protocol";
+import type { ApprovalDisplay, RunState, SessionView, ToolCall } from "./protocol";
 
 export interface UserItem {
   kind: "user";
@@ -59,6 +59,10 @@ export interface ApprovalItem {
   args: Record<string, unknown>;
   phase: ApprovalPhase;
   scope: "once" | "always_tool" | null;
+  /** What zeta resolved for this request (cwd, path, project file), if anything. */
+  display: ApprovalDisplay | null;
+  /** True when a sub-agent asked. */
+  delegated: boolean;
 }
 
 export interface NoticeItem {
@@ -134,7 +138,13 @@ function applySnapshot(state: TranscriptState, session: SessionView): Transcript
   let items = state.items;
   for (const approval of session.pending_approvals) {
     if (!items.some((item) => item.kind === "approval" && item.requestId === approval.request_id)) {
-      items = [...items, approvalItem(state.cursor, approval.request_id, approval.tool_call)];
+      items = [
+        ...items,
+        approvalItem(state.cursor, approval.request_id, approval.tool_call, {
+          display: approvalDisplay(approval.approval_display),
+          delegated: approval.delegated === true,
+        }),
+      ];
     }
   }
   return {
@@ -198,14 +208,18 @@ function applyEvent(state: TranscriptState, event: GammaEvent): TranscriptState 
       return endTool(next, event.at, toolCall(payload.tool_call), payload.tool_result);
 
     case "approval_request":
-      return requestApproval(next, event.cursor, text(payload.request_id), toolCall(payload.tool_call));
+      return requestApproval(next, event.cursor, text(payload.request_id), toolCall(payload.tool_call), {
+        display: approvalDisplay(payload.approval_display),
+        delegated: payload.delegated === true,
+      });
 
     case "approval_end":
       return closeApprovalFor(next, toolCall(payload.tool_call).id);
 
     case "turn_end":
-      // zeta ends every model turn; the run itself ends at `agent_end`.
-      return { ...closeStream(next), state: "idle" };
+      // zeta ends every model turn; the run itself ends at `agent_end`, so
+      // the agent is still working here (the backend derives it the same way).
+      return closeStream(next);
 
     case "agent_end":
       return { ...endRun(closeStream(next), event.at), state: "idle" };
@@ -255,8 +269,16 @@ function notice(cursor: number, level: "info" | "error", body: string): NoticeIt
   return { kind: "notice", id: `notice-${cursor}`, cursor, level, text: body };
 }
 
-function approvalItem(cursor: number, requestId: string, call: ToolCall): ApprovalItem {
+type ApprovalContext = Pick<ApprovalItem, "display" | "delegated">;
+
+function approvalItem(
+  cursor: number,
+  requestId: string,
+  call: ToolCall,
+  context: ApprovalContext,
+): ApprovalItem {
   return {
+    ...context,
     kind: "approval",
     id: `approval-${requestId}`,
     cursor,
@@ -432,6 +454,7 @@ function requestApproval(
   cursor: number,
   requestId: string,
   call: ToolCall,
+  context: ApprovalContext,
 ): TranscriptState {
   const existing = state.items.find(
     (item) => item.kind === "approval" && item.requestId === requestId,
@@ -443,7 +466,7 @@ function requestApproval(
   const withTool = state.items.some((item) => item.kind === "tool" && item.id === toolId(call.id))
     ? updateTool(base, call.id, (item) => ({ ...item, phase: "awaiting_approval" }))
     : base;
-  return addItem(withTool, approvalItem(cursor, requestId, call));
+  return addItem(withTool, approvalItem(cursor, requestId, call, context));
 }
 
 function decideApproval(
@@ -501,6 +524,33 @@ function toolCall(value: unknown): ToolCall {
     name: text(raw.name) || "tool",
     arguments: asRecord(raw.arguments),
   };
+}
+
+const DISPLAY_TEXT = [
+  "effective_cwd",
+  "resolved_path",
+  "project_id",
+  "project_name",
+  "filename",
+  "preview",
+] as const;
+
+/**
+ * The approval facts zeta resolved, keeping only fields of the documented
+ * type. Text is rendered as text, never markup.
+ */
+function approvalDisplay(value: unknown): ApprovalDisplay | null {
+  const raw = asRecord(value);
+  const display: ApprovalDisplay = {};
+  for (const key of DISPLAY_TEXT) {
+    if (typeof raw[key] === "string" && raw[key] !== "") {
+      display[key] = raw[key];
+    }
+  }
+  if (typeof raw.utf8_bytes === "number" && raw.utf8_bytes >= 0) {
+    display.utf8_bytes = raw.utf8_bytes;
+  }
+  return Object.keys(display).length > 0 ? display : null;
 }
 
 function messageText(value: unknown): { text: string; thinking: string } {

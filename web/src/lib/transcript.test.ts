@@ -53,6 +53,7 @@ const session: SessionView = {
   created_at: 0,
   last_activity: 0,
   session_name: null,
+  first_prompt: null,
   capabilities: [],
 };
 

@@ -1,6 +1,6 @@
 /** The top bar of a session: back, what this session is, theme, end. */
 
-import { baseName, shortPath } from "../lib/format";
+import { baseName } from "../lib/format";
 import type { SessionView } from "../lib/protocol";
 import { Icon } from "./Icon";
 import { ThemeToggle } from "./ThemeToggle";
@@ -12,35 +12,33 @@ interface Props {
   onEnd: () => void;
 }
 
+/** What a session is called: its zeta name, else what was asked first. */
+export function sessionTitle(session: SessionView | null): string {
+  return session?.session_name || session?.first_prompt || "New session";
+}
+
 export function SessionHeader({ session, ended, onBack, onEnd }: Props): React.JSX.Element {
-  const title = session?.session_name || baseName(session?.cwd) || "Untitled session";
-  const model = session ? `${session.provider}${session.model ? ` / ${session.model}` : ""}` : "";
   return (
     <header className="topbar">
       <button
         type="button"
-        className="ghost-button back-button"
+        className="icon-button back-button"
         onClick={onBack}
         aria-label="Back to sessions"
+        title="Back to sessions"
       >
-        <Icon name="chevronLeft" size={14} />
-        <span aria-hidden="true">Sessions</span>
+        <Icon name="chevronLeft" />
       </button>
       <div className="topbar-title">
-        <h1>{title}</h1>
+        <h1>{sessionTitle(session)}</h1>
         {session !== null && (
           <p className="topbar-meta">
-            <span>{model}</span>
             {session.cwd && (
-              <>
-                <span className="dot-sep" aria-hidden="true">
-                  ·
-                </span>
-                <span className="mono" title={session.cwd}>
-                  {shortPath(session.cwd)}
-                </span>
-              </>
+              <span className="mono" title={session.cwd}>
+                {baseName(session.cwd)}
+              </span>
             )}
+            <span>{session.model ?? session.provider}</span>
           </p>
         )}
       </div>

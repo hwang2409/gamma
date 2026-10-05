@@ -1,19 +1,24 @@
 /**
- * Tool calls: one compact row each, grouped when they run back to back.
+ * Tool calls: one ledger line each on the spine, grouped when they run back
+ * to back.
  *
- * A row reads `bash  pytest -q   1.2s ✓`. It expands to the full arguments
- * and output. A failed call shows the first line of its error without
- * expanding. A finished group of more than a few calls folds into one
- * summary line, but failed calls stay visible.
+ * A line reads `bash  pytest -q            1.2s`, with a node whose shape
+ * says the state. It opens in place to the full arguments and output. A
+ * failed call shows the first line of its error without opening. A finished
+ * group of several calls folds into one summary line; failed calls stay
+ * visible.
  */
 
 import { useState } from "react";
 
 import { formatSeconds, toolTarget } from "../lib/format";
+import { languageForPath } from "../lib/highlight";
 import type { ToolPhase } from "../lib/transcript";
 import { toolSeconds, type ToolGroup as Group, type ToolRow as Row } from "../lib/view";
 import { CollapsibleText } from "./Collapsible";
-import { Icon, Spinner } from "./Icon";
+import { Icon } from "./Icon";
+import { Node, type NodeKind } from "./Node";
+import { Reveal } from "./Reveal";
 
 const FOLD_AT = 4;
 
@@ -24,6 +29,17 @@ const PHASE_LABEL: Record<ToolPhase, string> = {
   error: "failed",
   denied: "denied",
 };
+
+const PHASE_NODE: Record<ToolPhase, NodeKind> = {
+  awaiting_approval: "waiting",
+  running: "live",
+  done: "done",
+  error: "error",
+  denied: "denied",
+};
+
+/** Tools whose output is the content of the file named by `path`. */
+const FILE_OUTPUT_TOOLS = new Set(["read", "read_file", "cat", "view"]);
 
 const finished = (row: Row) => row.phase !== "running" && row.phase !== "awaiting_approval";
 
@@ -43,16 +59,19 @@ export function ToolGroup({ group, now }: { group: Group; now: number }): React.
       {foldable && (
         <button
           type="button"
-          className="tool-group-head"
+          className="tool-line tool-group-head"
           aria-expanded={!folded}
           onClick={() => setUnfolded(!unfolded)}
         >
-          <Icon name={folded ? "chevronRight" : "chevronDown"} size={14} className="chevron" />
-          <span>
+          <Node kind="done" className="is-stack" />
+          <span className="tool-summary">
             {group.rows.length} tool calls
-            {failed.length > 0 && <span className="danger-text"> · {failed.length} failed</span>}
+            {failed.length > 0 && <strong>, {failed.length} failed</strong>}
           </span>
-          <span className="tool-duration">{formatSeconds(seconds)}</span>
+          <span className="tool-meta">
+            <span className="tool-duration">{formatSeconds(seconds)}</span>
+          </span>
+          <Icon name="chevronRight" size={14} className="chevron" />
         </button>
       )}
       {visible.length > 0 && (
@@ -74,6 +93,9 @@ function ToolRow({ row, now }: { row: Row; now: number }): React.JSX.Element {
   const errorLine = row.phase === "error" ? firstLine(output) : "";
   const decision = approvalNote(row);
   const detailsId = `${row.id}-details`;
+  const path = typeof row.args.path === "string" ? row.args.path : null;
+  const outputLanguage =
+    row.phase !== "error" && FILE_OUTPUT_TOOLS.has(row.name) ? languageForPath(path) : null;
 
   return (
     <li className={`tool-row phase-${row.phase}`}>
@@ -84,31 +106,36 @@ function ToolRow({ row, now }: { row: Row; now: number }): React.JSX.Element {
         aria-controls={detailsId}
         onClick={() => setOpen(!open)}
       >
-        <PhaseIcon phase={row.phase} />
+        <Node kind={PHASE_NODE[row.phase]} />
         <span className="tool-name">{row.name}</span>
         <span className="tool-target">{target}</span>
         <span className="tool-meta">
           {decision !== null && <span className="tool-decision">{decision}</span>}
-          {row.phase === "awaiting_approval" || row.phase === "denied" ? (
+          {row.phase === "awaiting_approval" || row.phase === "denied" || row.phase === "error" ? (
             <span className="tool-phase">{PHASE_LABEL[row.phase]}</span>
           ) : (
-            tool !== null && (
-              <span className="tool-duration">{formatSeconds(toolSeconds(tool, now))}</span>
-            )
+            <span className="visually-hidden">{PHASE_LABEL[row.phase]}</span>
           )}
-          <span className="visually-hidden">{PHASE_LABEL[row.phase]}</span>
+          {tool !== null && row.phase !== "denied" && row.phase !== "awaiting_approval" && (
+            <span className="tool-duration">{formatSeconds(toolSeconds(tool, now))}</span>
+          )}
         </span>
-        <Icon name={open ? "chevronDown" : "chevronRight"} size={14} className="chevron" />
+        <Icon name="chevronRight" size={14} className="chevron" />
       </button>
-      {!open && errorLine !== "" && <p className="tool-error-line">{errorLine}</p>}
-      {open && (
-        <div className="tool-details" id={detailsId}>
+      {errorLine !== "" && (
+        <p className="tool-error-line" hidden={open}>
+          {errorLine}
+        </p>
+      )}
+      <Reveal open={open} id={detailsId}>
+        <div className="tool-well">
           <ToolArguments args={row.args} />
           {output !== "" ? (
             <CollapsibleText
               className={row.phase === "error" ? "tool-output is-error" : "tool-output"}
               text={output}
               lines={16}
+              language={outputLanguage}
             />
           ) : (
             <p className="tool-empty">
@@ -116,7 +143,7 @@ function ToolRow({ row, now }: { row: Row; now: number }): React.JSX.Element {
             </p>
           )}
         </div>
-      )}
+      </Reveal>
     </li>
   );
 }
@@ -126,6 +153,7 @@ function ToolArguments({ args }: { args: Record<string, unknown> }): React.JSX.E
   if (entries.length === 0) {
     return null;
   }
+  const path = typeof args.path === "string" ? args.path : null;
   return (
     <dl className="tool-args">
       {entries.map(([key, value]) => (
@@ -135,31 +163,19 @@ function ToolArguments({ args }: { args: Record<string, unknown> }): React.JSX.E
             <CollapsibleText
               text={typeof value === "string" ? value : JSON.stringify(value, null, 2)}
               lines={8}
+              language={
+                typeof value !== "string"
+                  ? "json"
+                  : key === "content" || key.endsWith("_string")
+                    ? languageForPath(path)
+                    : null
+              }
             />
           </dd>
         </div>
       ))}
     </dl>
   );
-}
-
-function PhaseIcon({ phase }: { phase: ToolPhase }): React.JSX.Element {
-  switch (phase) {
-    case "running":
-      return (
-        <span className="phase-icon">
-          <Spinner size={12} />
-        </span>
-      );
-    case "done":
-      return <Icon name="check" size={14} className="phase-icon" />;
-    case "error":
-      return <Icon name="x" size={14} className="phase-icon" />;
-    case "denied":
-      return <Icon name="ban" size={14} className="phase-icon" />;
-    case "awaiting_approval":
-      return <Icon name="pause" size={14} className="phase-icon" />;
-  }
 }
 
 function approvalNote(row: Row): string | null {

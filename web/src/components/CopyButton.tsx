@@ -24,7 +24,11 @@ export function CopyButton({ text, label = "Copy" }: { text: string; label?: str
       }}
       aria-label={copied ? "Copied" : label}
     >
-      <Icon name={copied ? "check" : "copy"} size={14} />
+      {/* Both icons stay mounted and cross-fade, so the change animates both ways. */}
+      <span className="icon-swap" data-on={copied}>
+        <Icon name="check" size={14} className="swap-on" />
+        <Icon name="copy" size={14} className="swap-off" />
+      </span>
       <span aria-hidden="true">{copied ? "Copied" : label}</span>
     </button>
   );

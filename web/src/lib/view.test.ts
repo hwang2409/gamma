@@ -104,7 +104,7 @@ describe("runPhase", () => {
 
   it("stays busy between model turns until agent_end", () => {
     const between = play(["agent_start"], ["turn_start"], ["turn_end"]);
-    expect(between.state).toBe("idle");
+    expect(between.state).toBe("running");
     expect(isBusy(between)).toBe(true);
     expect(runPhase(between)).toEqual({ kind: "thinking" });
 

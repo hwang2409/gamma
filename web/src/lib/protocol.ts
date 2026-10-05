@@ -8,9 +8,26 @@ export interface ToolCall {
   arguments: Record<string, unknown>;
 }
 
+/**
+ * Facts zeta resolved for an approval, beyond the model's arguments: where a
+ * command runs and the path it touches, or the project file a write targets.
+ * Every field is optional; zeta sends only what it resolved.
+ */
+export interface ApprovalDisplay {
+  effective_cwd?: string | null;
+  resolved_path?: string | null;
+  project_id?: string | null;
+  project_name?: string | null;
+  filename?: string | null;
+  utf8_bytes?: number | null;
+  preview?: string | null;
+}
+
 export interface PendingApproval {
   request_id: string;
   tool_call: ToolCall;
+  approval_display?: ApprovalDisplay | null;
+  delegated?: boolean;
 }
 
 export interface SessionView {
@@ -28,6 +45,8 @@ export interface SessionView {
   created_at: number;
   last_activity: number;
   session_name: string | null;
+  /** The first message sent in this gamma session, whitespace collapsed. */
+  first_prompt: string | null;
   capabilities: string[];
 }
 

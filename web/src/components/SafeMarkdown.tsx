@@ -2,19 +2,22 @@
  * Markdown for model text, with raw HTML off.
  *
  * GitHub-flavored extras (tables, task lists, strikethrough) come from
- * remark-gfm. Fenced code renders through CodeBlock, with its language and a
- * copy button.
+ * remark-gfm. Fenced code renders through CodeBlock, with its language, a
+ * copy button, and greyscale syntax highlighting once the lazy highlighter
+ * has loaded.
  */
 
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { useHighlight } from "../lib/highlight";
 import { CopyButton } from "./CopyButton";
 
 const LONG_CODE_LINES = 28;
 
 function CodeBlock({ language, code }: { language: string; code: string }): React.JSX.Element {
   const lines = code.split("\n").length;
+  const highlighted = useHighlight(code, language);
   return (
     <figure className="code-block">
       <figcaption>
@@ -22,7 +25,7 @@ function CodeBlock({ language, code }: { language: string; code: string }): Reac
         <CopyButton text={code} label="Copy" />
       </figcaption>
       <pre className={lines > LONG_CODE_LINES ? "long" : undefined} tabIndex={0}>
-        <code>{code}</code>
+        <code>{highlighted ?? code}</code>
       </pre>
     </figure>
   );

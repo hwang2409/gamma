@@ -94,18 +94,11 @@ export function Composer({
       />
       <div className="composer-bar">
         <span className="composer-hint">
-          {busy ? (
-            <>
-              <Icon name="steer" size={14} />
-              Messages steer the running turn
-            </>
-          ) : (
-            "Enter to send, Shift+Enter for a new line"
-          )}
+          {busy ? "Enter steers the running turn" : "Enter sends, Shift+Enter adds a line"}
         </span>
         <span className="composer-actions">
           {busy && (
-            <button type="button" className="button" onClick={onAbort} disabled={disabled}>
+            <button type="button" className="button quiet" onClick={onAbort} disabled={disabled}>
               <span className="stop-square" aria-hidden="true" />
               Stop <kbd>Esc</kbd>
             </button>
@@ -113,12 +106,12 @@ export function Composer({
           {(!busy || !empty) && (
             <button
               type="submit"
-              className="button primary send-button"
+              className="send-button"
               disabled={disabled || empty}
               aria-label={busy ? "Steer" : "Send"}
+              title={busy ? "Steer" : "Send"}
             >
-              {busy ? <Icon name="steer" size={14} /> : <Icon name="arrowUp" size={14} />}
-              <span aria-hidden="true">{busy ? "Steer" : "Send"}</span>
+              <Icon name={busy ? "steer" : "arrowUp"} size={16} />
             </button>
           )}
         </span>
