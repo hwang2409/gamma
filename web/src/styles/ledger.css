@@ -65,7 +65,7 @@
 }
 
 .transcript .node-done.is-stack {
-  --node-ring: 3px -3px 0 -1px var(--smoke);
+  --node-ring: 0 0 0 2px var(--paper), 0 0 0 3.5px var(--ash);
 }
 
 /* --- the task that heads a run ------------------------------------------ */
@@ -239,6 +239,17 @@
   left: calc(var(--spine-x) - var(--node) / 2 + 0.5px);
 }
 
+/* the spine starts at the node and waits for the first action */
+.transcript-empty::after {
+  content: "";
+  position: absolute;
+  top: calc(18vh + 28px);
+  left: var(--spine-x);
+  width: 1px;
+  height: 96px;
+  background: linear-gradient(to bottom, var(--smoke), transparent);
+}
+
 .transcript-empty h2 {
   font-size: var(--text-lg);
   letter-spacing: -0.012em;
@@ -407,6 +418,11 @@
 .tool-error-line::before {
   content: "→ ";
   color: var(--ash);
+}
+
+/* the open well shares its edges with the row highlight above it */
+.tool-row > .reveal {
+  margin: 0 -8px;
 }
 
 .tool-well {

@@ -143,6 +143,14 @@ test("fixture: keyboard approves, tool groups expand, jump to latest", async ({ 
   await folded.click();
   await expect(page.getByText("tests/conftest.py")).toBeVisible();
 
+  // Open a failed tool call and the first thinking line, for a look at the wells.
+  const failedRow = page.getByRole("button", { name: /pytest -q tests\/test_api.py::test_missing/ });
+  await page.getByRole("button", { name: /Thought/ }).first().click();
+  await failedRow.click();
+  await expect(failedRow).toHaveAttribute("aria-expanded", "true");
+  await failedRow.evaluate((node) => node.scrollIntoView({ block: "start" }));
+  await shoot(page, "fixture-expanded-desktop-light");
+
   await page.locator(".session-scroll").evaluate((node) => node.scrollTo({ top: 0 }));
   const jump = page.getByRole("button", { name: "Jump to latest" });
   await expect(jump).toBeVisible();

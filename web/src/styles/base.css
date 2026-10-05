@@ -382,7 +382,11 @@ textarea::placeholder {
 }
 
 .node-done.is-stack {
-  box-shadow: 3px -3px 0 -1px var(--smoke);
+  --node: 5px;
+  background: var(--ash);
+  box-shadow:
+    0 0 0 2px var(--paper),
+    0 0 0 3.5px var(--ash);
 }
 
 .node-live {

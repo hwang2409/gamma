@@ -65,7 +65,7 @@
   font-size: var(--text-sm);
 }
 
-.dock-error > span {
+.dock-error > span:not(.node) {
   flex: 1;
   min-width: 0;
 }
@@ -421,6 +421,13 @@
   display: inline-flex;
   gap: var(--s-3);
   white-space: nowrap;
+}
+
+@media (max-width: 480px) {
+  /* the phase matters more than the token counts on a phone */
+  .run-usage {
+    display: none;
+  }
 }
 
 @media (max-width: 640px) {
