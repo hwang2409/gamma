@@ -1,237 +1,292 @@
 /**
- * The start page: resume a zeta session, or start a new one.
+ * The start page: start a session, return to a running one, or resume a
+ * past zeta session.
  *
  * Providers, models, and directories all come from the server; the browser
  * cannot name a provider or a directory the backend has not allowed.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { ApiError, api, readToken, writeToken } from "../lib/api";
+import { api, isAuthError } from "../lib/api";
+import { baseName, relativeTime, shortPath } from "../lib/format";
 import type { OptionsResponse, SessionView, ZetaSessionSummary } from "../lib/protocol";
+import { Icon, Spinner } from "./Icon";
+import { ThemeToggle } from "./ThemeToggle";
 
 interface Props {
+  options: OptionsResponse;
   onOpen: (session: SessionView) => void;
+  onUnauthorized: () => void;
 }
 
-export function StartPage({ onOpen }: Props): React.JSX.Element {
-  const [token, setToken] = useState(readToken());
-  const [options, setOptions] = useState<OptionsResponse | null>(null);
-  const [provider, setProvider] = useState("");
-  const [model, setModel] = useState("");
+const RECENT_DIRECTORIES = 5;
+
+export function StartPage({ options, onOpen, onUnauthorized }: Props): React.JSX.Element {
+  const [provider, setProvider] = useState(
+    options.default_provider ?? options.providers[0]?.name ?? "",
+  );
+  const models = options.providers.find((item) => item.name === provider)?.models ?? [];
+  const [model, setModel] = useState(models[0] ?? "");
   const [cwd, setCwd] = useState("");
-  const [resumable, setResumable] = useState<ZetaSessionSummary[]>([]);
-  const [open, setOpen] = useState<SessionView[]>([]);
-  const [busy, setBusy] = useState(false);
+  const [running, setRunning] = useState<SessionView[]>([]);
+  const [recent, setRecent] = useState<ZetaSessionSummary[] | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const now = Date.now();
 
-  const loadOptions = useCallback(async () => {
-    setError(null);
-    try {
-      const loaded = await api.options();
-      setOptions(loaded);
-      const first = loaded.default_provider ?? loaded.providers[0]?.name ?? "";
-      setProvider((current) => current || first);
-      setCwd((current) => current || loaded.allowed_roots[0] || "");
-      setOpen((await api.listSessions()).sessions);
-    } catch (cause) {
-      setError(describe(cause));
-    }
-  }, []);
+  const fail = useCallback(
+    (cause: unknown) => {
+      if (isAuthError(cause)) {
+        onUnauthorized();
+      } else {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
+    },
+    [onUnauthorized],
+  );
 
   useEffect(() => {
-    if (token !== "") {
-      void loadOptions();
-    }
-  }, [token, loadOptions]);
+    api
+      .listSessions()
+      .then((body) => setRunning(body.sessions))
+      .catch(fail);
+  }, [fail]);
 
   useEffect(() => {
-    const models = options?.providers.find((item) => item.name === provider)?.models ?? [];
-    setModel(models[0] ?? "");
-  }, [provider, options]);
-
-  useEffect(() => {
-    if (provider === "" || token === "") {
+    if (provider === "") {
       return;
     }
     let current = true;
+    setRecent(null);
     api
       .zetaSessions(provider)
       .then((body) => {
         if (current) {
-          setResumable(body.sessions);
+          setRecent(body.sessions);
         }
       })
       .catch((cause: unknown) => {
         if (current) {
-          setError(describe(cause));
+          setRecent([]);
+          fail(cause);
         }
       });
     return () => {
       current = false;
     };
-  }, [provider, token]);
+  }, [provider, fail]);
 
-  const create = async (resumeId?: string, resumeCwd?: string) => {
-    setBusy(true);
+  // Directories used by recent sessions come first in the picker.
+  const recentDirectories = useMemo(() => {
+    const allowed = new Set(options.directories);
+    const seen: string[] = [];
+    for (const session of recent ?? []) {
+      if (allowed.has(session.cwd) && !seen.includes(session.cwd)) {
+        seen.push(session.cwd);
+      }
+    }
+    return seen.slice(0, RECENT_DIRECTORIES);
+  }, [recent, options.directories]);
+  const chosenCwd = cwd || recentDirectories[0] || options.directories[0] || "";
+
+  const create = async (key: string, body: { cwd: string; resume?: string }) => {
+    setBusy(key);
     setError(null);
     try {
-      const session = await api.createSession({
-        provider,
-        model: model || null,
-        cwd: resumeCwd ?? cwd,
-        resume_session_id: resumeId ?? null,
-      });
-      onOpen(session);
+      onOpen(
+        await api.createSession({
+          provider,
+          model: model || null,
+          cwd: body.cwd,
+          resume_session_id: body.resume ?? null,
+        }),
+      );
     } catch (cause) {
-      setError(describe(cause));
+      fail(cause);
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
-  const saveToken = (event: React.FormEvent) => {
-    event.preventDefault();
-    writeToken(token);
-    void loadOptions();
-  };
-
-  const models = options?.providers.find((item) => item.name === provider)?.models ?? [];
-
   return (
-    <main className="start-page">
-      <h1>gamma</h1>
-      <p className="subtitle">A web front end for the zeta agent harness.</p>
+    <div className="start">
+      <header className="start-head">
+        <p className="wordmark">gamma</p>
+        <ThemeToggle />
+      </header>
 
-      <section className="panel">
-        <h2>Access token</h2>
-        <p className="hint">
-          The backend prints a token once when it starts. Paste it here; it stays in this tab
-          only.
-        </p>
-        <form className="row" onSubmit={saveToken}>
-          <label className="visually-hidden" htmlFor="token">
-            Access token
-          </label>
-          <input
-            id="token"
-            type="password"
-            value={token}
-            autoComplete="off"
-            onChange={(event) => setToken(event.target.value)}
-          />
-          <button type="submit">Use token</button>
-        </form>
-      </section>
-
-      {error !== null && (
-        <p className="notice error" role="alert">
-          {error}
-        </p>
-      )}
-
-      {options !== null && (
-        <>
-          <section className="panel">
-            <h2>New session</h2>
-            <div className="grid">
-              <label htmlFor="provider">
-                Provider
-                <select
-                  id="provider"
-                  value={provider}
-                  onChange={(event) => setProvider(event.target.value)}
-                >
-                  {options.providers.map((item) => (
-                    <option key={item.name} value={item.name}>
-                      {item.name}
+      <main className="start-main">
+        <form
+          className="new-session"
+          aria-labelledby="new-session-title"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void create("new", { cwd: chosenCwd });
+          }}
+        >
+          <h1 id="new-session-title">New session</h1>
+          <div className="field-row">
+            <label className="field">
+              <span className="field-label">Provider</span>
+              <select
+                className="input"
+                value={provider}
+                onChange={(event) => {
+                  const next = event.target.value;
+                  setProvider(next);
+                  setModel(options.providers.find((item) => item.name === next)?.models[0] ?? "");
+                }}
+              >
+                {options.providers.map((item) => (
+                  <option key={item.name} value={item.name}>
+                    {item.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span className="field-label">Model</span>
+              <select
+                className="input"
+                value={model}
+                disabled={models.length === 0}
+                onChange={(event) => setModel(event.target.value)}
+              >
+                {models.length === 0 && <option value="">default</option>}
+                {models.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <label className="field">
+            <span className="field-label">Directory</span>
+            <select
+              className="input mono"
+              value={chosenCwd}
+              onChange={(event) => setCwd(event.target.value)}
+            >
+              {recentDirectories.length > 0 && (
+                <optgroup label="Recent">
+                  {recentDirectories.map((path) => (
+                    <option key={`recent-${path}`} value={path}>
+                      {shortPath(path, 4)}
                     </option>
                   ))}
-                </select>
-              </label>
-              <label htmlFor="model">
-                Model
-                <select
-                  id="model"
-                  value={model}
-                  onChange={(event) => setModel(event.target.value)}
-                >
-                  {models.map((name) => (
-                    <option key={name} value={name}>
-                      {name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label htmlFor="cwd">
-                Directory
-                <select id="cwd" value={cwd} onChange={(event) => setCwd(event.target.value)}>
-                  {options.directories.map((path) => (
+                </optgroup>
+              )}
+              <optgroup label="All allowed directories">
+                {options.directories
+                  .filter((path) => !recentDirectories.includes(path))
+                  .map((path) => (
                     <option key={path} value={path}>
-                      {path}
+                      {shortPath(path, 4)}
                     </option>
                   ))}
-                </select>
-              </label>
-            </div>
-            <p className="hint">
-              Approval mode: {options.approval_mode}. Tool policy is set on the server.
-            </p>
-            <button type="button" disabled={busy || provider === ""} onClick={() => void create()}>
+              </optgroup>
+            </select>
+          </label>
+          <div className="new-session-foot">
+            <p className="hint">Every tool call that needs approval asks you first.</p>
+            <button
+              type="submit"
+              className="button primary"
+              disabled={busy !== null || provider === "" || chosenCwd === ""}
+            >
+              {busy === "new" ? <Spinner size={12} /> : <Icon name="plus" size={14} />}
               Start session
             </button>
-          </section>
-
-          {open.length > 0 && (
-            <section className="panel">
-              <h2>Open gamma sessions</h2>
-              <ul className="list">
-                {open.map((session) => (
-                  <li key={session.session_id}>
-                    <button type="button" className="link" onClick={() => onOpen(session)}>
-                      {session.provider} / {session.model} &mdash; {session.cwd}
-                    </button>
-                    <span className={`pill state-${session.state}`}>{session.state}</span>
-                  </li>
-                ))}
-              </ul>
-            </section>
+          </div>
+          {error !== null && (
+            <p className="field-error" role="alert">
+              {error}
+            </p>
           )}
+        </form>
 
-          <section className="panel">
-            <h2>Resume a zeta session</h2>
-            {resumable.length === 0 ? (
-              <p className="hint">No sessions for {provider} inside the allowed roots.</p>
-            ) : (
-              <ul className="list">
-                {resumable.map((session) => (
-                  <li key={session.session_id}>
-                    <button
-                      type="button"
-                      className="link"
-                      disabled={busy}
-                      onClick={() => void create(session.session_id, session.cwd)}
-                    >
-                      {session.name || session.first_message_preview || session.session_id}
-                    </button>
-                    <span className="fact mono">{session.cwd}</span>
-                    <span className="fact">{session.updated_at ?? ""}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
+        {running.length > 0 && (
+          <section className="session-list" aria-labelledby="running-title">
+            <h2 id="running-title">Running</h2>
+            <ul>
+              {running.map((session) => (
+                <li key={session.session_id}>
+                  <button type="button" className="session-item" onClick={() => onOpen(session)}>
+                    <span className="session-item-title">
+                      {session.session_name || baseName(session.cwd) || "Untitled session"}
+                    </span>
+                    <span className="session-item-meta">
+                      <span className={`state-chip state-${session.state}`}>
+                        {session.pending_approvals.length > 0
+                          ? "needs approval"
+                          : session.state === "idle"
+                            ? "idle"
+                            : "working"}
+                      </span>
+                      <span>{session.model ?? session.provider}</span>
+                      <span className="mono">{shortPath(session.cwd)}</span>
+                      <span>{relativeTime(session.last_activity * 1000, now)}</span>
+                    </span>
+                    <Icon name="chevronRight" size={14} className="chevron" />
+                  </button>
+                </li>
+              ))}
+            </ul>
           </section>
-        </>
-      )}
-    </main>
-  );
-}
+        )}
 
-function describe(cause: unknown): string {
-  if (cause instanceof ApiError) {
-    return cause.status === 401 || cause.status === 403
-      ? `${cause.message} (check the access token)`
-      : cause.message;
-  }
-  return cause instanceof Error ? cause.message : String(cause);
+        <section className="session-list" aria-labelledby="recent-title">
+          <h2 id="recent-title">Recent</h2>
+          {recent === null ? (
+            <p className="list-empty">
+              <Spinner size={12} /> Loading sessions…
+            </p>
+          ) : recent.length === 0 ? (
+            <p className="list-empty">
+              No past {provider} sessions in the allowed directories yet. Start one above; it will
+              be listed here to resume later.
+            </p>
+          ) : (
+            <ul>
+              {recent.map((session) => (
+                <li key={session.session_id}>
+                  <button
+                    type="button"
+                    className="session-item"
+                    disabled={busy !== null}
+                    onClick={() =>
+                      void create(session.session_id, {
+                        cwd: session.cwd,
+                        resume: session.session_id,
+                      })
+                    }
+                  >
+                    <span className="session-item-title">
+                      {session.name || session.first_message_preview || "Untitled session"}
+                    </span>
+                    <span className="session-item-meta">
+                      <span>{session.model}</span>
+                      <span className="mono">{shortPath(session.cwd)}</span>
+                      {session.updated_at !== null && (
+                        <span>{relativeTime(Date.parse(session.updated_at), now)}</span>
+                      )}
+                    </span>
+                    {busy === session.session_id ? (
+                      <Spinner size={12} />
+                    ) : (
+                      <span className="resume-hint">
+                        Resume <Icon name="chevronRight" size={14} />
+                      </span>
+                    )}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      </main>
+    </div>
+  );
 }

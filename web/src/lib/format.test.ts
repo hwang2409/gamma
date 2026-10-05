@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatCount, formatSeconds, relativeTime, shortPath, toolTarget } from "./format";
+import { baseName, formatCount, formatSeconds, relativeTime, shortPath, toolTarget } from "./format";
 
 describe("toolTarget", () => {
   it("prefers the most telling argument", () => {
@@ -30,6 +30,7 @@ describe("shortPath", () => {
 
 describe("formatSeconds", () => {
   it("scales the unit", () => {
+    expect(formatSeconds(0.02)).toBe("<0.1s");
     expect(formatSeconds(0.42)).toBe("0.4s");
     expect(formatSeconds(12.7)).toBe("12s");
     expect(formatSeconds(185)).toBe("3m 05s");
@@ -54,5 +55,12 @@ describe("relativeTime", () => {
     expect(relativeTime(now - 5 * 60_000, now)).toBe("5m ago");
     expect(relativeTime(now - 3 * 3_600_000, now)).toBe("3h ago");
     expect(relativeTime(now - 2 * 86_400_000, now)).toBe("2d ago");
+  });
+});
+
+describe("baseName", () => {
+  it("keeps the last segment", () => {
+    expect(baseName("/a/b/acme-api/")).toBe("acme-api");
+    expect(baseName(null)).toBe("");
   });
 });

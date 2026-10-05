@@ -55,8 +55,16 @@ export function shortPath(path: string | null | undefined, keep = 3): string {
   return `…/${parts.slice(-keep).join("/")}`;
 }
 
+/** The last segment of a path: `/a/b/acme-api` -> `acme-api`. */
+export function baseName(path: string | null | undefined): string {
+  return path?.split("/").filter((part) => part !== "").pop() ?? "";
+}
+
 /** `0.4s`, `12s`, `3m 05s`, `1h 02m`. */
 export function formatSeconds(seconds: number): string {
+  if (seconds < 0.1) {
+    return "<0.1s";
+  }
   if (seconds < 10) {
     return `${(Math.floor(seconds * 10) / 10).toFixed(1)}s`;
   }

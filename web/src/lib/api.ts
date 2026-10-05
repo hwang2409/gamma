@@ -10,17 +10,35 @@ import type {
 const TOKEN_HEADER = "X-Gamma-Token";
 const TOKEN_KEY = "gamma.token";
 
+/**
+ * The token for this tab: one the user pasted (kept in sessionStorage), else
+ * the one the dev server was started with (`make dev` sets VITE_GAMMA_TOKEN).
+ */
 export function readToken(): string {
   const stored = window.sessionStorage.getItem(TOKEN_KEY);
   if (stored) {
     return stored;
   }
+  return devToken();
+}
+
+/** The token baked in by the dev server, or "" outside development. */
+export function devToken(): string {
   const fromEnv = import.meta.env.VITE_GAMMA_TOKEN;
   return typeof fromEnv === "string" ? fromEnv : "";
 }
 
 export function writeToken(token: string): void {
   window.sessionStorage.setItem(TOKEN_KEY, token);
+}
+
+/** Forget a pasted token, for example after the backend rejected it. */
+export function clearToken(): void {
+  window.sessionStorage.removeItem(TOKEN_KEY);
+}
+
+export function isAuthError(cause: unknown): boolean {
+  return cause instanceof ApiError && (cause.status === 401 || cause.status === 403);
 }
 
 export class ApiError extends Error {
