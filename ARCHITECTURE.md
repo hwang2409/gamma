@@ -28,7 +28,8 @@ Data flow for one turn:
    `gamma_user_message` on the bus (zeta does not echo the user's text).
 3. The zeta read loop is the event pump: each notification updates derived
    state (run state, usage, pending approvals) and is published with the next
-   cursor.
+   cursor and its publish time (`at`, epoch seconds). The UI measures turn and
+   tool durations from `at`, so they stay correct when events are replayed.
 4. Every attached socket streams from its own cursor. A reconnecting socket
    passes `?cursor=N` and the bus replays the buffered tail first.
 
