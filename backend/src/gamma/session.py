@@ -78,6 +78,8 @@ def next_run_state(current: RunState, event: str, fields: dict[str, Any]) -> Run
 
 
 def _from_sub_agent(fields: dict[str, Any]) -> bool:
+    if fields.get("delegated") is True:
+        return True
     data = fields.get("data")
     return isinstance(data, dict) and isinstance(data.get("agent_instance_id"), str)
 
@@ -177,7 +179,9 @@ class GammaSession:
 
         name = event.event
         fields = event.fields
-        self.touch()
+        delegated = _from_sub_agent(fields)
+        if not delegated:
+            self.touch()
         self.state = next_run_state(self.state, name, fields)
         if name == "usage":
             usage = fields.get("usage")
@@ -192,7 +196,7 @@ class GammaSession:
             tool_call = fields.get("tool_call")
             call_id = tool_call.get("id") if isinstance(tool_call, dict) else None
             self._resolve_approvals(call_id)
-        elif name in ("agent_end", "turn_aborted"):
+        elif name in ("agent_end", "turn_aborted") and not delegated:
             self.pending_approvals.clear()
         self.bus.publish(name, fields)
 

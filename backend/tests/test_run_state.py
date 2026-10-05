@@ -7,6 +7,7 @@ from typing import Any
 from gamma.session import RunState, next_run_state
 
 CHILD = {"data": {"agent_instance_id": "child-1", "depth": 1}}
+DELEGATED_APPROVAL = {"delegated": True, "data": {}}
 
 
 def fold(*events: str | tuple[str, dict[str, Any]], start: RunState = "idle") -> RunState:
@@ -51,3 +52,10 @@ def test_sub_agent_events_never_move_the_state() -> None:
     assert fold("agent_start", ("approval_request", CHILD)) == "running"
     # A background child does not wake an idle session.
     assert fold(("tool_start", CHILD)) == "idle"
+    # Zeta marks delegated approvals at the top level, without a child id.
+    assert fold(("approval_request", DELEGATED_APPROVAL)) == "idle"
+
+
+def test_child_end_events_do_not_end_a_foreground_run() -> None:
+    for event in ("agent_end", "turn_aborted", "error"):
+        assert fold("agent_start", (event, CHILD)) == "running"
