@@ -334,7 +334,8 @@
 }
 
 .session-column {
-  max-width: var(--measure);
+  /* the padding sits outside the measure, so text lines up with the dock */
+  max-width: calc(var(--measure) + 2 * var(--page-pad));
   margin: 0 auto;
   padding: var(--s-6) var(--page-pad) var(--s-7);
 }
