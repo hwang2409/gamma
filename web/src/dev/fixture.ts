@@ -11,7 +11,8 @@
 import type { SessionView } from "../lib/protocol";
 import type { GammaEvent } from "../lib/transcript";
 
-export type FixtureVariant = "approval" | "streaming" | "empty";
+/** `reconnecting` is the streaming run seen through a dropped socket. */
+export type FixtureVariant = "approval" | "streaming" | "empty" | "reconnecting";
 
 export const fixtureSession: SessionView = {
   session_id: "fixture",
@@ -161,7 +162,7 @@ function script(variant: FixtureVariant): Step[] {
     ...say(RERUN),
     commit(RERUN),
   ];
-  if (variant === "streaming") {
+  if (variant === "streaming" || variant === "reconnecting") {
     return [
       ...steps,
       ...done("t12", "bash", { command: "pytest -q" }, "......\n7 passed in 0.38s\n"),

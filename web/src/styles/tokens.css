@@ -89,6 +89,7 @@
 
   /* layout */
   --measure: 720px;
+  --page-pad: 24px;
   --gutter: 28px;
   --spine-x: 9px;
   --topbar-height: 56px;
@@ -98,6 +99,13 @@
   --ease-in: cubic-bezier(0.4, 0, 1, 1);
   --fast: 140ms;
   --base: 220ms;
+
+  /* syntax highlighting: three tones and weight, no hue. The approval
+     swaps these for its own greys. */
+  --hl-strong: var(--ink);
+  --hl-text: var(--graphite);
+  --hl-dim: var(--ash);
+  --diff-add: var(--fog-strong);
 }
 
 :root[data-theme="light"] {
@@ -111,6 +119,7 @@
 @media (max-width: 640px) {
   :root {
     --gutter: 22px;
+    --page-pad: 16px;
     --spine-x: 7px;
     --topbar-height: 52px;
   }

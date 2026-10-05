@@ -9,7 +9,10 @@ import "@fontsource-variable/atkinson-hyperlegible-mono/wght.css";
 import "@fontsource-variable/atkinson-hyperlegible-mono/wght-italic.css";
 import { App } from "./App";
 import "./styles/tokens.css";
-import "./styles/app.css";
+import "./styles/base.css";
+import "./styles/ledger.css";
+import "./styles/dock.css";
+import "./styles/pages.css";
 
 const root = document.getElementById("root");
 if (root === null) {

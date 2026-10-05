@@ -1,7 +1,8 @@
 /**
  * Dev-only: the session screen over a scripted transcript, for visual checks
- * and screenshots. Reached at #/fixture, #/fixture/streaming, or
- * #/fixture/empty while the Vite dev server runs; production builds leave it
+ * and screenshots. Reached at #/fixture, #/fixture/streaming,
+ * #/fixture/empty, or #/fixture/reconnecting (a dropped socket and a dock
+ * error) while the Vite dev server runs; production builds leave it
  * out. Commands are folded back in as events, so approving, denying,
  * sending, and stopping all behave.
  */
@@ -14,7 +15,7 @@ import { fixtureEvents, fixtureSession, type FixtureVariant } from "./fixture";
 
 function variantFromHash(): FixtureVariant {
   const name = window.location.hash.replace(/^#\/fixture\/?/, "");
-  return name === "streaming" || name === "empty" ? name : "approval";
+  return name === "streaming" || name === "empty" || name === "reconnecting" ? name : "approval";
 }
 
 function initial(variant: FixtureVariant): TranscriptState {
@@ -56,8 +57,12 @@ export default function FixturePage(): React.JSX.Element {
     <SessionLayout
       session={fixtureSession}
       transcript={transcript}
-      connection="open"
-      error={null}
+      connection={variant === "reconnecting" ? "closed" : "open"}
+      error={
+        variant === "reconnecting"
+          ? "Your last message was not sent. Send it again when the connection is back."
+          : null
+      }
       actions={actions}
       onBack={() => {
         window.location.hash = "";
