@@ -61,6 +61,11 @@ test("a live fake session streams a reply, then lists on the start page", async 
   await expect(page.getByRole("heading", { name: "Running" })).toBeVisible();
   await page.getByLabel("Provider").selectOption("fake");
   await expect(page.getByText("Summarize the open pull requests").first()).toBeVisible();
+
+  // End it, so repeated runs stay under the backend's session limit.
+  await page.getByRole("region", { name: "Running" }).getByRole("button").first().click();
+  await page.getByRole("button", { name: "End session" }).click();
+  await expect(page.getByRole("heading", { name: "New session" })).toBeVisible();
 });
 
 for (const viewport of VIEWPORTS) {
