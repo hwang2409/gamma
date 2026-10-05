@@ -53,7 +53,7 @@ def test_sub_agent_events_never_move_the_state() -> None:
     # A background child does not wake an idle session.
     assert fold(("tool_start", CHILD)) == "idle"
     # Zeta marks delegated approvals at the top level, without a child id.
-    assert fold(("approval_request", DELEGATED_APPROVAL)) == "idle"
+    assert fold("agent_start", ("approval_request", DELEGATED_APPROVAL)) == "running"
 
 
 def test_child_end_events_do_not_end_a_foreground_run() -> None:
