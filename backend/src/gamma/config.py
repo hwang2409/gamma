@@ -17,7 +17,14 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 DEFAULT_MODELS: dict[str, list[str]] = {
     "fake": ["offline", "faster"],
-    "claude": ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"],
+    "claude": [
+        "claude-sonnet-5",
+        "claude-opus-5-5",
+        "claude-opus-5",
+        "claude-sonnet-4-6",
+        "claude-opus-4-6",
+        "claude-haiku-4-5",
+    ],
     "codex": ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.4-mini"],
 }
 
@@ -49,6 +56,9 @@ class Settings(BaseSettings):
 
     # extra environment for every zeta serve child (for example ZETA_HOME)
     zeta_env: dict[str, str] = Field(default_factory=dict)
+    # Claude subscription logins need Zeta's Anthropic OAuth compatibility mode.
+    # It is on by default so Claude works regardless of the launching shell.
+    anthropic_oauth_compat: bool = True
 
     # tool policy is server-side only in v0; the browser cannot change it
     tools: str | None = None
