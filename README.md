@@ -48,6 +48,7 @@ web/                Vite + React + TypeScript (pnpm)
   src/lib/transcript.ts   the event reducer (unit tested)
   src/lib/view.ts         derived view: tool groups, run phase, durations
   src/styles/tokens.css   every color, size, and timing
+  src/styles/*.css        base controls, the run ledger, the dock, page frames
   src/dev/                the scripted fixture route (dev server only)
   e2e/                    Playwright screenshots and axe checks
   src/lib/useSessionSocket.ts  socket, auth, reconnect-by-cursor
@@ -91,9 +92,10 @@ at start-up. Paste it into the token screen (it is kept in that tab's
 While a turn runs, a message steers that turn. The theme follows the system;
 the button in the top bar forces light or dark.
 
-In the dev server, `#/fixture`, `#/fixture/streaming`, and `#/fixture/empty`
-show the session screen over a scripted transcript with tool calls, failures,
-denials, and a pending approval. The fake provider cannot call tools, so this
+In the dev server, `#/fixture`, `#/fixture/streaming`, `#/fixture/empty`, and
+`#/fixture/reconnecting` show the session screen over a scripted transcript
+with tool calls, failures, denials, a pending approval, and a dropped
+connection. The fake provider cannot call tools, so this
 is the way to see those states. Production builds do not include it.
 
 ## Configuration
