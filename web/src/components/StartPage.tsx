@@ -12,6 +12,8 @@ import { api, isAuthError } from "../lib/api";
 import { baseName, relativeTime, shortPath } from "../lib/format";
 import type { OptionsResponse, SessionView, ZetaSessionSummary } from "../lib/protocol";
 import { Icon, Spinner } from "./Icon";
+import { Node } from "./Node";
+import { sessionTitle } from "./SessionHeader";
 import { ThemeToggle } from "./ThemeToggle";
 
 interface Props {
@@ -112,7 +114,10 @@ export function StartPage({ options, onOpen, onUnauthorized }: Props): React.JSX
   return (
     <div className="start">
       <header className="start-head">
-        <p className="wordmark">gamma</p>
+        <p className="wordmark">
+          <Node kind="task" />
+          gamma
+        </p>
         <ThemeToggle />
       </header>
 
@@ -126,11 +131,11 @@ export function StartPage({ options, onOpen, onUnauthorized }: Props): React.JSX
           }}
         >
           <h1 id="new-session-title">New session</h1>
-          <div className="field-row">
-            <label className="field">
-              <span className="field-label">Provider</span>
+          <p className="sentence">
+            <span>Run</span>
+            <label className="inline-field">
+              <span className="visually-hidden">Provider</span>
               <select
-                className="input"
                 value={provider}
                 onChange={(event) => {
                   const next = event.target.value;
@@ -145,15 +150,15 @@ export function StartPage({ options, onOpen, onUnauthorized }: Props): React.JSX
                 ))}
               </select>
             </label>
-            <label className="field">
-              <span className="field-label">Model</span>
+            <span>with</span>
+            <label className="inline-field">
+              <span className="visually-hidden">Model</span>
               <select
-                className="input"
                 value={model}
                 disabled={models.length === 0}
                 onChange={(event) => setModel(event.target.value)}
               >
-                {models.length === 0 && <option value="">default</option>}
+                {models.length === 0 && <option value="">the default model</option>}
                 {models.map((name) => (
                   <option key={name} value={name}>
                     {name}
@@ -161,36 +166,32 @@ export function StartPage({ options, onOpen, onUnauthorized }: Props): React.JSX
                 ))}
               </select>
             </label>
-          </div>
-          <label className="field">
-            <span className="field-label">Directory</span>
-            <select
-              className="input mono"
-              value={chosenCwd}
-              onChange={(event) => setCwd(event.target.value)}
-            >
-              {recentDirectories.length > 0 && (
-                <optgroup label="Recent">
-                  {recentDirectories.map((path) => (
-                    <option key={`recent-${path}`} value={path}>
-                      {shortPath(path, 4)}
-                    </option>
-                  ))}
+            <span>in</span>
+            <label className="inline-field is-path">
+              <span className="visually-hidden">Directory</span>
+              <select value={chosenCwd} onChange={(event) => setCwd(event.target.value)}>
+                {recentDirectories.length > 0 && (
+                  <optgroup label="Recent">
+                    {recentDirectories.map((path) => (
+                      <option key={`recent-${path}`} value={path}>
+                        {shortPath(path, 2)}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                <optgroup label="All allowed directories">
+                  {options.directories
+                    .filter((path) => !recentDirectories.includes(path))
+                    .map((path) => (
+                      <option key={path} value={path}>
+                        {shortPath(path, 2)}
+                      </option>
+                    ))}
                 </optgroup>
-              )}
-              <optgroup label="All allowed directories">
-                {options.directories
-                  .filter((path) => !recentDirectories.includes(path))
-                  .map((path) => (
-                    <option key={path} value={path}>
-                      {shortPath(path, 4)}
-                    </option>
-                  ))}
-              </optgroup>
-            </select>
-          </label>
+              </select>
+            </label>
+          </p>
           <div className="new-session-foot">
-            <p className="hint">Every tool call that needs approval asks you first.</p>
             <button
               type="submit"
               className="button primary"
@@ -199,9 +200,11 @@ export function StartPage({ options, onOpen, onUnauthorized }: Props): React.JSX
               {busy === "new" ? <Spinner size={12} /> : <Icon name="plus" size={14} />}
               Start session
             </button>
+            <p className="hint">Tool calls that need approval wait for you.</p>
           </div>
           {error !== null && (
             <p className="field-error" role="alert">
+              <Node kind="error" />
               {error}
             </p>
           )}
@@ -211,28 +214,27 @@ export function StartPage({ options, onOpen, onUnauthorized }: Props): React.JSX
           <section className="session-list" aria-labelledby="running-title">
             <h2 id="running-title">Running</h2>
             <ul>
-              {running.map((session) => (
-                <li key={session.session_id}>
-                  <button type="button" className="session-item" onClick={() => onOpen(session)}>
-                    <span className="session-item-title">
-                      {session.session_name || baseName(session.cwd) || "Untitled session"}
-                    </span>
-                    <span className="session-item-meta">
-                      <span className={`state-chip state-${session.state}`}>
-                        {session.pending_approvals.length > 0
-                          ? "needs approval"
-                          : session.state === "idle"
-                            ? "idle"
-                            : "working"}
+              {running.map((session) => {
+                const waiting = session.pending_approvals.length > 0;
+                return (
+                  <li key={session.session_id}>
+                    <button type="button" className="session-item" onClick={() => onOpen(session)}>
+                      <Node kind={waiting ? "waiting" : session.state === "idle" ? "idle" : "live"} />
+                      <span className="session-item-title">{sessionTitle(session)}</span>
+                      <span className="session-item-state">
+                        {waiting ? "needs approval" : session.state === "idle" ? "idle" : "working"}
                       </span>
-                      <span>{session.model ?? session.provider}</span>
-                      <span className="mono">{shortPath(session.cwd)}</span>
-                      <span>{relativeTime(session.last_activity * 1000, now)}</span>
-                    </span>
-                    <Icon name="chevronRight" size={14} className="chevron" />
-                  </button>
-                </li>
-              ))}
+                      <span className="session-item-meta">
+                        <span className="mono" title={session.cwd ?? undefined}>
+                          {baseName(session.cwd)}
+                        </span>
+                        <span>{session.model ?? session.provider}</span>
+                        <span>{relativeTime(session.last_activity * 1000, now)}</span>
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           </section>
         )}
@@ -245,8 +247,8 @@ export function StartPage({ options, onOpen, onUnauthorized }: Props): React.JSX
             </p>
           ) : recent.length === 0 ? (
             <p className="list-empty">
-              No past {provider} sessions in the allowed directories yet. Start one above; it will
-              be listed here to resume later.
+              No past {provider} sessions in the allowed directories yet. Sessions you start are
+              listed here to resume later.
             </p>
           ) : (
             <ul>
@@ -263,23 +265,22 @@ export function StartPage({ options, onOpen, onUnauthorized }: Props): React.JSX
                       })
                     }
                   >
+                    <Node kind="done" />
                     <span className="session-item-title">
                       {session.name || session.first_message_preview || "Untitled session"}
                     </span>
+                    <span className="session-item-state">
+                      {busy === session.session_id ? <Spinner size={12} /> : "Resume"}
+                    </span>
                     <span className="session-item-meta">
+                      <span className="mono" title={session.cwd}>
+                        {baseName(session.cwd)}
+                      </span>
                       <span>{session.model}</span>
-                      <span className="mono">{shortPath(session.cwd)}</span>
                       {session.updated_at !== null && (
                         <span>{relativeTime(Date.parse(session.updated_at), now)}</span>
                       )}
                     </span>
-                    {busy === session.session_id ? (
-                      <Spinner size={12} />
-                    ) : (
-                      <span className="resume-hint">
-                        Resume <Icon name="chevronRight" size={14} />
-                      </span>
-                    )}
                   </button>
                 </li>
               ))}

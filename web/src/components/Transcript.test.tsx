@@ -41,6 +41,7 @@ const session: SessionView = {
   created_at: 0,
   last_activity: 0,
   session_name: null,
+  first_prompt: null,
   capabilities: [],
 };
 
@@ -254,5 +255,40 @@ describe("Composer", () => {
     fireEvent.change(input, { target: { value: "use the other file" } });
     fireEvent.click(screen.getByRole("button", { name: "Steer" }));
     expect(handlers.onSteer).toHaveBeenCalledWith("use the other file");
+  });
+});
+
+describe("SessionLayout header", () => {
+  it("names the session by its first task before the backend knows it", () => {
+    render(
+      <SessionLayout
+        session={session}
+        transcript={play(
+          ["gamma_user_message", { text: "Fix the health check", mode: "send" }],
+          ["gamma_user_message", { text: "Also add a test", mode: "steer" }],
+        )}
+        connection="open"
+        error={null}
+        actions={actions()}
+        onBack={() => {}}
+        onEnd={() => {}}
+      />,
+    );
+    expect(screen.getByRole("heading", { level: 1, name: "Fix the health check" })).toBeTruthy();
+  });
+
+  it("prefers the name zeta gave the session", () => {
+    render(
+      <SessionLayout
+        session={{ ...session, session_name: "health-fix" }}
+        transcript={play(["gamma_user_message", { text: "Fix the health check", mode: "send" }])}
+        connection="open"
+        error={null}
+        actions={actions()}
+        onBack={() => {}}
+        onEnd={() => {}}
+      />,
+    );
+    expect(screen.getByRole("heading", { level: 1, name: "health-fix" })).toBeTruthy();
   });
 });

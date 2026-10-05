@@ -91,9 +91,31 @@ class Message(WireModel):
     content: list[ContentBlock] = Field(default_factory=list)
 
 
+class ApprovalDisplay(WireModel):
+    """Facts the harness resolved for an approval, beyond the model's arguments.
+
+    zeta adds ``approval_display`` to ``approval_request`` events and to
+    ``status.pending_approvals`` only when it resolved them: the directory a
+    command runs in and the path it touches, or the project memory file a
+    write targets with a preview of the new content. The model cannot forge
+    these, so the approval card shows them next to the arguments.
+    """
+
+    effective_cwd: str | None = None
+    resolved_path: str | None = None
+    project_id: str | None = None
+    project_name: str | None = None
+    filename: str | None = None
+    utf8_bytes: int | None = None
+    preview: str | None = None
+
+
 class PendingApproval(WireModel):
     request_id: str
     tool_call: ToolCall
+    approval_display: ApprovalDisplay | None = None
+    delegated: bool = False
+    agent_instance_id: str | None = None
 
 
 class StatusResult(WireModel):

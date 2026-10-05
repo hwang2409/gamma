@@ -41,16 +41,17 @@ export function useSessionSocket(sessionId: string): SessionSocket {
   const cursorRef = useRef(0);
   const attemptRef = useRef(0);
   const timerRef = useRef<number | null>(null);
-  const liveRef = useRef(true);
 
   cursorRef.current = transcript.cursor;
 
   useEffect(() => {
-    liveRef.current = true;
+    // Per effect, not a ref: a socket from an earlier effect (StrictMode
+    // mounts twice) can close after this one starts, and must not touch it.
+    let live = true;
     dispatch({ type: "reset" });
 
     const open = () => {
-      if (!liveRef.current) {
+      if (!live) {
         return;
       }
       setConnection("connecting");
@@ -89,10 +90,10 @@ export function useSessionSocket(sessionId: string): SessionSocket {
       };
 
       socket.onclose = (event) => {
-        socketRef.current = null;
-        if (!liveRef.current) {
+        if (!live) {
           return;
         }
+        socketRef.current = null;
         if (event.code === 4401 || event.code === 4403) {
           setConnection("unauthorized");
           setError("The access token was rejected. Paste the backend token again.");
@@ -120,7 +121,7 @@ export function useSessionSocket(sessionId: string): SessionSocket {
     open();
 
     return () => {
-      liveRef.current = false;
+      live = false;
       if (timerRef.current !== null) {
         window.clearTimeout(timerRef.current);
       }

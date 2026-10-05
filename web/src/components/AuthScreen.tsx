@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 
+import { Node } from "./Node";
+
 interface Props {
   rejected: boolean;
   onSubmit: (token: string) => void;
@@ -10,9 +12,9 @@ interface Props {
 export function AuthScreen({ rejected, onSubmit }: Props): React.JSX.Element {
   const [token, setToken] = useState("");
   return (
-    <main className="auth">
+    <main className="gate">
       <form
-        className="auth-card"
+        className="gate-body"
         onSubmit={(event) => {
           event.preventDefault();
           if (token.trim() !== "") {
@@ -20,9 +22,12 @@ export function AuthScreen({ rejected, onSubmit }: Props): React.JSX.Element {
           }
         }}
       >
-        <p className="wordmark">gamma</p>
+        <p className="wordmark">
+          <Node kind="task" />
+          gamma
+        </p>
         <h1>Access token</h1>
-        <p className="auth-help">
+        <p className="gate-help">
           Paste the token the backend printed when it started. It stays in this tab only.
         </p>
         <label className="visually-hidden" htmlFor="token">
@@ -38,12 +43,13 @@ export function AuthScreen({ rejected, onSubmit }: Props): React.JSX.Element {
           autoFocus
           aria-invalid={rejected}
           aria-describedby={rejected ? "token-error" : undefined}
-          placeholder="token"
+          placeholder="Paste the token"
           onChange={(event) => setToken(event.target.value)}
         />
         {rejected && (
           <p className="field-error" id="token-error" role="alert">
-            That token was rejected. Check the backend output and try again.
+            <Node kind="error" />
+            The backend rejected that token. Copy it again from the backend output.
           </p>
         )}
         <button
@@ -53,7 +59,7 @@ export function AuthScreen({ rejected, onSubmit }: Props): React.JSX.Element {
         >
           Continue
         </button>
-        <p className="auth-foot">
+        <p className="gate-foot">
           Running <code>make dev</code>? The token is passed to this page for you.
         </p>
       </form>

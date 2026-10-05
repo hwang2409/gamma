@@ -61,6 +61,11 @@ test("a live fake session streams a reply, then lists on the start page", async 
   await expect(page.getByRole("heading", { name: "Running" })).toBeVisible();
   await page.getByLabel("Provider").selectOption("fake");
   await expect(page.getByText("Summarize the open pull requests").first()).toBeVisible();
+
+  // End it, so repeated runs stay under the backend's session limit.
+  await page.getByRole("region", { name: "Running" }).getByRole("button").first().click();
+  await page.getByRole("button", { name: "End session" }).click();
+  await expect(page.getByRole("heading", { name: "New session" })).toBeVisible();
 });
 
 for (const viewport of VIEWPORTS) {
@@ -84,13 +89,36 @@ for (const viewport of VIEWPORTS) {
       await page.getByRole("button", { name: "End session" }).click();
       await expect(page.getByRole("heading", { name: "New session" })).toBeVisible();
 
-      for (const variant of ["approval", "streaming", "empty"] as const) {
-        await page.goto(`/#/fixture/${variant}`);
+      // "#/fixture" is the approval variant.
+      for (const variant of ["", "streaming", "empty", "reconnecting"] as const) {
+        const name = variant === "" ? "approval" : variant;
+        await page.goto(variant === "" ? "/#/fixture" : `/#/fixture/${variant}`);
         await page.reload();
         await page.locator(".session").waitFor();
-        await shoot(page, `fixture-${variant}-${tag}`);
-        await expectNoSeriousViolations(page, `fixture ${variant} ${tag}`);
+        await shoot(page, `fixture-${name}-${tag}`);
+        await expectNoSeriousViolations(page, `fixture ${name} ${tag}`);
       }
+
+      // Loading: the options request has not answered yet.
+      let release = (): void => {};
+      const held = new Promise<void>((resolve) => (release = resolve));
+      await page.route("**/api/options", async (route) => {
+        await held;
+        await route.continue().catch(() => {}); // the page may have moved on
+      });
+      await page.goto("/");
+      await expect(page.getByText("Connecting to the backend…")).toBeVisible();
+      await shoot(page, `loading-${tag}`);
+      await page.unroute("**/api/options");
+      release();
+
+      // Offline: the backend does not answer.
+      await page.route("**/api/options", (route) => route.abort("connectionrefused"));
+      await page.goto("/");
+      await expect(page.getByRole("heading", { name: "The backend is not running" })).toBeVisible();
+      await shoot(page, `offline-${tag}`);
+      await expectNoSeriousViolations(page, `offline ${tag}`);
+      await page.unroute("**/api/options");
 
       // The auth screen: every token is refused.
       await page.route("**/api/options", (route) =>
@@ -120,6 +148,14 @@ test("fixture: keyboard approves, tool groups expand, jump to latest", async ({ 
   await folded.click();
   await expect(page.getByText("tests/conftest.py")).toBeVisible();
 
+  // Open a failed tool call and the first thinking line, for a look at the wells.
+  const failedRow = page.getByRole("button", { name: /pytest -q tests\/test_api.py::test_missing/ });
+  await page.getByRole("button", { name: /Thought/ }).first().click();
+  await failedRow.click();
+  await expect(failedRow).toHaveAttribute("aria-expanded", "true");
+  await failedRow.evaluate((node) => node.scrollIntoView({ block: "start" }));
+  await shoot(page, "fixture-expanded-desktop-light");
+
   await page.locator(".session-scroll").evaluate((node) => node.scrollTo({ top: 0 }));
   const jump = page.getByRole("button", { name: "Jump to latest" });
   await expect(jump).toBeVisible();
@@ -139,7 +175,7 @@ test("theme toggle overrides the system preference", async ({ page }) => {
   await toggle.click(); // light -> dark
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   const background = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
-  expect(background).toBe("rgb(11, 11, 12)");
+  expect(background).toBe("rgb(0, 0, 0)");
   await toggle.click(); // dark -> system
   await expect(page.locator("html")).not.toHaveAttribute("data-theme", /.+/);
 });

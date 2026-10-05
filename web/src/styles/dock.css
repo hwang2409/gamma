@@ -1,0 +1,448 @@
+/*
+ * The dock under the transcript: errors, the pending approval, the composer,
+ * and the status line. The approval is the one inverted surface.
+ */
+
+.dock {
+  position: relative;
+  padding: 0 var(--page-pad) max(var(--s-3), env(safe-area-inset-bottom));
+  background: var(--paper);
+}
+
+/* the transcript fades out under the dock instead of being cut */
+.dock::before {
+  content: "";
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  height: var(--s-5);
+  background: linear-gradient(to bottom, transparent, var(--paper));
+  pointer-events: none;
+}
+
+.dock-column {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  max-width: var(--measure);
+  margin: 0 auto;
+}
+
+.jump-pill {
+  position: absolute;
+  bottom: calc(100% + var(--s-3));
+  left: 50%;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px 0 12px;
+  border-radius: var(--r-full);
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: var(--shadow-float);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  translate: -50% 0;
+  animation: rise var(--base) var(--ease-out);
+  transition: scale var(--fast) var(--ease-out);
+}
+
+.jump-pill:active {
+  scale: 0.96;
+}
+
+.dock-error {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: 6px 6px 6px var(--s-3);
+  border-radius: var(--r-control);
+  background: var(--fog);
+  color: var(--ink);
+  font-size: var(--text-sm);
+}
+
+.dock-error > span:not(.node) {
+  flex: 1;
+  min-width: 0;
+}
+
+/* --- approval ------------------------------------------------------------- */
+
+.approval {
+  --hl-strong: var(--on-ink);
+  --hl-text: var(--on-ink-2);
+  --hl-dim: var(--on-ink-3);
+  --diff-add: var(--ink-line);
+
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  max-height: 58dvh;
+  overflow-y: auto;
+  padding: var(--pad-panel);
+  padding-top: 14px;
+  border-radius: var(--r-panel);
+  background: var(--ink);
+  color: var(--on-ink-2);
+  animation: rise var(--base) var(--ease-out);
+  transition-property: opacity, translate;
+  transition-duration: var(--fast);
+  transition-timing-function: var(--ease-in);
+}
+
+.approval.is-leaving {
+  opacity: 0;
+  translate: 0 4px;
+}
+
+.approval :focus-visible {
+  outline-color: var(--on-ink);
+}
+
+.approval-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: var(--s-3);
+  padding: 0 4px;
+}
+
+.approval-head h2 {
+  color: var(--on-ink);
+  font-size: var(--text-md);
+}
+
+.approval-tool {
+  font-family: var(--font-mono);
+  font-weight: var(--weight-strong);
+}
+
+.approval-why {
+  grid-column: 1;
+  font-size: var(--text-sm);
+}
+
+.approval-queue {
+  grid-row: 1;
+  grid-column: 2;
+  align-self: center;
+  color: var(--on-ink-3);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.approval-preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.approval-path {
+  padding: 0 4px;
+  color: var(--on-ink);
+  font-family: var(--font-mono);
+  font-size: var(--text-mono);
+  overflow-wrap: anywhere;
+}
+
+.approval-path-note {
+  color: var(--on-ink-3);
+}
+
+.approval .collapsible > pre,
+.approval .diff {
+  padding: 10px var(--s-3);
+  border-radius: var(--r-in-panel);
+  background: var(--ink-well);
+  color: var(--hl-text);
+}
+
+.approval-command > pre {
+  color: var(--on-ink);
+  font-size: 14px;
+}
+
+.approval-command > pre::before {
+  content: "$ ";
+  color: var(--on-ink-3);
+}
+
+.approval .collapsible {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.approval .collapsible > pre {
+  align-self: stretch;
+  max-height: 22em;
+  overflow-y: auto;
+}
+
+.approval .more-button {
+  margin-left: 4px;
+  color: var(--on-ink-3);
+  text-decoration-color: var(--ink-line);
+}
+
+.approval .more-button:hover {
+  color: var(--on-ink);
+}
+
+.diff {
+  max-height: 22em;
+  overflow-y: auto;
+}
+
+.diff-line {
+  display: block;
+  margin: 0 calc(-1 * var(--s-3));
+  padding: 0 var(--s-3);
+}
+
+.diff-sign {
+  display: inline-block;
+  width: 2ch;
+  color: var(--on-ink-3);
+}
+
+.diff-add {
+  background: var(--diff-add);
+  color: var(--on-ink);
+}
+
+.diff-del {
+  color: var(--on-ink-3);
+}
+
+.diff-del .diff-sign {
+  text-decoration: line-through;
+}
+
+.approval-facts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: 0 4px;
+}
+
+.approval-facts dl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px var(--s-4);
+  font-size: var(--text-xs);
+}
+
+.approval-facts dl > div {
+  display: contents;
+}
+
+.approval-facts dt {
+  color: var(--on-ink-3);
+}
+
+.approval-facts dd {
+  color: var(--on-ink-2);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.approval-facts .collapsible {
+  margin: 0 -4px;
+}
+
+.approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  margin-top: 2px;
+}
+
+.button.on-ink {
+  border-radius: var(--r-in-panel);
+  background: transparent;
+  color: var(--on-ink);
+  box-shadow: inset 0 0 0 1px var(--ink-line);
+}
+
+.button.on-ink:hover:not(:disabled) {
+  background: var(--ink-well);
+  box-shadow: inset 0 0 0 1px var(--on-ink-3);
+}
+
+.button.on-ink.primary {
+  background: var(--on-ink);
+  color: var(--ink);
+  box-shadow: none;
+}
+
+.button.on-ink.primary:hover:not(:disabled) {
+  background: var(--on-ink-2);
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    translate: 0 8px;
+  }
+}
+
+.jump-pill {
+  animation-name: pill-rise;
+}
+
+@keyframes pill-rise {
+  from {
+    opacity: 0;
+    translate: -50% 6px;
+  }
+}
+
+/* --- composer ------------------------------------------------------------- */
+
+.composer {
+  display: flex;
+  flex-direction: column;
+  padding: var(--inset-tight);
+  border-radius: var(--r-panel);
+  background: var(--paper);
+  box-shadow: var(--shadow-float);
+  transition: box-shadow var(--fast) var(--ease-out);
+}
+
+.composer:focus-within {
+  box-shadow:
+    0 0 0 1px var(--ink),
+    0 4px 12px -2px light-dark(rgb(0 0 0 / 12%), rgb(0 0 0 / 60%));
+}
+
+.composer textarea {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  max-height: 40dvh;
+  padding: 10px 10px 4px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--ink);
+  font-size: var(--text-md);
+  line-height: 1.5;
+  resize: none;
+  field-sizing: content;
+}
+
+.composer textarea:disabled {
+  color: var(--ash);
+}
+
+.composer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  min-height: 32px;
+}
+
+.composer-hint {
+  padding-left: 10px;
+  color: var(--ash);
+  font-size: var(--text-xs);
+}
+
+.composer-actions {
+  display: flex;
+  margin-left: auto;
+  align-items: center;
+  gap: var(--s-1);
+}
+
+.send-button {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--r-in-tight);
+  background: var(--ink);
+  color: var(--paper);
+  transition-property: scale, background-color, opacity;
+  transition-duration: var(--fast);
+  transition-timing-function: var(--ease-out);
+}
+
+.send-button:hover:not(:disabled) {
+  background: var(--graphite);
+}
+
+.send-button:disabled {
+  background: var(--mist);
+  color: var(--ash);
+}
+
+/* --- status line ---------------------------------------------------------- */
+
+.run-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-4);
+  min-height: 24px;
+  /* the phase node sits on the transcript's spine line, its label on the gutter */
+  padding: 0 var(--s-3) 0 calc(var(--spine-x) - 4.5px);
+  color: var(--ash);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.run-phase {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--gutter) - var(--spine-x) - 4.5px);
+  min-width: 0;
+}
+
+.run-label {
+  overflow: hidden;
+  color: var(--graphite);
+  font-weight: var(--weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.phase-approval .run-label,
+.run-phase.is-connection {
+  color: var(--ink);
+  font-weight: var(--weight-strong);
+}
+
+.run-usage {
+  display: inline-flex;
+  gap: var(--s-3);
+  white-space: nowrap;
+}
+
+@media (max-width: 480px) {
+  /* the phase matters more than the token counts on a phone */
+  .run-usage {
+    display: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .composer-hint,
+  .approval kbd,
+  .composer kbd {
+    display: none;
+  }
+
+  .approval-actions .button {
+    flex: 1 1 auto;
+  }
+
+  .approval {
+    max-height: 64dvh;
+  }
+}

@@ -53,6 +53,7 @@ const session: SessionView = {
   created_at: 0,
   last_activity: 0,
   session_name: null,
+  first_prompt: null,
   capabilities: [],
 };
 
@@ -255,13 +256,54 @@ describe("approval state", () => {
     const state = apply(
       fresh(),
       event("approval_request", { request_id: call.id, tool_call: call }),
-      event("approval_end", { tool_call: call, data: {} }),
+      event("approval_end", { request_id: call.id, tool_call: call, data: {} }),
     );
 
     expect(pendingApprovals(state)).toHaveLength(0);
     expect(state.items.find((item) => item.kind === "approval")).toMatchObject({
       phase: "closed",
     });
+  });
+
+  it("closes only the approval named by delegated approval_end", () => {
+    const state = apply(
+      fresh(),
+      event("approval_request", { request_id: "foreground", tool_call: call }),
+      event("approval_request", {
+        request_id: "child-request",
+        tool_call: call,
+        delegated: true,
+        agent_instance_id: "child-1",
+      }),
+      event("gamma_approval_decision", {
+        request_id: "child-request",
+        decision: "approve",
+        scope: "once",
+      }),
+      event("approval_end", { request_id: "child-request", tool_call: call, data: {} }),
+    );
+
+    expect(state.items.find((item) => item.kind === "approval" && item.requestId === "foreground"))
+      .toMatchObject({ phase: "pending" });
+    expect(state.items.find((item) => item.kind === "approval" && item.requestId === "child-request"))
+      .toMatchObject({ phase: "closed" });
+  });
+
+  it("closes delegated approval when its child ends", () => {
+    const state = apply(
+      fresh(),
+      event("approval_request", {
+        request_id: "child-request",
+        tool_call: call,
+        delegated: true,
+        agent_instance_id: "child-1",
+      }),
+      event("approval_end", { request_id: "child-request", tool_call: call, data: {} }),
+      event("turn_aborted", { data: { agent_instance_id: "child-1" } }),
+    );
+
+    expect(state.items.find((item) => item.kind === "approval" && item.requestId === "child-request"))
+      .toMatchObject({ phase: "closed" });
   });
 
   it("does not duplicate a repeated request", () => {
@@ -272,6 +314,55 @@ describe("approval state", () => {
     );
 
     expect(state.items.filter((item) => item.kind === "approval")).toHaveLength(1);
+  });
+
+  it("records delegated approval without changing idle state", () => {
+    const state = apply(
+      fresh(),
+      event("approval_request", {
+        request_id: call.id,
+        tool_call: call,
+        delegated: true,
+        data: {},
+      }),
+    );
+
+    expect(state.state).toBe("idle");
+    expect(state.items.at(-1)).toMatchObject({ kind: "approval", delegated: true });
+  });
+
+  it("leaves a running state unchanged for delegated approval", () => {
+    const state = apply(
+      fresh(),
+      event("turn_start"),
+      event("approval_request", {
+        request_id: call.id,
+        tool_call: call,
+        delegated: true,
+      }),
+    );
+
+    expect(state.state).toBe("running");
+  });
+
+  it("keeps a foreground run active for a delegated child end", () => {
+    const state = apply(
+      fresh(),
+      event("turn_start"),
+      event("agent_end", { data: { agent_instance_id: "child-1" } }),
+    );
+
+    expect(state.state).toBe("running");
+    expect(state.runEndedAt).toBeNull();
+  });
+
+  it("still moves a non-delegated approval to tool", () => {
+    const state = apply(
+      fresh(),
+      event("approval_request", { request_id: call.id, tool_call: call }),
+    );
+
+    expect(state.state).toBe("tool");
   });
 });
 
@@ -332,6 +423,35 @@ describe("reconnect replay", () => {
     expect(state.state).toBe("tool");
     expect(state.usage).toEqual({ input_tokens: 10, output_tokens: 4 });
     expect(pendingApprovals(state)).toHaveLength(1);
+  });
+
+  it("reconciles approvals that disappear and appear in a snapshot", () => {
+    const withOld = apply(
+      fresh(),
+      event("approval_request", {
+        request_id: "old",
+        tool_call: { id: "old-tool", name: "write", arguments: {} },
+      }),
+    );
+    const afterSnapshot = transcriptReducer(withOld, {
+      type: "snapshot",
+      session: {
+        ...session,
+        pending_approvals: [
+          {
+            request_id: "new",
+            tool_call: { id: "new-tool", name: "bash", arguments: {} },
+            delegated: true,
+            agent_instance_id: "child-1",
+          },
+        ],
+      },
+    });
+
+    expect(afterSnapshot.items.find((item) => item.kind === "approval" && item.requestId === "old"))
+      .toMatchObject({ phase: "closed" });
+    expect(afterSnapshot.items.find((item) => item.kind === "approval" && item.requestId === "new"))
+      .toMatchObject({ phase: "pending", delegated: true, agentInstanceId: "child-1" });
   });
 
   it("does not add an approval a replayed event already created", () => {

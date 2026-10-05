@@ -15,6 +15,8 @@ const NEXT: Record<ThemePreference, string> = {
   dark: "system",
 };
 
+const ORDER: ThemePreference[] = ["system", "light", "dark"];
+
 export function ThemeToggle(): React.JSX.Element {
   const { preference, cycle } = useTheme();
   return (
@@ -25,7 +27,14 @@ export function ThemeToggle(): React.JSX.Element {
       aria-label={`Theme: ${preference}. Switch to ${NEXT[preference]}.`}
       title={`Theme: ${preference}`}
     >
-      <Icon name={ICON[preference]} />
+      {/* All three icons stay mounted and cross-fade. */}
+      <span className="icon-stack">
+        {ORDER.map((name) => (
+          <span key={name} className="icon-stack-item" data-on={name === preference}>
+            <Icon name={ICON[name]} />
+          </span>
+        ))}
+      </span>
     </button>
   );
 }

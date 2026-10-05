@@ -15,11 +15,13 @@ import type { SessionView } from "../lib/protocol";
 import { pendingApprovals, type TranscriptState } from "../lib/transcript";
 import type { Connection } from "../lib/useSessionSocket";
 import { useNow } from "../lib/useNow";
+import { usePresence } from "../lib/usePresence";
 import { useStickToBottom } from "../lib/useStickToBottom";
 import { isBusy, runPhase, runSeconds, transcriptBlocks, usageTotals } from "../lib/view";
 import { ApprovalCard } from "./ApprovalCard";
 import { Composer } from "./Composer";
 import { Icon } from "./Icon";
+import { Node } from "./Node";
 import { RunStatus } from "./RunStatus";
 import { SessionHeader } from "./SessionHeader";
 import { Transcript } from "./Transcript";
@@ -62,6 +64,20 @@ export function SessionLayout({
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const supportsAlways = (session?.protocol_version ?? "1.0") !== "1.0";
   const disabled = connection !== "open" || transcript.closed;
+  // The decided card stays for its exit (160ms, see .approval.is-leaving).
+  const card = usePresence(approval, 160);
+  const lastBlock = blocks.at(-1);
+  const firstTask = useMemo(() => {
+    for (const block of blocks) {
+      if (block.kind === "user" && block.item.mode !== "steer") {
+        return block.item.text;
+      }
+    }
+    return null;
+  }, [blocks]);
+  const waiting =
+    phase.kind === "thinking" &&
+    !(lastBlock?.kind === "assistant" && lastBlock.item.streaming);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -104,10 +120,13 @@ export function SessionLayout({
 
   return (
     <div className="session">
-      <SessionHeader session={session} ended={transcript.closed} onBack={onBack} onEnd={onEnd} />
+      <SessionHeader
+        session={session}
+        firstTask={firstTask}
+        ended={transcript.closed} onBack={onBack} onEnd={onEnd} />
       <main className="session-scroll" ref={scroll.scrollRef} tabIndex={-1}>
         <div className="session-column" ref={scroll.contentRef}>
-          <Transcript blocks={blocks} now={now} />
+          <Transcript blocks={blocks} now={now} waiting={waiting} cwd={session?.cwd} />
         </div>
       </main>
       <footer className="dock">
@@ -120,17 +139,19 @@ export function SessionLayout({
           )}
           {error !== null && (
             <p className="dock-error" role="alert">
-              <Icon name="alert" size={14} />
+              <Node kind="error" />
               <span>{error}</span>
               <button type="button" className="ghost-button small" onClick={actions.dismissError}>
                 Dismiss
               </button>
             </p>
           )}
-          {approval !== undefined && (
+          {card.shown !== undefined && (
             <ApprovalCard
-              item={approval}
-              queued={pending.length - 1}
+              key={card.shown.id}
+              item={card.shown}
+              queued={Math.max(0, pending.length - 1)}
+              leaving={card.leaving}
               supportsAlways={supportsAlways}
               onApprove={actions.approve}
               onDeny={actions.deny}

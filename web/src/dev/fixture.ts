@@ -11,7 +11,8 @@
 import type { SessionView } from "../lib/protocol";
 import type { GammaEvent } from "../lib/transcript";
 
-export type FixtureVariant = "approval" | "streaming" | "empty";
+/** `reconnecting` is the streaming run seen through a dropped socket. */
+export type FixtureVariant = "approval" | "streaming" | "empty" | "reconnecting";
 
 export const fixtureSession: SessionView = {
   session_id: "fixture",
@@ -28,6 +29,7 @@ export const fixtureSession: SessionView = {
   created_at: 0,
   last_activity: 0,
   session_name: "Fix the failing health check",
+  first_prompt: "The health check test fails on main. Find out why and fix it, then summarize the change.",
   capabilities: [],
 };
 
@@ -141,7 +143,7 @@ function script(variant: FixtureVariant): Step[] {
     ...say(DIAGNOSIS),
     commit(DIAGNOSIS),
     ["tool_start", call("t5", "edit", editArgs), 0.2],
-    ["approval_request", { request_id: "r5", ...call("t5", "edit", editArgs) }, 0.1],
+    ["approval_request", { request_id: "r5", ...call("t5", "edit", editArgs), approval_display: { effective_cwd: "/Users/ada/code/acme-api", resolved_path: "/Users/ada/code/acme-api/src/app.py" } }, 0.1],
     ["gamma_approval_decision", { request_id: "r5", decision: "approve", scope: "once" }, 3],
     ["tool_start", call("t5", "edit", editArgs), 0.05],
     ["tool_end", { ...call("t5", "edit", editArgs), tool_result: { content: "Edited src/app.py (1 replacement).", is_error: false } }, 0.2],
@@ -160,7 +162,7 @@ function script(variant: FixtureVariant): Step[] {
     ...say(RERUN),
     commit(RERUN),
   ];
-  if (variant === "streaming") {
+  if (variant === "streaming" || variant === "reconnecting") {
     return [
       ...steps,
       ...done("t12", "bash", { command: "pytest -q" }, "......\n7 passed in 0.38s\n"),
@@ -173,7 +175,7 @@ function script(variant: FixtureVariant): Step[] {
     ["tool_start", call("t12", "bash", { command: "pytest -q" }), 0.2],
     ["tool_output", { ...call("t12", "bash", { command: "pytest -q" }), output: "......" }, 0.3],
     ["tool_start", call("t13", "bash", commitArgs), 0.1],
-    ["approval_request", { request_id: "r13", ...call("t13", "bash", commitArgs) }, 0.1],
+    ["approval_request", { request_id: "r13", ...call("t13", "bash", commitArgs), approval_display: { effective_cwd: "/Users/ada/code/acme-api" } }, 0.1],
   ];
 }
 
