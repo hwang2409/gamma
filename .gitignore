@@ -17,3 +17,7 @@ dist/
 
 # Local runtime state
 .gamma/
+
+# Playwright output
+web/test-results/
+web/playwright-report/
