@@ -63,6 +63,8 @@ export interface ApprovalItem {
   display: ApprovalDisplay | null;
   /** True when a sub-agent asked. */
   delegated: boolean;
+  /** Child identity used to close an orphaned delegated approval. */
+  agentInstanceId: string | null;
 }
 
 export interface NoticeItem {
@@ -143,6 +145,7 @@ function applySnapshot(state: TranscriptState, session: SessionView): Transcript
         approvalItem(state.cursor, approval.request_id, approval.tool_call, {
           display: approvalDisplay(approval.approval_display),
           delegated: approval.delegated === true,
+          agentInstanceId: text(approval.agent_instance_id),
         }),
       ];
     }
@@ -214,23 +217,24 @@ function applyEvent(state: TranscriptState, event: GammaEvent): TranscriptState 
       return requestApproval(next, event.cursor, text(payload.request_id), toolCall(payload.tool_call), {
         display: approvalDisplay(payload.approval_display),
         delegated,
+        agentInstanceId: text(asRecord(payload.data).agent_instance_id),
       });
 
     case "approval_end":
-      return closeApprovalFor(next, toolCall(payload.tool_call).id);
-
+      return delegated ? next : closeApprovalFor(next, toolCall(payload.tool_call).id);
     case "turn_end":
       // zeta ends every model turn; the run itself ends at `agent_end`, so
       // the agent is still working here (the backend derives it the same way).
       return closeStream(next);
 
     case "agent_end":
-      return delegated ? next : { ...endRun(closeStream(next), event.at), state: "idle" };
-
+      return delegated
+        ? closeDelegatedApproval(next, text(asRecord(payload.data).agent_instance_id))
+        : { ...endRun(closeStream(next), event.at), state: "idle" };
     case "turn_aborted":
       return addItem(
         delegated
-          ? next
+          ? closeDelegatedApproval(next, text(asRecord(payload.data).agent_instance_id))
           : { ...endRun(closeStream(next), event.at), state: "idle" },
         notice(event.cursor, "info", "Turn aborted."),
       );
@@ -239,7 +243,7 @@ function applyEvent(state: TranscriptState, event: GammaEvent): TranscriptState 
       const error = asRecord(payload.error);
       return addItem(
         delegated
-          ? next
+          ? closeDelegatedApproval(next, text(asRecord(payload.data).agent_instance_id))
           : { ...endRun(closeStream(next), event.at), state: "idle" },
         notice(
           event.cursor,
@@ -276,7 +280,9 @@ function notice(cursor: number, level: "info" | "error", body: string): NoticeIt
   return { kind: "notice", id: `notice-${cursor}`, cursor, level, text: body };
 }
 
-type ApprovalContext = Pick<ApprovalItem, "display" | "delegated">;
+type ApprovalContext = Pick<ApprovalItem, "display" | "delegated"> & {
+  agentInstanceId: string | null;
+};
 
 function approvalItem(
   cursor: number,
@@ -295,6 +301,7 @@ function approvalItem(
     args: call.arguments,
     phase: "pending",
     scope: null,
+    agentInstanceId: context.agentInstanceId,
   };
 }
 
@@ -477,6 +484,23 @@ function requestApproval(
     ? updateTool(base, call.id, (item) => ({ ...item, phase: "awaiting_approval" }))
     : base;
   return addItem(withTool, approvalItem(cursor, requestId, call, context));
+}
+
+function closeDelegatedApproval(state: TranscriptState, agentInstanceId: string): TranscriptState {
+  if (!agentInstanceId) {
+    return state;
+  }
+  return {
+    ...state,
+    items: state.items.map((item) =>
+      item.kind === "approval" &&
+      item.delegated &&
+      item.agentInstanceId === agentInstanceId &&
+      item.phase === "pending"
+        ? { ...item, phase: "closed" }
+        : item,
+    ),
+  };
 }
 
 function decideApproval(

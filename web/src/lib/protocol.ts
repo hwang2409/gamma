@@ -28,6 +28,7 @@ export interface PendingApproval {
   tool_call: ToolCall;
   approval_display?: ApprovalDisplay | null;
   delegated?: boolean;
+  agent_instance_id?: string | null;
 }
 
 export interface SessionView {

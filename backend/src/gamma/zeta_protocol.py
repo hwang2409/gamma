@@ -115,6 +115,7 @@ class PendingApproval(WireModel):
     tool_call: ToolCall
     approval_display: ApprovalDisplay | None = None
     delegated: bool = False
+    agent_instance_id: str | None = None
 
 
 class StatusResult(WireModel):

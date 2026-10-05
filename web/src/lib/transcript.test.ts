@@ -265,6 +265,46 @@ describe("approval state", () => {
     });
   });
 
+  it("does not let delegated approval_end close a colliding foreground approval", () => {
+    const state = apply(
+      fresh(),
+      event("approval_request", { request_id: "foreground", tool_call: call }),
+      event("approval_request", {
+        request_id: "child-request",
+        tool_call: call,
+        delegated: true,
+        data: { agent_instance_id: "child-1" },
+      }),
+      event("gamma_approval_decision", {
+        request_id: "child-request",
+        decision: "approve",
+        scope: "once",
+      }),
+      event("approval_end", { tool_call: call, data: { agent_instance_id: "child-1" } }),
+    );
+
+    expect(state.items.find((item) => item.kind === "approval" && item.requestId === "foreground"))
+      .toMatchObject({ phase: "pending" });
+    expect(state.items.find((item) => item.kind === "approval" && item.requestId === "child-request"))
+      .toMatchObject({ phase: "approved" });
+  });
+
+  it("closes delegated approval when its child ends", () => {
+    const state = apply(
+      fresh(),
+      event("approval_request", {
+        request_id: "child-request",
+        tool_call: call,
+        delegated: true,
+        data: { agent_instance_id: "child-1" },
+      }),
+      event("agent_end", { data: { agent_instance_id: "child-1" } }),
+    );
+
+    expect(state.items.find((item) => item.kind === "approval" && item.requestId === "child-request"))
+      .toMatchObject({ phase: "closed" });
+  });
+
   it("does not duplicate a repeated request", () => {
     const state = apply(
       fresh(),
