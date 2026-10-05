@@ -124,3 +124,11 @@ async def test_close_ends_every_stream() -> None:
     bus.close()
     await asyncio.wait_for(task, timeout=2)
     assert collected == [1]
+
+
+def test_events_carry_a_non_decreasing_publish_time() -> None:
+    bus = EventBus(capacity=10)
+    first = bus.publish("tool_start", {})
+    second = bus.publish("tool_end", {})
+    assert first.at > 0
+    assert second.at >= first.at
