@@ -16,7 +16,6 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket
-from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from starlette.websockets import WebSocketDisconnect
 
@@ -110,10 +109,6 @@ def create_app(
 
     def manager() -> SessionManager:
         return app.state.manager
-
-    @app.exception_handler(PolicyError)
-    async def _policy_error(request: Request, exc: PolicyError) -> JSONResponse:
-        return JSONResponse(status_code=400, content={"detail": str(exc)})
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:

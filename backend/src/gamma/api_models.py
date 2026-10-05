@@ -109,10 +109,6 @@ class SessionList(StrictModel):
     sessions: list[SessionView]
 
 
-class ErrorResponse(StrictModel):
-    detail: str
-
-
 # --- WebSocket: browser to gamma -------------------------------------------
 
 
@@ -196,7 +192,6 @@ __all__ = [
     "ClientFrame",
     "DecisionCommand",
     "ErrorFrame",
-    "ErrorResponse",
     "EventFrame",
     "OptionsResponse",
     "PingCommand",

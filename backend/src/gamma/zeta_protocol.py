@@ -11,6 +11,7 @@ Contract: ``/Users/henry/me/fun/zeta/docs/serve-protocol.md`` (protocol 1.1).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import itertools
 import json
 from collections.abc import Awaitable, Callable
@@ -270,10 +271,8 @@ class ZetaConnection:
             pass
         if self._reader_task is not None:
             self._reader_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._reader_task
-            except (asyncio.CancelledError, Exception):
-                pass
             self._reader_task = None
 
     async def _read_loop(self) -> None:
