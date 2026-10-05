@@ -39,8 +39,14 @@ class LaunchPolicy:
             tools=settings.tools,
             disallowed_tools=settings.disallowed_tools,
             require_tools=settings.require_tools,
-            env=dict(settings.zeta_env),
+            env=self._child_env(),
         )
+
+    def _child_env(self) -> dict[str, str]:
+        env = dict(self._settings.zeta_env)
+        if self._settings.anthropic_oauth_compat:
+            env.setdefault("ZETA_ANTHROPIC_OAUTH_COMPAT", "1")
+        return env
 
     def resolve_cwd(self, cwd: str) -> Path:
         """Resolve a browser-supplied directory inside an allowed root.

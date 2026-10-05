@@ -110,6 +110,7 @@ All settings come from `GAMMA_*` environment variables (or `backend/.env`).
 | `GAMMA_ALLOWED_MODELS` | built-in map (JSON) | models per provider |
 | `GAMMA_ALLOWED_ROOTS` | `~/me/fun` | `:`-separated roots a session cwd must be inside |
 | `GAMMA_ZETA_ENV` | `{}` | extra environment for each child (JSON), for example `ZETA_HOME` |
+| `GAMMA_ANTHROPIC_OAUTH_COMPAT` | `true` | sets `ZETA_ANTHROPIC_OAUTH_COMPAT=1` for each child so Claude subscription logins work (an explicit value in `GAMMA_ZETA_ENV` wins) |
 | `GAMMA_TOOLS`, `GAMMA_DISALLOWED_TOOLS`, `GAMMA_REQUIRE_TOOLS` | unset | tool policy passed to `zeta serve` |
 | `GAMMA_MAX_SESSIONS` | `8` | open sessions per backend |
 | `GAMMA_SESSION_IDLE_TIMEOUT_SECONDS` | `3600` | idle sessions are closed and reaped |
