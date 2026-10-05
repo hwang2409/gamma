@@ -10,9 +10,10 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 DEFAULT_MODELS: dict[str, list[str]] = {
     "fake": ["offline", "faster"],
@@ -29,16 +30,22 @@ class Settings(BaseSettings):
     # transport
     host: str = "127.0.0.1"
     port: int = 8777
-    allowed_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
+    allowed_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["http://localhost:5173"]
+    )
 
     # auth: a random token is generated at startup when this is unset
     access_token: str | None = None
 
     # zeta harness
     zeta_bin: str = "zeta"
-    allowed_providers: list[str] = Field(default_factory=lambda: ["fake", "claude", "codex"])
+    allowed_providers: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["fake", "claude", "codex"]
+    )
     allowed_models: dict[str, list[str]] = Field(default_factory=lambda: dict(DEFAULT_MODELS))
-    allowed_roots: list[Path] = Field(default_factory=lambda: [Path.home() / "me" / "fun"])
+    allowed_roots: Annotated[list[Path], NoDecode] = Field(
+        default_factory=lambda: [Path.home() / "me" / "fun"]
+    )
 
     # extra environment for every zeta serve child (for example ZETA_HOME)
     zeta_env: dict[str, str] = Field(default_factory=dict)
@@ -57,14 +64,18 @@ class Settings(BaseSettings):
     @field_validator("allowed_origins", "allowed_providers", mode="before")
     @classmethod
     def _split_list(cls, value: object) -> object:
-        if isinstance(value, str) and not value.strip().startswith("["):
+        """Accept a comma-separated environment value or a real list."""
+
+        if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
 
     @field_validator("allowed_roots", mode="before")
     @classmethod
     def _split_paths(cls, value: object) -> object:
-        if isinstance(value, str) and not value.strip().startswith("["):
+        """Accept a ``PATH``-style environment value or a real list."""
+
+        if isinstance(value, str):
             return [item.strip() for item in value.split(os.pathsep) if item.strip()]
         return value
 
