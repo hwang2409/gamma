@@ -100,6 +100,32 @@ describe("delta coalescing", () => {
     expect(assistants(state)[0]?.text).toBe("answer");
   });
 
+  it("drops failed retry text before the next attempt", () => {
+    const state = apply(
+      fresh(),
+      event("assistant_delta", { delta: "failed", kind: "assistant" }),
+      event("retry", { data: { retry: 1 } }),
+      event("assistant_reset", { data: {} }),
+      event("assistant_delta", { delta: "new", kind: "assistant" }),
+    );
+
+    expect(assistants(state)).toHaveLength(1);
+    expect(assistants(state)[0]?.text).toBe("new");
+    expect(state.openAssistantId).toBe(assistants(state)[0]?.id);
+  });
+
+  it("replaying a reset event log produces the same state", () => {
+    const events = [
+      event("assistant_delta", { delta: "failed", kind: "assistant" }),
+      event("retry", { data: { retry: 1 } }),
+      event("assistant_reset", { data: {} }),
+      event("assistant_delta", { delta: "new", kind: "assistant" }),
+    ];
+    const first = apply(fresh(), ...events);
+    const replay = apply(fresh(), ...events.map((item) => ({ ...item })));
+    expect(replay).toEqual(first);
+  });
+
   it("starts a second message after the first turn closes", () => {
     const state = apply(
       fresh(),

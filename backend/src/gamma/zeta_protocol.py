@@ -129,6 +129,7 @@ class StatusResult(WireModel):
 class Capabilities(WireModel):
     requests: list[str] = Field(default_factory=list)
     notifications: list[str] = Field(default_factory=list)
+    features: list[str] = Field(default_factory=list)
 
 
 class HelloResult(WireModel):
@@ -138,6 +139,9 @@ class HelloResult(WireModel):
 
     def supports(self, request: str) -> bool:
         return request in self.capabilities.requests
+
+    def supports_feature(self, feature: str) -> bool:
+        return feature in self.capabilities.features
 
 
 class ZetaEvent(WireModel):
@@ -245,6 +249,7 @@ class ZetaConnection:
             {
                 "protocol_version": CLIENT_PROTOCOL_VERSION,
                 "client_version": CLIENT_VERSION,
+                "features": ["assistant_reset"],
             },
         )
         hello = HelloResult.model_validate(result)
