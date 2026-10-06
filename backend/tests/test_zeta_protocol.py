@@ -39,6 +39,7 @@ FULL_CAPABILITIES = {
         "slash_list",
     ],
     "notifications": ["event"],
+    "features": ["assistant_reset"],
 }
 
 
@@ -108,6 +109,7 @@ def test_hello_result_reports_capabilities() -> None:
         {"protocol_version": "1.1", "server": "zeta", "capabilities": FULL_CAPABILITIES}
     )
     assert hello.supports("slash_list")
+    assert hello.supports_feature("assistant_reset")
     assert not hello.supports("fork_message")
 
 
@@ -187,9 +189,14 @@ async def test_handshake_sends_both_versions_and_accepts_1_1(scripted: Any) -> N
     await connection.aclose()
 
     assert seen[0]["method"] == "hello"
-    assert seen[0]["params"] == {"protocol_version": "1.0", "client_version": "1.1"}
+    assert seen[0]["params"] == {
+        "protocol_version": "1.0",
+        "client_version": "1.1",
+        "features": ["assistant_reset"],
+    }
     assert hello.protocol_version == "1.1"
     assert hello.supports("slash_list")
+    assert hello.supports_feature("assistant_reset")
 
 
 async def test_handshake_accepts_a_1_0_server(scripted: Any) -> None:
@@ -266,6 +273,45 @@ async def test_handshake_mismatch_error_is_surfaced(scripted: Any) -> None:
     await connection.aclose()
     assert caught.value.code == -32002
     assert caught.value.data == {"requested": "1.0", "supported": ["9.9"]}
+
+
+async def test_assistant_reset_reaches_the_handler(scripted: Any) -> None:
+    async def handler(request: dict[str, Any], writer: asyncio.StreamWriter) -> dict[str, Any]:
+        if request["method"] == "hello":
+            return _ok(
+                request,
+                {
+                    "protocol_version": "1.1",
+                    "server": "zeta",
+                    "capabilities": FULL_CAPABILITIES,
+                },
+            )
+        writer.write(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "event",
+                    "params": {
+                        "event": "assistant_reset",
+                        "session_id": "s1",
+                        "data": {},
+                    },
+                }
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        return _ok(request, {"accepted": True, "session_id": "s1"})
+
+    events: list[ZetaEvent] = []
+    connection = await ZetaConnection.connect_unix(await scripted(handler), on_event=events.append)
+    await connection.hello()
+    await connection.call("send", {"text": "hi"})
+    await asyncio.sleep(0.05)
+    await connection.aclose()
+
+    assert events[0].event == "assistant_reset"
+    assert events[0].fields == {"data": {}}
 
 
 async def test_events_reach_the_handler_while_a_request_is_open(scripted: Any) -> None:

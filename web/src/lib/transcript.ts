@@ -271,6 +271,9 @@ function applyEvent(state: TranscriptState, event: GammaEvent): TranscriptState 
       return addItem(next, notice(event.cursor, "info", `Provider retry${attempt}.`));
     }
 
+    case "assistant_reset":
+      return resetAssistant(next);
+
     default:
       return next; // unknown events advance the cursor and nothing else
   }
@@ -324,6 +327,18 @@ function endRun(state: TranscriptState, at: number): TranscriptState {
     return state;
   }
   return { ...state, runEndedAt: at };
+}
+
+function resetAssistant(state: TranscriptState): TranscriptState {
+  if (state.openAssistantId === null) {
+    return state;
+  }
+  const openId = state.openAssistantId;
+  return {
+    ...state,
+    openAssistantId: null,
+    items: state.items.filter((item) => item.id !== openId),
+  };
 }
 
 function closeStream(state: TranscriptState): TranscriptState {
