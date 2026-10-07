@@ -27,9 +27,15 @@ from .api_models import (
     DecisionCommand,
     ErrorFrame,
     EventFrame,
+    MemoryLogResponse,
+    MemoryVersionResponse,
     OptionsResponse,
     PingCommand,
     PongFrame,
+    ProjectDetailResponse,
+    ProjectInboxResponse,
+    ProjectListView,
+    ProjectSessionsResponse,
     ProviderOption,
     SendCommand,
     SessionCreateRequest,
@@ -43,6 +49,16 @@ from .api_models import (
 from .config import Settings, get_settings
 from .local_runtime import LocalProcessRuntime
 from .policy import PolicyError
+from .projects import (
+    INBOX_STATUSES,
+    ProjectBadRequest,
+    ProjectNotFound,
+    ProjectsError,
+    ProjectsService,
+    ProjectStorageError,
+    ProjectsUnsupported,
+    ProjectUnavailable,
+)
 from .runtime import RuntimeLaunchError, ZetaRuntime
 from .security import (
     TOKEN_COOKIE,
@@ -88,6 +104,7 @@ def create_app(
         zeta_bin=settings.zeta_bin, request_timeout=settings.request_timeout_seconds
     )
     app.state.manager = SessionManager(runtime=app.state.runtime, settings=settings)
+    app.state.projects = ProjectsService(runtime=app.state.runtime, settings=settings)
 
     def require_auth(
         request: Request,
@@ -109,6 +126,9 @@ def create_app(
 
     def manager() -> SessionManager:
         return app.state.manager
+
+    def projects() -> ProjectsService:
+        return app.state.projects
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:
@@ -180,6 +200,81 @@ def create_app(
         except SessionNotFound as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    # --- projects (read-only) ---------------------------------------------
+
+    @app.get("/api/projects", dependencies=auth, response_model=ProjectListView)
+    async def list_projects(
+        offset: Annotated[int, Query(ge=0)] = 0,
+        limit: Annotated[int | None, Query(ge=1, le=1000)] = None,
+    ) -> ProjectListView:
+        async with _project_errors():
+            result = await projects().list_projects(offset=offset, limit=limit)
+        return ProjectListView.from_wire(result)
+
+    @app.get("/api/projects/{project_id}", dependencies=auth, response_model=ProjectDetailResponse)
+    async def show_project(project_id: str) -> ProjectDetailResponse:
+        async with _project_errors():
+            result = await projects().show(project_id)
+        return ProjectDetailResponse.from_wire(result)
+
+    @app.get(
+        "/api/projects/{project_id}/memory/log",
+        dependencies=auth,
+        response_model=MemoryLogResponse,
+    )
+    async def project_memory_log(
+        project_id: str,
+        offset: Annotated[int, Query(ge=0)] = 0,
+        limit: Annotated[int | None, Query(ge=1, le=1000)] = None,
+    ) -> MemoryLogResponse:
+        async with _project_errors():
+            result = await projects().memory_log(project_id, offset=offset, limit=limit)
+        return MemoryLogResponse.from_wire(result)
+
+    @app.get(
+        "/api/projects/{project_id}/memory/versions/{version_id}",
+        dependencies=auth,
+        response_model=MemoryVersionResponse,
+    )
+    async def project_memory_version(
+        project_id: str,
+        version_id: str,
+        file: Annotated[str, Query()],
+    ) -> MemoryVersionResponse:
+        async with _project_errors():
+            result = await projects().memory_version(project_id, version_id, file)
+        return MemoryVersionResponse.from_version(result)
+
+    @app.get(
+        "/api/projects/{project_id}/sessions",
+        dependencies=auth,
+        response_model=ProjectSessionsResponse,
+    )
+    async def project_sessions(project_id: str) -> ProjectSessionsResponse:
+        async with _project_errors():
+            result = await projects().sessions(project_id)
+        return ProjectSessionsResponse.from_wire(result)
+
+    @app.get(
+        "/api/projects/{project_id}/inbox",
+        dependencies=auth,
+        response_model=ProjectInboxResponse,
+    )
+    async def project_inbox(
+        project_id: str,
+        status: Annotated[str, Query()] = "new",
+        offset: Annotated[int, Query(ge=0)] = 0,
+        limit: Annotated[int | None, Query(ge=1, le=1000)] = None,
+    ) -> ProjectInboxResponse:
+        if status not in INBOX_STATUSES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"status must be one of {', '.join(INBOX_STATUSES)}",
+            )
+        async with _project_errors():
+            result = await projects().inbox(project_id, status=status, offset=offset, limit=limit)
+        return ProjectInboxResponse.from_wire(result)
+
     @app.websocket("/api/sessions/{session_id}/ws")
     async def session_socket(
         websocket: WebSocket,
@@ -204,6 +299,29 @@ def _lookup(manager: SessionManager, session_id: str) -> GammaSession:
         return manager.get(session_id)
     except SessionNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@asynccontextmanager
+async def _project_errors() -> AsyncIterator[None]:
+    """Map project-read failures to HTTP responses.
+
+    A missing ``projects`` feature is ``501`` so the browser can tell "update
+    Zeta" apart from an ordinary upstream failure; an unknown project is
+    ``404``; damaged storage and an unreachable harness are ``502``.
+    """
+
+    try:
+        yield
+    except ProjectsUnsupported as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+    except ProjectNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ProjectBadRequest as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ProjectStorageError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except (ProjectUnavailable, ProjectsError, RuntimeLaunchError, ZetaProtocolError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 async def _serve_socket(

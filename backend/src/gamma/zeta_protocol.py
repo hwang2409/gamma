@@ -29,6 +29,12 @@ CLIENT_PROTOCOL_VERSION = "1.0"
 CLIENT_VERSION = "1.1"
 """Sent as ``client_version``; a 1.1 server upgrades the connection to 1.1."""
 
+PROJECTS_FEATURE = "projects"
+"""Negotiated 1.1 feature: read-only project list, memory, sessions, inbox."""
+
+REQUESTED_FEATURES = ("assistant_reset", PROJECTS_FEATURE)
+"""Optional (1.1) features gamma asks for; the server echoes the ones it has."""
+
 REQUIRED_REQUESTS = frozenset(
     {
         "list_sessions",
@@ -124,6 +130,120 @@ class StatusResult(WireModel):
     pending_approvals: list[PendingApproval] = Field(default_factory=list)
     usage: dict[str, Any] = Field(default_factory=dict)
     compaction_markers: int = 0
+
+
+# --- projects feature (1.1) ------------------------------------------------
+#
+# The ``projects`` feature adds four read-only requests and a ``project_id``
+# filter on ``list_sessions``. These models mirror the shapes in the projects
+# section of ``docs/serve-protocol.md``. Like every wire model they keep
+# unknown keys, so a later memory rewrite that enriches a record does not drop
+# data a newer gamma could use.
+
+
+class ProjectSummary(WireModel):
+    id: str
+    name: str
+    scope: str | None = None
+    roots: list[str] = Field(default_factory=list)
+    session_count: int = 0
+    last_activity: str | None = None
+
+
+class ProjectDetail(ProjectSummary):
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class MemoryFile(WireModel):
+    name: str
+    content: str = ""
+    automatic: bool = False
+    content_truncated: bool = False
+
+
+class MemorySnapshot(WireModel):
+    version_id: str | None = None
+    digest: str | None = None
+    files: list[MemoryFile] = Field(default_factory=list)
+
+
+class MemoryVersion(WireModel):
+    version_id: str
+    timestamp: str | None = None
+    kind: str | None = None
+    files_changed: list[str] = Field(default_factory=list)
+    provenance: dict[str, Any] = Field(default_factory=dict)
+    provenance_truncated: bool = False
+    target_version_id: str | None = None
+
+
+class MemoryVersionDetail(MemoryVersion):
+    file: str
+    content: str = ""
+    content_truncated: bool = False
+    diff: str = ""
+    diff_truncated: bool = False
+
+
+class ProjectListResult(WireModel):
+    projects: list[ProjectSummary] = Field(default_factory=list)
+    next_offset: int | None = None
+    truncated: bool = False
+
+
+class ProjectShowResult(WireModel):
+    project: ProjectDetail
+    memory: MemorySnapshot = Field(default_factory=MemorySnapshot)
+
+
+class MemoryLogResult(WireModel):
+    versions: list[MemoryVersion] = Field(default_factory=list)
+    next_offset: int | None = None
+    truncated: bool = False
+
+
+class MemoryVersionResult(WireModel):
+    version: MemoryVersionDetail
+
+
+class InboxMessage(WireModel):
+    """One project-inbox message, as returned by inbox ``action: "list"``.
+
+    Field names mirror the stored record: ``from`` is a reserved word, so it is
+    exposed through :attr:`sender`. ``origin`` is ``"local"`` for same-home
+    messages; any other value marks untrusted cross-project content.
+    """
+
+    id: str
+    origin: str = "local"
+    sender: dict[str, Any] = Field(default_factory=dict, alias="from")
+    to_project: str | None = None
+    kind: str | None = None
+    title: str = ""
+    body: str = ""
+    in_reply_to: str | None = None
+    created_at: str | None = None
+    claimer_session: str | None = None
+    claimed_at: str | None = None
+    outcome: str | None = None
+    reply: str | None = None
+    done_at: str | None = None
+    truncated_fields: list[str] = Field(default_factory=list)
+
+
+class ProjectInboxResult(WireModel):
+    status: str = "new"
+    messages: list[InboxMessage] = Field(default_factory=list)
+    untrusted: bool = False
+    next_offset: int | None = None
+    truncated: bool = False
+
+
+class ProjectSessionsResult(WireModel):
+    sessions: list[SessionMetadata] = Field(default_factory=list)
+    next_offset: int | None = None
+    truncated: bool = False
 
 
 class Capabilities(WireModel):
@@ -249,7 +369,7 @@ class ZetaConnection:
             {
                 "protocol_version": CLIENT_PROTOCOL_VERSION,
                 "client_version": CLIENT_VERSION,
-                "features": ["assistant_reset"],
+                "features": list(REQUESTED_FEATURES),
             },
         )
         hello = HelloResult.model_validate(result)
@@ -367,13 +487,28 @@ __all__ = [
     "CLIENT_PROTOCOL_VERSION",
     "CLIENT_VERSION",
     "MAX_FRAME_BYTES",
+    "PROJECTS_FEATURE",
+    "REQUESTED_FEATURES",
     "REQUIRED_REQUESTS",
     "Capabilities",
     "ContentBlock",
     "FrameTooLargeError",
     "HelloResult",
+    "InboxMessage",
+    "MemoryFile",
+    "MemoryLogResult",
+    "MemorySnapshot",
+    "MemoryVersion",
+    "MemoryVersionDetail",
+    "MemoryVersionResult",
     "Message",
     "PendingApproval",
+    "ProjectDetail",
+    "ProjectInboxResult",
+    "ProjectListResult",
+    "ProjectSessionsResult",
+    "ProjectShowResult",
+    "ProjectSummary",
     "SessionMetadata",
     "StatusResult",
     "ToolCall",

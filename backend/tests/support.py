@@ -34,6 +34,102 @@ FAKE_HELLO = HelloResult(
 )
 
 
+def _hello_with_projects() -> HelloResult:
+    """A handshake that advertises the optional ``projects`` feature."""
+
+    data = FAKE_HELLO.model_dump()
+    data["capabilities"]["features"] = ["assistant_reset", "projects"]
+    return HelloResult.model_validate(data)
+
+
+class ProjectsFixture:
+    """In-memory project data a :class:`FakeConnection` serves.
+
+    It answers the four read-only project requests and the ``project_id``
+    filter on ``list_sessions`` straight from Python data, so the API tests do
+    not need a real harness. An unknown project id raises the same structured
+    ``project_not_found`` error the real server sends.
+    """
+
+    def __init__(
+        self,
+        *,
+        projects: list[dict[str, Any]] | None = None,
+        details: dict[str, dict[str, Any]] | None = None,
+        memory_log: dict[str, list[dict[str, Any]]] | None = None,
+        memory_versions: dict[tuple[str, str, str], dict[str, Any]] | None = None,
+        inbox: dict[tuple[str, str], dict[str, Any]] | None = None,
+        sessions: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.projects = projects or []
+        self.details = details or {}
+        self.memory_log = memory_log or {}
+        self.memory_versions = memory_versions or {}
+        self.inbox = inbox or {}
+        self.sessions = sessions or []
+
+    def _require(self, project_id: object) -> str:
+        if not isinstance(project_id, str) or not project_id:
+            raise ZetaRpcError(-32602, "project_id must be a non-empty string")
+        known = {item["id"] for item in self.projects} | set(self.details)
+        if project_id not in known:
+            raise ZetaRpcError(
+                -32602,
+                "project not found",
+                {"code": "project_not_found", "project_id": project_id},
+            )
+        return project_id
+
+    def answer(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method == "list_projects":
+            return self._list_projects(params)
+        project_id = self._require(params.get("project_id"))
+        if method == "project_show":
+            return self.details[project_id]
+        if method == "project_memory_log":
+            return self._memory(project_id, params)
+        if method == "project_inbox":
+            return self._inbox(project_id, params)
+        if method == "list_sessions":
+            return self._sessions(project_id)
+        raise ZetaRpcError(-32601, f"method {method} is not supported")
+
+    def _list_projects(self, params: dict[str, Any]) -> dict[str, Any]:
+        offset = int(params.get("offset", 0))
+        limit = params.get("limit")
+        page = self.projects[offset:]
+        if limit is not None:
+            page = page[: int(limit)]
+        end = offset + len(page)
+        return {"projects": page, "next_offset": end if end < len(self.projects) else None}
+
+    def _memory(self, project_id: str, params: dict[str, Any]) -> dict[str, Any]:
+        if "version_id" in params or "file" in params:
+            key = (project_id, str(params.get("version_id")), str(params.get("file")))
+            if key not in self.memory_versions:
+                raise ZetaRpcError(-32602, "unknown version or file")
+            return {"version": self.memory_versions[key]}
+        versions = self.memory_log.get(project_id, [])
+        offset = int(params.get("offset", 0))
+        limit = params.get("limit")
+        page = versions[offset:]
+        if limit is not None:
+            page = page[: int(limit)]
+        end = offset + len(page)
+        return {"versions": page, "next_offset": end if end < len(versions) else None}
+
+    def _inbox(self, project_id: str, params: dict[str, Any]) -> dict[str, Any]:
+        status = str(params.get("status", "new"))
+        return self.inbox.get(
+            (project_id, status),
+            {"status": status, "messages": [], "untrusted": False, "next_offset": None},
+        )
+
+    def _sessions(self, project_id: str) -> dict[str, Any]:
+        linked = [item for item in self.sessions if item.get("project_id") == project_id]
+        return {"sessions": linked}
+
+
 class FakeConnection(RuntimeConnection):
     """A harness stand-in: records requests and lets a test emit events.
 
@@ -41,11 +137,18 @@ class FakeConnection(RuntimeConnection):
     process start-up time; the real harness is covered separately.
     """
 
-    def __init__(self, spec: RuntimeSpec, on_event: EventHandler) -> None:
+    def __init__(
+        self,
+        spec: RuntimeSpec,
+        on_event: EventHandler,
+        *,
+        projects: ProjectsFixture | None = None,
+    ) -> None:
         self.spec = spec
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.sessions: list[dict[str, Any]] = []
         self.errors: dict[str, ZetaRpcError] = {}
+        self.projects = projects
         self._on_event = on_event
         self._alive = True
         self._counter = 0
@@ -53,7 +156,7 @@ class FakeConnection(RuntimeConnection):
 
     @property
     def hello(self) -> HelloResult:
-        return FAKE_HELLO
+        return _hello_with_projects() if self.projects is not None else FAKE_HELLO
 
     @property
     def alive(self) -> bool:
@@ -64,6 +167,11 @@ class FakeConnection(RuntimeConnection):
         self.calls.append((method, params))
         if method in self.errors:
             raise self.errors[method]
+        if self.projects is not None and (
+            method in ("list_projects", "project_show", "project_memory_log", "project_inbox")
+            or (method == "list_sessions" and "project_id" in params)
+        ):
+            return self.projects.answer(method, params)
         match method:
             case "new_session":
                 self._counter += 1
@@ -127,17 +235,22 @@ class FakeConnection(RuntimeConnection):
 
 
 class FakeRuntime(ZetaRuntime):
-    def __init__(self) -> None:
+    def __init__(self, *, projects: ProjectsFixture | None = None) -> None:
         self.launched: list[FakeConnection] = []
         self.sessions: list[dict[str, Any]] = []
+        self.projects = projects
+        # Errors applied to every connection this runtime launches, so a test
+        # can make a short-lived project connection fail a specific request.
+        self.errors: dict[str, ZetaRpcError] = {}
 
     @property
     def last(self) -> FakeConnection:
         return self.launched[-1]
 
     async def launch(self, spec: RuntimeSpec, on_event: EventHandler) -> RuntimeConnection:
-        connection = FakeConnection(spec, on_event)
+        connection = FakeConnection(spec, on_event, projects=self.projects)
         connection.sessions = self.sessions
+        connection.errors.update(self.errors)
         self.launched.append(connection)
         return connection
 
@@ -174,4 +287,11 @@ async def serve(app: FastAPI) -> AsyncIterator[str]:
             await asyncio.wait_for(task, timeout=10)
 
 
-__all__ = ["FAKE_HELLO", "FakeConnection", "FakeRuntime", "free_port", "serve"]
+__all__ = [
+    "FAKE_HELLO",
+    "FakeConnection",
+    "FakeRuntime",
+    "ProjectsFixture",
+    "free_port",
+    "serve",
+]

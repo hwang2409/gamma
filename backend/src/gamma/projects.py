@@ -1,0 +1,252 @@
+"""Read-only project views, over a short-lived ``zeta serve`` connection.
+
+``zeta serve`` exposes the project registry, memory store, session list, and
+inbox through the optional ``projects`` feature. None of it needs an attached
+session, so :class:`ProjectsService` opens a throw-away harness per request,
+runs the read, and closes it again (the same pattern as listing resumable
+sessions). The browser never picks a provider for these reads; the service
+chooses one internally.
+
+This module is the one place that interprets the project wire shapes. The
+memory content a project returns is read here and nowhere else, so the planned
+Zeta memory rewrite (an entry-shaped response under a new negotiated version)
+changes :meth:`ProjectsService.show` and the memory helpers alone.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import logging
+from collections.abc import AsyncIterator
+from typing import Any
+
+from .config import Settings
+from .policy import LaunchPolicy, PolicyError
+from .runtime import RuntimeConnection, RuntimeLaunchError, RuntimeSpec, ZetaRuntime
+from .zeta_protocol import (
+    PROJECTS_FEATURE,
+    MemoryLogResult,
+    MemoryVersionResult,
+    ProjectInboxResult,
+    ProjectListResult,
+    ProjectSessionsResult,
+    ProjectShowResult,
+    SessionMetadata,
+    ZetaProtocolError,
+    ZetaRpcError,
+)
+
+logger = logging.getLogger(__name__)
+
+MEMORY_FILES = ("brief.md", "state.md", "backlog.md", "changelog.md", "decisions.md")
+"""The five memory files, in the order the protocol guarantees."""
+
+INBOX_STATUSES = ("new", "claimed", "done")
+
+# JSON-RPC error codes the projects requests use (serve-protocol.md).
+_PROJECT_NOT_FOUND_DATA = "project_not_found"
+_STORAGE_ERROR_CODE = -32000
+_BAD_PARAMS_CODE = -32602
+
+
+class ProjectsError(Exception):
+    """A project read cannot be served."""
+
+
+class ProjectsUnsupported(ProjectsError):
+    """The running Zeta does not offer the ``projects`` feature."""
+
+
+class ProjectNotFound(ProjectsError):
+    """No project has the requested id."""
+
+    def __init__(self, project_id: str) -> None:
+        super().__init__(f"no project {project_id!r}")
+        self.project_id = project_id
+
+
+class ProjectStorageError(ProjectsError):
+    """The stored project data is invalid or unavailable."""
+
+
+class ProjectBadRequest(ProjectsError):
+    """The request names an unknown file, version, or parameter."""
+
+
+class ProjectUnavailable(ProjectsError):
+    """The harness could not be launched or reached for this read."""
+
+
+class ProjectsService:
+    """Read project metadata, memory, sessions, and inbox from Zeta."""
+
+    def __init__(self, *, runtime: ZetaRuntime, settings: Settings) -> None:
+        self._runtime = runtime
+        self._settings = settings
+        self._policy = LaunchPolicy(settings)
+
+    async def list_projects(
+        self, *, offset: int = 0, limit: int | None = None
+    ) -> ProjectListResult:
+        params = _page_params(offset, limit)
+        async with self._connect() as connection:
+            result = await self._call(connection, "list_projects", params)
+            return ProjectListResult.model_validate(result)
+
+    async def show(self, project_id: str) -> ProjectShowResult:
+        async with self._connect() as connection:
+            result = await self._call(connection, "project_show", {"project_id": project_id})
+            return ProjectShowResult.model_validate(result)
+
+    async def memory_log(
+        self, project_id: str, *, offset: int = 0, limit: int | None = None
+    ) -> MemoryLogResult:
+        params = {"project_id": project_id, **_page_params(offset, limit)}
+        async with self._connect() as connection:
+            result = await self._call(connection, "project_memory_log", params)
+            return MemoryLogResult.model_validate(result)
+
+    async def memory_version(
+        self, project_id: str, version_id: str, file: str
+    ) -> MemoryVersionResult:
+        if file not in MEMORY_FILES:
+            raise ProjectBadRequest(f"unknown memory file {file!r}")
+        params = {"project_id": project_id, "version_id": version_id, "file": file}
+        async with self._connect() as connection:
+            result = await self._call(connection, "project_memory_log", params)
+            return MemoryVersionResult.model_validate(result)
+
+    async def inbox(
+        self,
+        project_id: str,
+        *,
+        status: str = "new",
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> ProjectInboxResult:
+        if status not in INBOX_STATUSES:
+            raise ProjectBadRequest(f"unknown inbox status {status!r}")
+        params = {"project_id": project_id, "status": status, **_page_params(offset, limit)}
+        async with self._connect() as connection:
+            result = await self._call(connection, "project_inbox", params)
+            return ProjectInboxResult.model_validate(result)
+
+    async def sessions(self, project_id: str) -> ProjectSessionsResult:
+        """Sessions linked to one project, merged across the allowed providers.
+
+        ``list_sessions`` filters by the harness's own launch provider (a fake
+        server lists only fake sessions, a real server omits them), so one
+        connection cannot see a project's whole session set. The service asks
+        every allowed provider and merges by session id. A provider that fails
+        to launch is skipped, so one bad provider does not hide the rest.
+        """
+
+        merged: dict[str, SessionMetadata] = {}
+        truncated = False
+        launched = 0
+        last_error: Exception | None = None
+        for provider in self._providers():
+            try:
+                async with self._connect(provider) as connection:
+                    result = await self._call(
+                        connection, "list_sessions", {"project_id": project_id}
+                    )
+            except (RuntimeLaunchError, ProjectUnavailable) as exc:
+                last_error = exc
+                logger.warning("project sessions: provider %s unavailable: %s", provider, exc)
+                continue
+            launched += 1
+            page = ProjectSessionsResult.model_validate(result)
+            truncated = truncated or page.truncated
+            for session in page.sessions:
+                merged.setdefault(session.session_id, session)
+        if launched == 0 and last_error is not None:
+            raise ProjectUnavailable(str(last_error))
+        return ProjectSessionsResult(sessions=list(merged.values()), truncated=truncated)
+
+    # --- connection and errors --------------------------------------------
+
+    def _providers(self) -> list[str]:
+        return list(self._settings.allowed_providers)
+
+    def _read_provider(self) -> str:
+        """A cheap provider for project-level reads (not session filtering).
+
+        Project, memory, and inbox reads are provider-independent, so ``fake``
+        is preferred: it needs no credentials and starts fastest.
+        """
+
+        providers = self._providers()
+        if not providers:
+            raise ProjectUnavailable("no provider is allowed")
+        return "fake" if "fake" in providers else providers[0]
+
+    @contextlib.asynccontextmanager
+    async def _connect(self, provider: str | None = None) -> AsyncIterator[RuntimeConnection]:
+        chosen = provider or self._read_provider()
+        try:
+            spec = self._resolve(chosen)
+        except PolicyError as exc:
+            raise ProjectUnavailable(str(exc)) from exc
+        connection = await self._runtime.launch(spec, _ignore_events)
+        try:
+            if not connection.supports_feature(PROJECTS_FEATURE):
+                raise ProjectsUnsupported(
+                    "this Zeta server does not offer the projects feature; update Zeta"
+                )
+            yield connection
+        finally:
+            with contextlib.suppress(Exception):
+                await connection.aclose()
+
+    def _resolve(self, provider: str) -> RuntimeSpec:
+        # Project reads do not depend on model or cwd; the policy still vets
+        # the provider against the allowlist.
+        return self._policy.resolve(provider=provider, model=None, cwd=None)
+
+    async def _call(
+        self, connection: RuntimeConnection, method: str, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        try:
+            return await connection.call(method, params)
+        except ZetaRpcError as exc:
+            raise _translate(exc) from exc
+        except ZetaProtocolError as exc:
+            raise ProjectUnavailable(str(exc)) from exc
+
+
+def _translate(exc: ZetaRpcError) -> ProjectsError:
+    data = exc.data if isinstance(exc.data, dict) else {}
+    if exc.code == _BAD_PARAMS_CODE and data.get("code") == _PROJECT_NOT_FOUND_DATA:
+        return ProjectNotFound(str(data.get("project_id", "")))
+    if exc.code == _STORAGE_ERROR_CODE:
+        return ProjectStorageError("project storage is invalid or unavailable")
+    if exc.code == _BAD_PARAMS_CODE:
+        return ProjectBadRequest(exc.message)
+    return ProjectUnavailable(exc.message)
+
+
+def _page_params(offset: int, limit: int | None) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+    if offset:
+        params["offset"] = offset
+    if limit is not None:
+        params["limit"] = limit
+    return params
+
+
+def _ignore_events(_event: Any) -> None:
+    return None
+
+
+__all__ = [
+    "INBOX_STATUSES",
+    "MEMORY_FILES",
+    "ProjectBadRequest",
+    "ProjectNotFound",
+    "ProjectStorageError",
+    "ProjectUnavailable",
+    "ProjectsError",
+    "ProjectsService",
+    "ProjectsUnsupported",
+]
