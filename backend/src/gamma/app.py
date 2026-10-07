@@ -57,6 +57,7 @@ from .projects import (
     ProjectsService,
     ProjectStorageError,
     ProjectsUnsupported,
+    ProjectTimeout,
     ProjectUnavailable,
 )
 from .runtime import RuntimeLaunchError, ZetaRuntime
@@ -313,6 +314,8 @@ async def _project_errors() -> AsyncIterator[None]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ProjectStorageError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except ProjectTimeout as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
     except (ProjectUnavailable, ProjectsError, RuntimeLaunchError, ZetaProtocolError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 

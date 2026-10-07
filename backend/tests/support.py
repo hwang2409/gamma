@@ -70,6 +70,9 @@ class ProjectsFixture:
         session_paging: bool = True,
         session_page_size: int | None = None,
         page_size: int | None = None,
+        hang_on_page: int | None = None,
+        error_on_page: int | None = None,
+        page_error: ZetaRpcError | None = None,
     ) -> None:
         self.projects = projects or []
         self.details = details or {}
@@ -85,6 +88,13 @@ class ProjectsFixture:
         # requested ``limit`` so a test can force a multi-page walk with a tiny
         # fixture. ``None`` honours the requested ``limit``.
         self.page_size = page_size
+        # Fault injection for the bounded walk, keyed by 1-based page number of
+        # a paged read. ``hang_on_page`` makes that page wait forever (until the
+        # walk's per-call timeout cancels it); ``error_on_page`` raises
+        # ``page_error`` on that page, modelling a semantic failure mid-walk.
+        self.hang_on_page = hang_on_page
+        self.error_on_page = error_on_page
+        self.page_error = page_error
 
     def _slice(self, records: list[Any], params: dict[str, Any]) -> tuple[list[Any], int | None]:
         offset = int(params.get("offset", 0))
@@ -195,6 +205,7 @@ class FakeConnection(RuntimeConnection):
         self._on_event = on_event
         self._alive = True
         self._counter = 0
+        self._walk_page = 0
         self._pending: dict[str, dict[str, Any]] = {}
 
     @property
@@ -216,6 +227,7 @@ class FakeConnection(RuntimeConnection):
             method in ("list_projects", "project_show", "project_memory_log", "project_inbox")
             or (method == "list_sessions" and "project_id" in params)
         ):
+            await self._maybe_fault(method)
             return self.projects.answer(method, params)
         match method:
             case "new_session":
@@ -248,6 +260,25 @@ class FakeConnection(RuntimeConnection):
                     "compaction_markers": 0,
                 }
         raise ZetaRpcError(-32601, f"method {method} is not supported")
+
+    async def _maybe_fault(self, method: str) -> None:
+        """Inject a hang or a semantic error on a chosen page of a paged read.
+
+        Counts calls to the paged reads only, so a test can make, for example,
+        the second page hang forever or fail while the first page still returns.
+        """
+
+        if self.projects is None or method not in (
+            "list_projects",
+            "project_memory_log",
+            "project_inbox",
+        ):
+            return
+        self._walk_page += 1
+        if self.projects.hang_on_page == self._walk_page:
+            await asyncio.Event().wait()  # wait until the caller's timeout cancels us
+        if self.projects.error_on_page == self._walk_page and self.projects.page_error:
+            raise self.projects.page_error
 
     def _metadata(self, session_id: str, params: dict[str, Any]) -> dict[str, Any]:
         return {

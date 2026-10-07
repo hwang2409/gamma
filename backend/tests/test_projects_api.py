@@ -7,6 +7,7 @@ cross-provider session merge, and the inbox untrusted flag.
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 
 import httpx
@@ -14,7 +15,7 @@ import pytest
 
 from gamma.app import create_app
 from gamma.config import Settings
-from gamma.projects import ProjectsService
+from gamma.projects import ProjectsService, ProjectTimeout
 from gamma.security import TOKEN_HEADER
 from gamma.zeta_protocol import ZetaRpcError
 
@@ -211,9 +212,13 @@ def _fixture() -> ProjectsFixture:
 
 
 async def _make_client(
-    settings: Settings, runtime: FakeRuntime
+    settings: Settings, runtime: FakeRuntime, *, walk_deadline: float | None = None
 ) -> AsyncIterator[httpx.AsyncClient]:
     app = create_app(settings=settings, runtime=runtime)
+    if walk_deadline is not None:
+        app.state.projects = ProjectsService(
+            runtime=runtime, settings=settings, walk_deadline=walk_deadline
+        )
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
@@ -477,15 +482,57 @@ async def test_walk_stops_at_the_page_cap(settings: Settings) -> None:
     assert result.complete is False
 
 
-async def test_walk_stops_at_the_time_bound(settings: Settings) -> None:
-    fixture = ProjectsFixture(projects=_many_projects(5), page_size=1)
-    # A zero-second budget returns after the first page while records remain.
+async def test_walk_returns_collected_pages_when_a_later_page_hangs(settings: Settings) -> None:
+    # Page 1 returns; page 2 hangs forever. The per-call deadline must cut the
+    # hang and return page 1 with complete=False, not wait for the request
+    # timeout. The whole call finishes within the walk deadline plus slack.
+    fixture = ProjectsFixture(projects=_many_projects(5), page_size=1, hang_on_page=2)
     service = ProjectsService(
-        runtime=FakeRuntime(projects=fixture), settings=settings, walk_deadline=0.0
+        runtime=FakeRuntime(projects=fixture), settings=settings, walk_deadline=0.2
     )
+    start = time.monotonic()
     result = await service.list_projects()
+    elapsed = time.monotonic() - start
     assert [item.id for item in result.projects] == ["p_0"]
     assert result.complete is False
+    assert elapsed < 2.0  # far below the 30 s request timeout
+
+
+async def test_walk_times_out_when_the_first_page_hangs(settings: Settings) -> None:
+    # Nothing was collected, so there is no partial list to return: the walk
+    # raises a gateway-timeout error instead of hanging or losing it as a 500.
+    fixture = ProjectsFixture(projects=_many_projects(5), page_size=1, hang_on_page=1)
+    service = ProjectsService(
+        runtime=FakeRuntime(projects=fixture), settings=settings, walk_deadline=0.2
+    )
+    start = time.monotonic()
+    with pytest.raises(ProjectTimeout):
+        await service.list_projects()
+    assert time.monotonic() - start < 2.0
+
+
+async def test_first_page_hang_is_a_504(settings: Settings) -> None:
+    fixture = ProjectsFixture(projects=_many_projects(5), page_size=1, hang_on_page=1)
+    runtime = FakeRuntime(projects=fixture)
+    async for http_client in _make_client(settings, runtime, walk_deadline=0.2):
+        response = await http_client.get("/api/projects")
+        assert response.status_code == 504
+
+
+async def test_semantic_error_mid_walk_still_surfaces(settings: Settings) -> None:
+    # Page 1 returns, page 2 raises invalid storage. Even though a page was
+    # collected, a semantic RPC error is raised, not swallowed as a partial.
+    fixture = ProjectsFixture(
+        projects=_many_projects(5),
+        page_size=1,
+        error_on_page=2,
+        page_error=ZetaRpcError(-32000, "bad storage"),
+    )
+    runtime = FakeRuntime(projects=fixture)
+    async for http_client in _make_client(settings, runtime):
+        response = await http_client.get("/api/projects")
+        assert response.status_code == 502
+        assert "invalid or unavailable" in response.json()["detail"]
 
 
 # --- storage errors --------------------------------------------------------

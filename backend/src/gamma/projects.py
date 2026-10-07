@@ -15,6 +15,7 @@ changes :meth:`ProjectsService.show` and the memory helpers alone.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import time
@@ -100,6 +101,15 @@ class ProjectBadRequest(ProjectsError):
 
 class ProjectUnavailable(ProjectsError):
     """The harness could not be launched or reached for this read."""
+
+
+class ProjectTimeout(ProjectsError):
+    """A paged read returned no page before the walk deadline ran out.
+
+    This is a gateway timeout: the harness answered nothing in time, so there
+    is no partial list to return. A walk that already collected a page never
+    raises this; it returns that page with ``complete=False`` instead.
+    """
 
 
 @dataclass(frozen=True)
@@ -336,6 +346,29 @@ class ProjectsService:
         except ZetaProtocolError as exc:
             raise ProjectUnavailable(str(exc)) from exc
 
+    async def _call_bounded(
+        self,
+        connection: RuntimeConnection,
+        method: str,
+        params: dict[str, Any],
+        budget: float,
+    ) -> dict[str, Any]:
+        """One paged call, bounded by the remaining walk budget.
+
+        Without this, a single page waits for the connection's whole request
+        timeout (30 s), so one slow page can run far past the walk deadline and,
+        on expiry, raise a bare ``TimeoutError`` that escapes the walk. Here the
+        call is capped at the time the walk has left and a timeout surfaces as
+        :class:`ProjectTimeout`, which the walk turns into a partial result or a
+        gateway-timeout error.
+        """
+
+        try:
+            async with asyncio.timeout(budget):
+                return await self._call(connection, method, params)
+        except TimeoutError as exc:
+            raise ProjectTimeout(f"{method} did not respond within the walk deadline") from exc
+
     async def _walk(
         self,
         connection: RuntimeConnection,
@@ -346,24 +379,38 @@ class ProjectsService:
         """Follow ``next_offset`` over one connection, bounded by time and pages.
 
         Each request asks for :data:`PAGE_LIMIT` records, so a list of any real
-        size needs only a few round trips. The walk returns ``complete=True``
-        once a page reports ``next_offset: null``. It returns ``complete=False``
-        when it instead hits the page cap, the deadline, or a server that stops
-        advancing ``next_offset``, so the caller can warn that the list may be
-        short rather than hang or show a silent prefix.
+        size needs only a few round trips. Every call is capped at the time the
+        walk has left, so a single hung page cannot outlast the deadline. The
+        walk returns ``complete=True`` once a page reports ``next_offset: null``.
+        It returns ``complete=False`` when it instead hits the page cap, the
+        deadline, a server that stops advancing ``next_offset``, or a timeout or
+        transport failure after at least one page was collected, so the caller
+        can warn that the list may be short rather than hang or show a silent
+        prefix. With no page collected yet, a timeout raises
+        :class:`ProjectTimeout` and a transport failure or a semantic RPC error
+        (invalid storage, unknown project) surfaces unchanged.
         """
 
         pages: list[_PageT] = []
         offset = 0
         deadline = time.monotonic() + self._walk_deadline
         for _ in range(self._walk_page_cap):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 and pages:
+                return pages, False
             params = {**base_params, "offset": offset, "limit": PAGE_LIMIT}
-            page = parse(await self._call(connection, method, params))
+            try:
+                raw = await self._call_bounded(connection, method, params, max(remaining, 0.0))
+            except (ProjectTimeout, ProjectUnavailable):
+                if pages:
+                    return pages, False
+                raise
+            page = parse(raw)
             pages.append(page)
             next_offset = page.next_offset
             if next_offset is None:
                 return pages, True
-            if next_offset <= offset or time.monotonic() >= deadline:
+            if next_offset <= offset:
                 return pages, False
             offset = next_offset
         return pages, False
@@ -393,6 +440,7 @@ __all__ = [
     "ProjectBadRequest",
     "ProjectNotFound",
     "ProjectStorageError",
+    "ProjectTimeout",
     "ProjectUnavailable",
     "ProjectsError",
     "ProjectsService",
