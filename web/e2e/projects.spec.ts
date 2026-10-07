@@ -56,8 +56,7 @@ const PROJECTS = {
       last_activity: new Date(Date.now() - 2 * 86_400_000).toISOString(),
     },
   ],
-  next_offset: null,
-  truncated: false,
+  complete: true,
 };
 
 const DETAIL = {
@@ -126,8 +125,7 @@ const LOG = {
       target_version_id: null,
     },
   ],
-  next_offset: null,
-  truncated: false,
+  complete: true,
 };
 
 const DIFF = {
@@ -220,8 +218,7 @@ const INBOX = {
     },
   ],
   untrusted: true,
-  next_offset: null,
-  truncated: false,
+  complete: true,
 };
 
 async function stub(page: Page): Promise<void> {

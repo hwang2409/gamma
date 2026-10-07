@@ -2,20 +2,14 @@
 
 import type {
   CreateSessionBody,
-  InboxMessage,
   InboxStatus,
-  MemoryLogResponse,
-  MemoryVersion,
   MemoryVersionDetail,
   OptionsResponse,
   PagedInbox,
   PagedMemoryLog,
   PagedProjects,
   ProjectDetailResponse,
-  ProjectInboxResponse,
-  ProjectListResponse,
   ProjectSessionsResponse,
-  ProjectSummary,
   SessionView,
   ZetaSessionSummary,
 } from "./protocol";
@@ -100,39 +94,14 @@ async function errorDetail(response: Response): Promise<string> {
 }
 
 /**
- * Walk a paged endpoint to its end, following `next_offset`.
+ * Read a fully-paged project endpoint.
  *
- * Zeta caps a page at 100 records, so a project list, memory history, or inbox
- * larger than that would otherwise show only its first page. `PAGE_CAP` bounds
- * the walk far above any real project; stopping on it (or on a server that
- * never advances) returns `complete: false` so the view can warn.
+ * Zeta pages a project list, memory history, or inbox, but the backend walks
+ * every page over one `zeta serve` connection and returns the whole set with a
+ * `complete` flag, so the browser makes a single request per view. `complete`
+ * is false only when a safety bound stopped the backend walk, so the view can
+ * warn that the list may be short.
  */
-const PAGE_CAP = 5000;
-
-interface Page<T> {
-  items: T[];
-  nextOffset: number | null;
-}
-
-async function pageAll<T>(fetchPage: (offset: number) => Promise<Page<T>>): Promise<{
-  items: T[];
-  complete: boolean;
-}> {
-  const items: T[] = [];
-  let offset = 0;
-  for (;;) {
-    const page = await fetchPage(offset);
-    items.push(...page.items);
-    const next = page.nextOffset ?? null;
-    if (next === null) {
-      return { items, complete: true };
-    }
-    if (next <= offset || items.length >= PAGE_CAP) {
-      return { items, complete: false };
-    }
-    offset = next;
-  }
-}
 
 export const api = {
   options: () => request<OptionsResponse>("/api/options"),
@@ -146,24 +115,11 @@ export const api = {
   session: (id: string) => request<SessionView>(`/api/sessions/${encodeURIComponent(id)}`),
   closeSession: (id: string) =>
     request<void>(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }),
-  projects: async (): Promise<PagedProjects> => {
-    const { items, complete } = await pageAll<ProjectSummary>(async (offset) => {
-      const page = await request<ProjectListResponse>(`/api/projects?offset=${offset}`);
-      return { items: page.projects, nextOffset: page.next_offset };
-    });
-    return { projects: items, complete };
-  },
+  projects: () => request<PagedProjects>("/api/projects"),
   project: (id: string) =>
     request<ProjectDetailResponse>(`/api/projects/${encodeURIComponent(id)}`),
-  projectMemoryLog: async (id: string): Promise<PagedMemoryLog> => {
-    const { items, complete } = await pageAll<MemoryVersion>(async (offset) => {
-      const page = await request<MemoryLogResponse>(
-        `/api/projects/${encodeURIComponent(id)}/memory/log?offset=${offset}`,
-      );
-      return { items: page.versions, nextOffset: page.next_offset };
-    });
-    return { versions: items, complete };
-  },
+  projectMemoryLog: (id: string) =>
+    request<PagedMemoryLog>(`/api/projects/${encodeURIComponent(id)}/memory/log`),
   projectMemoryVersion: (id: string, versionId: string, file: string) =>
     request<MemoryVersionDetail>(
       `/api/projects/${encodeURIComponent(id)}/memory/versions/${encodeURIComponent(versionId)}` +
@@ -171,16 +127,8 @@ export const api = {
     ),
   projectSessions: (id: string) =>
     request<ProjectSessionsResponse>(`/api/projects/${encodeURIComponent(id)}/sessions`),
-  projectInbox: async (id: string, status: InboxStatus): Promise<PagedInbox> => {
-    let untrusted = false;
-    const { items, complete } = await pageAll<InboxMessage>(async (offset) => {
-      const page = await request<ProjectInboxResponse>(
-        `/api/projects/${encodeURIComponent(id)}/inbox` +
-          `?status=${encodeURIComponent(status)}&offset=${offset}`,
-      );
-      untrusted = untrusted || page.untrusted;
-      return { items: page.messages, nextOffset: page.next_offset };
-    });
-    return { status, messages: items, untrusted, complete };
-  },
+  projectInbox: (id: string, status: InboxStatus) =>
+    request<PagedInbox>(
+      `/api/projects/${encodeURIComponent(id)}/inbox?status=${encodeURIComponent(status)}`,
+    ),
 };

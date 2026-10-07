@@ -6,17 +6,15 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .projects import PagedInbox, PagedMemoryLog, PagedProjects
 from .session import RunState, SessionSnapshot
 from .zeta_protocol import (
     InboxMessage,
-    MemoryLogResult,
     MemorySnapshot,
     MemoryVersion,
     MemoryVersionResult,
     PendingApproval,
     ProjectDetail,
-    ProjectInboxResult,
-    ProjectListResult,
     ProjectSessionsResult,
     ProjectShowResult,
     ProjectSummary,
@@ -172,15 +170,13 @@ class ProjectDetailView(ProjectSummaryView):
 
 class ProjectListView(StrictModel):
     projects: list[ProjectSummaryView]
-    next_offset: int | None = None
-    truncated: bool = False
+    complete: bool = True
 
     @classmethod
-    def from_wire(cls, result: ProjectListResult) -> ProjectListView:
+    def from_wire(cls, result: PagedProjects) -> ProjectListView:
         return cls(
             projects=[ProjectSummaryView.from_wire(item) for item in result.projects],
-            next_offset=result.next_offset,
-            truncated=result.truncated,
+            complete=result.complete,
         )
 
 
@@ -249,15 +245,13 @@ class MemoryVersionView(StrictModel):
 
 class MemoryLogResponse(StrictModel):
     versions: list[MemoryVersionView]
-    next_offset: int | None = None
-    truncated: bool = False
+    complete: bool = True
 
     @classmethod
-    def from_wire(cls, result: MemoryLogResult) -> MemoryLogResponse:
+    def from_wire(cls, result: PagedMemoryLog) -> MemoryLogResponse:
         return cls(
             versions=[MemoryVersionView.from_wire(item) for item in result.versions],
-            next_offset=result.next_offset,
-            truncated=result.truncated,
+            complete=result.complete,
         )
 
 
@@ -371,17 +365,15 @@ class ProjectInboxResponse(StrictModel):
     status: str
     messages: list[InboxMessageView]
     untrusted: bool
-    next_offset: int | None = None
-    truncated: bool = False
+    complete: bool = True
 
     @classmethod
-    def from_wire(cls, result: ProjectInboxResult) -> ProjectInboxResponse:
+    def from_wire(cls, result: PagedInbox) -> ProjectInboxResponse:
         return cls(
             status=result.status,
             messages=[InboxMessageView.from_wire(item) for item in result.messages],
             untrusted=result.untrusted,
-            next_offset=result.next_offset,
-            truncated=result.truncated,
+            complete=result.complete,
         )
 
 

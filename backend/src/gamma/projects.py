@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from collections.abc import AsyncIterator
-from typing import Any
+import time
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
+from typing import Any, Protocol, TypeVar
 
 from .config import Settings
 from .policy import LaunchPolicy, PolicyError
@@ -26,12 +28,15 @@ from .runtime import RuntimeConnection, RuntimeLaunchError, RuntimeSpec, ZetaRun
 from .zeta_protocol import (
     LIST_SESSIONS_PAGING_FEATURE,
     PROJECTS_FEATURE,
+    InboxMessage,
     MemoryLogResult,
+    MemoryVersion,
     MemoryVersionResult,
     ProjectInboxResult,
     ProjectListResult,
     ProjectSessionsResult,
     ProjectShowResult,
+    ProjectSummary,
     SessionMetadata,
     ZetaProtocolError,
     ZetaRpcError,
@@ -50,6 +55,18 @@ MAX_SESSION_PAGES = 1000
 Each page carries up to the frame limit of sessions, so this spans far more
 than any real project. It only stops a server that never advances
 ``next_offset`` from looping forever."""
+
+PAGE_LIMIT = 1000
+"""Largest page ``list_projects``, ``project_memory_log``, and ``project_inbox``
+accept (serve-protocol.md). Asking for it keeps a full read to a handful of
+round trips over one connection."""
+
+_DEFAULT_WALK_DEADLINE = 10.0
+"""Seconds one paged read may run before it returns what it has so far."""
+
+_DEFAULT_WALK_PAGE_CAP = 50
+"""Most pages one paged read follows. At :data:`PAGE_LIMIT` records each this
+is far above any real project; it only bounds a server that never ends."""
 
 # JSON-RPC error codes the projects requests use (serve-protocol.md).
 _PROJECT_NOT_FOUND_DATA = "project_not_found"
@@ -85,34 +102,85 @@ class ProjectUnavailable(ProjectsError):
     """The harness could not be launched or reached for this read."""
 
 
+@dataclass(frozen=True)
+class PagedProjects:
+    """Every project a bounded walk collected and whether it reached the end."""
+
+    projects: list[ProjectSummary]
+    complete: bool
+
+
+@dataclass(frozen=True)
+class PagedMemoryLog:
+    """Every memory version a bounded walk collected, oldest first."""
+
+    versions: list[MemoryVersion]
+    complete: bool
+
+
+@dataclass(frozen=True)
+class PagedInbox:
+    """Every inbox message a bounded walk collected for one status."""
+
+    status: str
+    messages: list[InboxMessage]
+    untrusted: bool
+    complete: bool
+
+
+class _WalkedPage(Protocol):
+    """One page of a paged request: enough to follow ``next_offset``."""
+
+    next_offset: int | None
+
+
+_PageT = TypeVar("_PageT", bound=_WalkedPage)
+
+
 class ProjectsService:
     """Read project metadata, memory, sessions, and inbox from Zeta."""
 
-    def __init__(self, *, runtime: ZetaRuntime, settings: Settings) -> None:
+    def __init__(
+        self,
+        *,
+        runtime: ZetaRuntime,
+        settings: Settings,
+        walk_deadline: float = _DEFAULT_WALK_DEADLINE,
+        walk_page_cap: int = _DEFAULT_WALK_PAGE_CAP,
+    ) -> None:
         self._runtime = runtime
         self._settings = settings
         self._policy = LaunchPolicy(settings)
+        self._walk_deadline = walk_deadline
+        self._walk_page_cap = walk_page_cap
 
-    async def list_projects(
-        self, *, offset: int = 0, limit: int | None = None
-    ) -> ProjectListResult:
-        params = _page_params(offset, limit)
+    async def list_projects(self) -> PagedProjects:
+        """Every project, read to the end over one short-lived connection."""
+
         async with self._connect() as connection:
-            result = await self._call(connection, "list_projects", params)
-            return ProjectListResult.model_validate(result)
+            pages, complete = await self._walk(
+                connection, "list_projects", {}, ProjectListResult.model_validate
+            )
+        projects = [item for page in pages for item in page.projects]
+        return PagedProjects(projects=projects, complete=complete)
 
     async def show(self, project_id: str) -> ProjectShowResult:
         async with self._connect() as connection:
             result = await self._call(connection, "project_show", {"project_id": project_id})
             return ProjectShowResult.model_validate(result)
 
-    async def memory_log(
-        self, project_id: str, *, offset: int = 0, limit: int | None = None
-    ) -> MemoryLogResult:
-        params = {"project_id": project_id, **_page_params(offset, limit)}
+    async def memory_log(self, project_id: str) -> PagedMemoryLog:
+        """The whole memory history, oldest first, over one connection."""
+
         async with self._connect() as connection:
-            result = await self._call(connection, "project_memory_log", params)
-            return MemoryLogResult.model_validate(result)
+            pages, complete = await self._walk(
+                connection,
+                "project_memory_log",
+                {"project_id": project_id},
+                MemoryLogResult.model_validate,
+            )
+        versions = [item for page in pages for item in page.versions]
+        return PagedMemoryLog(versions=versions, complete=complete)
 
     async def memory_version(
         self, project_id: str, version_id: str, file: str
@@ -129,15 +197,25 @@ class ProjectsService:
         project_id: str,
         *,
         status: str = "new",
-        offset: int = 0,
-        limit: int | None = None,
-    ) -> ProjectInboxResult:
+    ) -> PagedInbox:
+        """Every inbox message for one status, read to the end over one connection.
+
+        ``untrusted`` is ``True`` when any collected page held a non-local
+        message, so the browser warns once for the whole list.
+        """
+
         if status not in INBOX_STATUSES:
             raise ProjectBadRequest(f"unknown inbox status {status!r}")
-        params = {"project_id": project_id, "status": status, **_page_params(offset, limit)}
         async with self._connect() as connection:
-            result = await self._call(connection, "project_inbox", params)
-            return ProjectInboxResult.model_validate(result)
+            pages, complete = await self._walk(
+                connection,
+                "project_inbox",
+                {"project_id": project_id, "status": status},
+                ProjectInboxResult.model_validate,
+            )
+        messages = [item for page in pages for item in page.messages]
+        untrusted = any(page.untrusted for page in pages)
+        return PagedInbox(status=status, messages=messages, untrusted=untrusted, complete=complete)
 
     async def sessions(self, project_id: str) -> ProjectSessionsResult:
         """Sessions linked to one project, merged across the allowed providers.
@@ -258,6 +336,38 @@ class ProjectsService:
         except ZetaProtocolError as exc:
             raise ProjectUnavailable(str(exc)) from exc
 
+    async def _walk(
+        self,
+        connection: RuntimeConnection,
+        method: str,
+        base_params: dict[str, Any],
+        parse: Callable[[dict[str, Any]], _PageT],
+    ) -> tuple[list[_PageT], bool]:
+        """Follow ``next_offset`` over one connection, bounded by time and pages.
+
+        Each request asks for :data:`PAGE_LIMIT` records, so a list of any real
+        size needs only a few round trips. The walk returns ``complete=True``
+        once a page reports ``next_offset: null``. It returns ``complete=False``
+        when it instead hits the page cap, the deadline, or a server that stops
+        advancing ``next_offset``, so the caller can warn that the list may be
+        short rather than hang or show a silent prefix.
+        """
+
+        pages: list[_PageT] = []
+        offset = 0
+        deadline = time.monotonic() + self._walk_deadline
+        for _ in range(self._walk_page_cap):
+            params = {**base_params, "offset": offset, "limit": PAGE_LIMIT}
+            page = parse(await self._call(connection, method, params))
+            pages.append(page)
+            next_offset = page.next_offset
+            if next_offset is None:
+                return pages, True
+            if next_offset <= offset or time.monotonic() >= deadline:
+                return pages, False
+            offset = next_offset
+        return pages, False
+
 
 def _translate(exc: ZetaRpcError) -> ProjectsError:
     data = exc.data if isinstance(exc.data, dict) else {}
@@ -270,15 +380,6 @@ def _translate(exc: ZetaRpcError) -> ProjectsError:
     return ProjectUnavailable(exc.message)
 
 
-def _page_params(offset: int, limit: int | None) -> dict[str, Any]:
-    params: dict[str, Any] = {}
-    if offset:
-        params["offset"] = offset
-    if limit is not None:
-        params["limit"] = limit
-    return params
-
-
 def _ignore_events(_event: Any) -> None:
     return None
 
@@ -286,6 +387,9 @@ def _ignore_events(_event: Any) -> None:
 __all__ = [
     "INBOX_STATUSES",
     "MEMORY_FILES",
+    "PagedInbox",
+    "PagedMemoryLog",
+    "PagedProjects",
     "ProjectBadRequest",
     "ProjectNotFound",
     "ProjectStorageError",

@@ -203,12 +203,9 @@ def create_app(
     # --- projects (read-only) ---------------------------------------------
 
     @app.get("/api/projects", dependencies=auth, response_model=ProjectListView)
-    async def list_projects(
-        offset: Annotated[int, Query(ge=0)] = 0,
-        limit: Annotated[int | None, Query(ge=1, le=1000)] = None,
-    ) -> ProjectListView:
+    async def list_projects() -> ProjectListView:
         async with _project_errors():
-            result = await projects().list_projects(offset=offset, limit=limit)
+            result = await projects().list_projects()
         return ProjectListView.from_wire(result)
 
     @app.get("/api/projects/{project_id}", dependencies=auth, response_model=ProjectDetailResponse)
@@ -224,11 +221,9 @@ def create_app(
     )
     async def project_memory_log(
         project_id: str,
-        offset: Annotated[int, Query(ge=0)] = 0,
-        limit: Annotated[int | None, Query(ge=1, le=1000)] = None,
     ) -> MemoryLogResponse:
         async with _project_errors():
-            result = await projects().memory_log(project_id, offset=offset, limit=limit)
+            result = await projects().memory_log(project_id)
         return MemoryLogResponse.from_wire(result)
 
     @app.get(
@@ -263,8 +258,6 @@ def create_app(
     async def project_inbox(
         project_id: str,
         status: Annotated[str, Query()] = "new",
-        offset: Annotated[int, Query(ge=0)] = 0,
-        limit: Annotated[int | None, Query(ge=1, le=1000)] = None,
     ) -> ProjectInboxResponse:
         if status not in INBOX_STATUSES:
             raise HTTPException(
@@ -272,7 +265,7 @@ def create_app(
                 detail=f"status must be one of {', '.join(INBOX_STATUSES)}",
             )
         async with _project_errors():
-            result = await projects().inbox(project_id, status=status, offset=offset, limit=limit)
+            result = await projects().inbox(project_id, status=status)
         return ProjectInboxResponse.from_wire(result)
 
     @app.websocket("/api/sessions/{session_id}/ws")

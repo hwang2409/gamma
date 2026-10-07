@@ -69,6 +69,7 @@ class ProjectsFixture:
         sessions: list[dict[str, Any]] | None = None,
         session_paging: bool = True,
         session_page_size: int | None = None,
+        page_size: int | None = None,
     ) -> None:
         self.projects = projects or []
         self.details = details or {}
@@ -80,6 +81,21 @@ class ProjectsFixture:
         # it does, how many sessions each page holds (``None`` means one page).
         self.session_paging = session_paging
         self.session_page_size = session_page_size
+        # Records per page for list_projects/memory_log/inbox, overriding the
+        # requested ``limit`` so a test can force a multi-page walk with a tiny
+        # fixture. ``None`` honours the requested ``limit``.
+        self.page_size = page_size
+
+    def _slice(self, records: list[Any], params: dict[str, Any]) -> tuple[list[Any], int | None]:
+        offset = int(params.get("offset", 0))
+        size = self.page_size
+        if size is None and params.get("limit") is not None:
+            size = int(params["limit"])
+        page = records[offset:]
+        if size is not None:
+            page = page[:size]
+        end = offset + len(page)
+        return page, (end if end < len(records) else None)
 
     def _require(self, project_id: object) -> str:
         if not isinstance(project_id, str) or not project_id:
@@ -108,13 +124,8 @@ class ProjectsFixture:
         raise ZetaRpcError(-32601, f"method {method} is not supported")
 
     def _list_projects(self, params: dict[str, Any]) -> dict[str, Any]:
-        offset = int(params.get("offset", 0))
-        limit = params.get("limit")
-        page = self.projects[offset:]
-        if limit is not None:
-            page = page[: int(limit)]
-        end = offset + len(page)
-        return {"projects": page, "next_offset": end if end < len(self.projects) else None}
+        page, next_offset = self._slice(self.projects, params)
+        return {"projects": page, "next_offset": next_offset}
 
     def _memory(self, project_id: str, params: dict[str, Any]) -> dict[str, Any]:
         if "version_id" in params or "file" in params:
@@ -123,30 +134,20 @@ class ProjectsFixture:
                 raise ZetaRpcError(-32602, "unknown version or file")
             return {"version": self.memory_versions[key]}
         versions = self.memory_log.get(project_id, [])
-        offset = int(params.get("offset", 0))
-        limit = params.get("limit")
-        page = versions[offset:]
-        if limit is not None:
-            page = page[: int(limit)]
-        end = offset + len(page)
-        return {"versions": page, "next_offset": end if end < len(versions) else None}
+        page, next_offset = self._slice(versions, params)
+        return {"versions": page, "next_offset": next_offset}
 
     def _inbox(self, project_id: str, params: dict[str, Any]) -> dict[str, Any]:
         status = str(params.get("status", "new"))
         stored = self.inbox.get((project_id, status))
         messages = list(stored.get("messages", [])) if stored else []
-        offset = int(params.get("offset", 0))
-        limit = params.get("limit")
-        page = messages[offset:]
-        if limit is not None:
-            page = page[: int(limit)]
-        end = offset + len(page)
+        page, next_offset = self._slice(messages, params)
         untrusted = any(item.get("origin", "local") != "local" for item in page)
         return {
             "status": status,
             "messages": page,
             "untrusted": untrusted,
-            "next_offset": end if end < len(messages) else None,
+            "next_offset": next_offset,
         }
 
     def _sessions(self, project_id: str, params: dict[str, Any]) -> dict[str, Any]:

@@ -115,12 +115,6 @@ export interface ProjectDetail extends ProjectSummary {
   updated_at: string | null;
 }
 
-export interface ProjectListResponse {
-  projects: ProjectSummary[];
-  next_offset: number | null;
-  truncated: boolean;
-}
-
 /**
  * One memory file. `automatic` marks content the background updater wrote but
  * the user has not accepted. A later Zeta memory rewrite will enrich this
@@ -163,12 +157,6 @@ export interface MemoryVersion {
   provenance: MemoryProvenance;
   provenance_truncated: boolean;
   target_version_id: string | null;
-}
-
-export interface MemoryLogResponse {
-  versions: MemoryVersion[];
-  next_offset: number | null;
-  truncated: boolean;
 }
 
 export interface MemoryVersionDetail extends MemoryVersion {
@@ -217,20 +205,13 @@ export interface InboxMessage {
   truncated_fields: string[];
 }
 
-export interface ProjectInboxResponse {
-  status: InboxStatus;
-  messages: InboxMessage[];
-  untrusted: boolean;
-  next_offset: number | null;
-  truncated: boolean;
-}
-
 // --- fully-paged reads -----------------------------------------------------
 //
-// Zeta pages project lists, memory history, and the inbox (100 records by
-// default). The REST client follows `next_offset` to the end so a view never
-// shows a silent first page. `complete` is false only when a safety cap
-// stopped the walk, so the view can say the list may be incomplete.
+// Zeta pages project lists, memory history, and the inbox. The backend walks
+// every page over one `zeta serve` connection and returns the whole set with a
+// `complete` flag, so the browser makes a single request per view. `complete`
+// is false only when a safety bound stopped the backend walk, so the view can
+// say the list may be incomplete.
 
 export interface PagedProjects {
   projects: ProjectSummary[];

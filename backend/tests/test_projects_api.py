@@ -14,6 +14,7 @@ import pytest
 
 from gamma.app import create_app
 from gamma.config import Settings
+from gamma.projects import ProjectsService
 from gamma.security import TOKEN_HEADER
 from gamma.zeta_protocol import ZetaRpcError
 
@@ -253,16 +254,25 @@ async def test_list_projects_returns_names_ids_and_counts(client: httpx.AsyncCli
     assert [item["name"] for item in body["projects"]] == ["zeta", "gamma"]
     assert body["projects"][0]["id"] == PROJECT_ID
     assert body["projects"][0]["session_count"] == 3
-    assert body["next_offset"] is None
+    assert body["complete"] is True
 
 
-async def test_list_projects_pages(client: httpx.AsyncClient) -> None:
-    body = (await client.get("/api/projects?offset=0&limit=1")).json()
-    assert [item["name"] for item in body["projects"]] == ["zeta"]
-    assert body["next_offset"] == 1
-    body = (await client.get("/api/projects?offset=1&limit=1")).json()
-    assert [item["name"] for item in body["projects"]] == ["gamma"]
-    assert body["next_offset"] is None
+async def test_list_projects_walks_every_page_over_one_connection(settings: Settings) -> None:
+    # One record per page, so the whole list is reachable only by following
+    # ``next_offset``. The browser still sends a single request.
+    projects = [_summary(id=f"p_{index}", name=f"project {index}") for index in range(5)]
+    runtime = FakeRuntime(projects=ProjectsFixture(projects=projects, page_size=1))
+    async for http_client in _make_client(settings, runtime):
+        body = (await http_client.get("/api/projects")).json()
+        assert [item["id"] for item in body["projects"]] == [f"p_{index}" for index in range(5)]
+        assert body["complete"] is True
+        # One browser request launched exactly one serve harness, not one per page.
+        assert len(runtime.launched) == 1
+        calls = runtime.launched[0].calls
+        assert [method for method, _ in calls] == ["list_projects"] * 5
+        # Every page asks for the documented maximum page size.
+        assert all(params.get("limit") == 1000 for _, params in calls)
+        assert [params.get("offset") for _, params in calls] == [0, 1, 2, 3, 4]
 
 
 async def test_show_project_lists_the_five_memory_files(client: httpx.AsyncClient) -> None:
@@ -304,13 +314,30 @@ async def test_memory_version_rejects_an_unknown_file(client: httpx.AsyncClient)
     assert response.status_code == 400
 
 
-async def test_memory_log_pages(client: httpx.AsyncClient) -> None:
-    body = (await client.get(f"/api/projects/{PROJECT_ID}/memory/log?offset=0&limit=1")).json()
-    assert [item["version_id"] for item in body["versions"]] == ["v1"]
-    assert body["next_offset"] == 1
-    body = (await client.get(f"/api/projects/{PROJECT_ID}/memory/log?offset=1&limit=1")).json()
-    assert [item["version_id"] for item in body["versions"]] == ["v2"]
-    assert body["next_offset"] is None
+async def test_memory_log_walks_every_page_over_one_connection(settings: Settings) -> None:
+    versions = [
+        {
+            "version_id": f"v{index}",
+            "kind": "update",
+            "files_changed": ["state.md"],
+            "provenance": {},
+        }
+        for index in range(4)
+    ]
+    fixture = ProjectsFixture(
+        details={PROJECT_ID: _detail()},
+        memory_log={PROJECT_ID: versions},
+        page_size=1,
+    )
+    runtime = FakeRuntime(projects=fixture)
+    async for http_client in _make_client(settings, runtime):
+        body = (await http_client.get(f"/api/projects/{PROJECT_ID}/memory/log")).json()
+        ids = [item["version_id"] for item in body["versions"]]
+        assert ids == [f"v{index}" for index in range(4)]
+        assert body["complete"] is True
+        assert len(runtime.launched) == 1
+        calls = runtime.launched[0].calls
+        assert all(params.get("limit") == 1000 for _, params in calls)
 
 
 # --- sessions --------------------------------------------------------------
@@ -415,18 +442,50 @@ async def test_inbox_pages(settings: Settings) -> None:
         }
         for index in range(5)
     ]
+    # A remote message on a later page makes the whole merged page untrusted.
+    messages[3]["origin"] = "remote"
     fixture = ProjectsFixture(
         details={PROJECT_ID: _detail()},
         inbox={(PROJECT_ID, "new"): {"status": "new", "messages": messages}},
+        page_size=2,
     )
     runtime = FakeRuntime(projects=fixture)
     async for http_client in _make_client(settings, runtime):
-        body = (await http_client.get(f"/api/projects/{PROJECT_ID}/inbox?offset=0&limit=2")).json()
-        assert [item["id"] for item in body["messages"]] == ["m0", "m1"]
-        assert body["next_offset"] == 2
-        body = (await http_client.get(f"/api/projects/{PROJECT_ID}/inbox?offset=4&limit=2")).json()
-        assert [item["id"] for item in body["messages"]] == ["m4"]
-        assert body["next_offset"] is None
+        body = (await http_client.get(f"/api/projects/{PROJECT_ID}/inbox")).json()
+        assert [item["id"] for item in body["messages"]] == [f"m{index}" for index in range(5)]
+        assert body["untrusted"] is True
+        assert body["complete"] is True
+        assert len(runtime.launched) == 1
+        calls = runtime.launched[0].calls
+        assert all(params.get("limit") == 1000 for _, params in calls)
+
+
+# --- bounded walk ----------------------------------------------------------
+
+
+def _many_projects(count: int) -> list[dict[str, object]]:
+    return [_summary(id=f"p_{index}", name=f"project {index}") for index in range(count)]
+
+
+async def test_walk_stops_at_the_page_cap(settings: Settings) -> None:
+    fixture = ProjectsFixture(projects=_many_projects(5), page_size=1)
+    service = ProjectsService(
+        runtime=FakeRuntime(projects=fixture), settings=settings, walk_page_cap=2
+    )
+    result = await service.list_projects()
+    assert [item.id for item in result.projects] == ["p_0", "p_1"]
+    assert result.complete is False
+
+
+async def test_walk_stops_at_the_time_bound(settings: Settings) -> None:
+    fixture = ProjectsFixture(projects=_many_projects(5), page_size=1)
+    # A zero-second budget returns after the first page while records remain.
+    service = ProjectsService(
+        runtime=FakeRuntime(projects=fixture), settings=settings, walk_deadline=0.0
+    )
+    result = await service.list_projects()
+    assert [item.id for item in result.projects] == ["p_0"]
+    assert result.complete is False
 
 
 # --- storage errors --------------------------------------------------------
