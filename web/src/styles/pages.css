@@ -75,6 +75,12 @@
   height: 72px;
 }
 
+.start-head-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
 .start-head .icon-button {
   margin-right: -10px;
 }

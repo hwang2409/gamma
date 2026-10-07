@@ -19,12 +19,13 @@ import { ThemeToggle } from "./ThemeToggle";
 interface Props {
   options: OptionsResponse;
   onOpen: (session: SessionView) => void;
+  onProjects: () => void;
   onUnauthorized: () => void;
 }
 
 const RECENT_DIRECTORIES = 5;
 
-export function StartPage({ options, onOpen, onUnauthorized }: Props): React.JSX.Element {
+export function StartPage({ options, onOpen, onProjects, onUnauthorized }: Props): React.JSX.Element {
   const [provider, setProvider] = useState(
     options.default_provider ?? options.providers[0]?.name ?? "",
   );
@@ -118,7 +119,13 @@ export function StartPage({ options, onOpen, onUnauthorized }: Props): React.JSX
           <Node kind="task" />
           gamma
         </p>
-        <ThemeToggle />
+        <div className="start-head-actions">
+          <button type="button" className="ghost-button small" onClick={onProjects}>
+            <Icon name="box" size={14} />
+            Projects
+          </button>
+          <ThemeToggle />
+        </div>
       </header>
 
       <main className="start-main">

@@ -2,7 +2,13 @@
 
 import type {
   CreateSessionBody,
+  MemoryLogResponse,
+  MemoryVersionDetail,
   OptionsResponse,
+  ProjectDetailResponse,
+  ProjectInboxResponse,
+  ProjectListResponse,
+  ProjectSessionsResponse,
   SessionView,
   ZetaSessionSummary,
 } from "./protocol";
@@ -39,6 +45,11 @@ export function clearToken(): void {
 
 export function isAuthError(cause: unknown): boolean {
   return cause instanceof ApiError && (cause.status === 401 || cause.status === 403);
+}
+
+/** True when the running Zeta does not offer the projects feature. */
+export function isUnsupported(cause: unknown): boolean {
+  return cause instanceof ApiError && cause.status === 501;
 }
 
 export class ApiError extends Error {
@@ -93,4 +104,20 @@ export const api = {
   session: (id: string) => request<SessionView>(`/api/sessions/${encodeURIComponent(id)}`),
   closeSession: (id: string) =>
     request<void>(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  projects: () => request<ProjectListResponse>("/api/projects"),
+  project: (id: string) =>
+    request<ProjectDetailResponse>(`/api/projects/${encodeURIComponent(id)}`),
+  projectMemoryLog: (id: string) =>
+    request<MemoryLogResponse>(`/api/projects/${encodeURIComponent(id)}/memory/log`),
+  projectMemoryVersion: (id: string, versionId: string, file: string) =>
+    request<MemoryVersionDetail>(
+      `/api/projects/${encodeURIComponent(id)}/memory/versions/${encodeURIComponent(versionId)}` +
+        `?file=${encodeURIComponent(file)}`,
+    ),
+  projectSessions: (id: string) =>
+    request<ProjectSessionsResponse>(`/api/projects/${encodeURIComponent(id)}/sessions`),
+  projectInbox: (id: string, status: string) =>
+    request<ProjectInboxResponse>(
+      `/api/projects/${encodeURIComponent(id)}/inbox?status=${encodeURIComponent(status)}`,
+    ),
 };
