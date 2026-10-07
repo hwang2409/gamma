@@ -304,6 +304,15 @@ async def test_memory_version_rejects_an_unknown_file(client: httpx.AsyncClient)
     assert response.status_code == 400
 
 
+async def test_memory_log_pages(client: httpx.AsyncClient) -> None:
+    body = (await client.get(f"/api/projects/{PROJECT_ID}/memory/log?offset=0&limit=1")).json()
+    assert [item["version_id"] for item in body["versions"]] == ["v1"]
+    assert body["next_offset"] == 1
+    body = (await client.get(f"/api/projects/{PROJECT_ID}/memory/log?offset=1&limit=1")).json()
+    assert [item["version_id"] for item in body["versions"]] == ["v2"]
+    assert body["next_offset"] is None
+
+
 # --- sessions --------------------------------------------------------------
 
 
@@ -315,6 +324,55 @@ async def test_sessions_only_lists_the_project_and_keeps_roles(client: httpx.Asy
     assert child["project_role"] == "worker"
     assert child["parent_session_id"] == "orc"
     assert child["name"] == "worker"
+
+
+def _many_sessions(count: int) -> list[dict[str, object]]:
+    return [
+        {
+            "version": 1,
+            "session_id": f"s{index}",
+            "created_at": "2026-10-07T00:00:00+00:00",
+            "updated_at": "2026-10-07T00:00:00+00:00",
+            "provider": "fake",
+            "model": "offline",
+            "cwd": "/work/zeta",
+            "name": f"session {index}",
+            "project_id": PROJECT_ID,
+            "project_role": None,
+            "parent_session_id": None,
+        }
+        for index in range(count)
+    ]
+
+
+async def test_sessions_follow_paging_and_merge_every_page(settings: Settings) -> None:
+    fixture = ProjectsFixture(
+        details={PROJECT_ID: _detail()},
+        sessions=_many_sessions(7),
+        session_paging=True,
+        session_page_size=3,
+    )
+    runtime = FakeRuntime(projects=fixture)
+    async for http_client in _make_client(settings, runtime):
+        body = (await http_client.get(f"/api/projects/{PROJECT_ID}/sessions")).json()
+        ids = [item["session_id"] for item in body["sessions"]]
+        assert ids == [f"s{index}" for index in range(7)]
+        assert body["truncated"] is False
+
+
+async def test_sessions_warn_when_paging_is_unavailable(settings: Settings) -> None:
+    fixture = ProjectsFixture(
+        details={PROJECT_ID: _detail()},
+        sessions=_many_sessions(7),
+        session_paging=False,
+        session_page_size=3,
+    )
+    runtime = FakeRuntime(projects=fixture)
+    async for http_client in _make_client(settings, runtime):
+        body = (await http_client.get(f"/api/projects/{PROJECT_ID}/sessions")).json()
+        ids = [item["session_id"] for item in body["sessions"]]
+        assert ids == ["s0", "s1", "s2"]
+        assert body["truncated"] is True
 
 
 # --- inbox -----------------------------------------------------------------
@@ -340,6 +398,35 @@ async def test_inbox_done_marks_untrusted_remote_origin(client: httpx.AsyncClien
 async def test_inbox_rejects_an_unknown_status(client: httpx.AsyncClient) -> None:
     response = await client.get(f"/api/projects/{PROJECT_ID}/inbox?status=weird")
     assert response.status_code == 400
+
+
+async def test_inbox_pages(settings: Settings) -> None:
+    messages = [
+        {
+            "id": f"m{index}",
+            "origin": "local",
+            "from": {"project": "gamma", "session": "s9"},
+            "to_project": PROJECT_ID,
+            "kind": "question",
+            "title": f"ping {index}",
+            "body": "how?",
+            "in_reply_to": None,
+            "created_at": "2026-10-07T09:00:00.000000Z",
+        }
+        for index in range(5)
+    ]
+    fixture = ProjectsFixture(
+        details={PROJECT_ID: _detail()},
+        inbox={(PROJECT_ID, "new"): {"status": "new", "messages": messages}},
+    )
+    runtime = FakeRuntime(projects=fixture)
+    async for http_client in _make_client(settings, runtime):
+        body = (await http_client.get(f"/api/projects/{PROJECT_ID}/inbox?offset=0&limit=2")).json()
+        assert [item["id"] for item in body["messages"]] == ["m0", "m1"]
+        assert body["next_offset"] == 2
+        body = (await http_client.get(f"/api/projects/{PROJECT_ID}/inbox?offset=4&limit=2")).json()
+        assert [item["id"] for item in body["messages"]] == ["m4"]
+        assert body["next_offset"] is None
 
 
 # --- storage errors --------------------------------------------------------

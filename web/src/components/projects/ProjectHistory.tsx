@@ -11,7 +11,7 @@ import { api } from "../../lib/api";
 import type { MemoryProvenance, MemoryVersion, MemoryVersionDetail } from "../../lib/protocol";
 import { useResource } from "../../lib/useResource";
 import { Spinner } from "../Icon";
-import { Badge, Time, ViewState } from "./parts";
+import { Badge, PageNote, Time, ViewState } from "./parts";
 
 interface Props {
   projectId: string;
@@ -36,21 +36,29 @@ export function ProjectHistory({ projectId, onUnauthorized }: Props): React.JSX.
           data.versions.length === 0 ? (
             <p className="view-state">No memory versions yet.</p>
           ) : (
-            <ol className="history-list">
-              {[...data.versions].reverse().map((version) => (
-                <li key={version.version_id}>
-                  <HistoryEntry
-                    version={version}
-                    now={now}
-                    selected={selection}
-                    onSelect={(file) => setSelection({ versionId: version.version_id, file })}
-                    onClose={() => setSelection(null)}
-                    projectId={projectId}
-                    onUnauthorized={onUnauthorized}
-                  />
-                </li>
-              ))}
-            </ol>
+            <>
+              {!data.complete && (
+                <PageNote>
+                  This history is very long. Showing {data.versions.length} versions; some may be
+                  missing. Open the project in Zeta to read the rest.
+                </PageNote>
+              )}
+              <ol className="history-list">
+                {[...data.versions].reverse().map((version) => (
+                  <li key={version.version_id}>
+                    <HistoryEntry
+                      version={version}
+                      now={now}
+                      selected={selection}
+                      onSelect={(file) => setSelection({ versionId: version.version_id, file })}
+                      onClose={() => setSelection(null)}
+                      projectId={projectId}
+                      onUnauthorized={onUnauthorized}
+                    />
+                  </li>
+                ))}
+              </ol>
+            </>
           )
         }
       </ViewState>

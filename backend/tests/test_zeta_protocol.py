@@ -192,7 +192,7 @@ async def test_handshake_sends_both_versions_and_accepts_1_1(scripted: Any) -> N
     assert seen[0]["params"] == {
         "protocol_version": "1.0",
         "client_version": "1.1",
-        "features": ["assistant_reset", "projects"],
+        "features": ["assistant_reset", "projects", "list_sessions_paging"],
     }
     assert hello.protocol_version == "1.1"
     assert hello.supports("slash_list")

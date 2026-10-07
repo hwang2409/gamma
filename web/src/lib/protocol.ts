@@ -224,3 +224,27 @@ export interface ProjectInboxResponse {
   next_offset: number | null;
   truncated: boolean;
 }
+
+// --- fully-paged reads -----------------------------------------------------
+//
+// Zeta pages project lists, memory history, and the inbox (100 records by
+// default). The REST client follows `next_offset` to the end so a view never
+// shows a silent first page. `complete` is false only when a safety cap
+// stopped the walk, so the view can say the list may be incomplete.
+
+export interface PagedProjects {
+  projects: ProjectSummary[];
+  complete: boolean;
+}
+
+export interface PagedMemoryLog {
+  versions: MemoryVersion[];
+  complete: boolean;
+}
+
+export interface PagedInbox {
+  status: InboxStatus;
+  messages: InboxMessage[];
+  untrusted: boolean;
+  complete: boolean;
+}

@@ -54,6 +54,19 @@ export function Badge({
   return <span className={`badge badge-${tone}`}>{children}</span>;
 }
 
+/**
+ * A boxed note above a list: the list is paged past a cap, or the server could
+ * not return all of it. It keeps a partial list from reading as complete.
+ */
+export function PageNote({ children }: { children: React.ReactNode }): React.JSX.Element {
+  return (
+    <p className="page-note" role="note">
+      <Node kind="info" />
+      {children}
+    </p>
+  );
+}
+
 /** Render a resource's non-ready states, or hand the data to `children`. */
 export function ViewState<T>({
   resource,

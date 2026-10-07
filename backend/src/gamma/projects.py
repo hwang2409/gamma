@@ -24,6 +24,7 @@ from .config import Settings
 from .policy import LaunchPolicy, PolicyError
 from .runtime import RuntimeConnection, RuntimeLaunchError, RuntimeSpec, ZetaRuntime
 from .zeta_protocol import (
+    LIST_SESSIONS_PAGING_FEATURE,
     PROJECTS_FEATURE,
     MemoryLogResult,
     MemoryVersionResult,
@@ -42,6 +43,13 @@ MEMORY_FILES = ("brief.md", "state.md", "backlog.md", "changelog.md", "decisions
 """The five memory files, in the order the protocol guarantees."""
 
 INBOX_STATUSES = ("new", "claimed", "done")
+
+MAX_SESSION_PAGES = 1000
+"""Safety bound on how many pages one provider's session list can span.
+
+Each page carries up to the frame limit of sessions, so this spans far more
+than any real project. It only stops a server that never advances
+``next_offset`` from looping forever."""
 
 # JSON-RPC error codes the projects requests use (serve-protocol.md).
 _PROJECT_NOT_FOUND_DATA = "project_not_found"
@@ -139,6 +147,12 @@ class ProjectsService:
         connection cannot see a project's whole session set. The service asks
         every allowed provider and merges by session id. A provider that fails
         to launch is skipped, so one bad provider does not hide the rest.
+
+        Each provider is read to the end: with the ``list_sessions_paging``
+        feature the service follows ``next_offset`` and merges every page, so
+        the frame bound never hides sessions. A server without that feature can
+        only return the largest fitting prefix, so a frame-bound page reports
+        ``truncated`` instead of silently dropping the rest.
         """
 
         merged: dict[str, SessionMetadata] = {}
@@ -148,21 +162,51 @@ class ProjectsService:
         for provider in self._providers():
             try:
                 async with self._connect(provider) as connection:
-                    result = await self._call(
-                        connection, "list_sessions", {"project_id": project_id}
+                    sessions, provider_truncated = await self._list_project_sessions(
+                        connection, project_id
                     )
             except (RuntimeLaunchError, ProjectUnavailable) as exc:
                 last_error = exc
                 logger.warning("project sessions: provider %s unavailable: %s", provider, exc)
                 continue
             launched += 1
-            page = ProjectSessionsResult.model_validate(result)
-            truncated = truncated or page.truncated
-            for session in page.sessions:
+            truncated = truncated or provider_truncated
+            for session in sessions:
                 merged.setdefault(session.session_id, session)
         if launched == 0 and last_error is not None:
             raise ProjectUnavailable(str(last_error))
         return ProjectSessionsResult(sessions=list(merged.values()), truncated=truncated)
+
+    async def _list_project_sessions(
+        self, connection: RuntimeConnection, project_id: str
+    ) -> tuple[list[SessionMetadata], bool]:
+        """One provider's project sessions, following ``next_offset`` paging.
+
+        Returns the sessions and whether the list is incomplete. With paging
+        the list is always complete (incomplete only if a server never
+        advances ``next_offset``); without paging a frame-bound page is
+        reported as incomplete so the caller can warn.
+        """
+
+        if not connection.supports_feature(LIST_SESSIONS_PAGING_FEATURE):
+            result = await self._call(connection, "list_sessions", {"project_id": project_id})
+            page = ProjectSessionsResult.model_validate(result)
+            return list(page.sessions), page.truncated
+        sessions: list[SessionMetadata] = []
+        offset = 0
+        for _ in range(MAX_SESSION_PAGES):
+            result = await self._call(
+                connection, "list_sessions", {"project_id": project_id, "offset": offset}
+            )
+            page = ProjectSessionsResult.model_validate(result)
+            sessions.extend(page.sessions)
+            next_offset = page.next_offset
+            if next_offset is None:
+                return sessions, False
+            if next_offset <= offset:
+                break
+            offset = next_offset
+        return sessions, True
 
     # --- connection and errors --------------------------------------------
 

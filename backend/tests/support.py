@@ -34,11 +34,18 @@ FAKE_HELLO = HelloResult(
 )
 
 
-def _hello_with_projects() -> HelloResult:
-    """A handshake that advertises the optional ``projects`` feature."""
+def _hello_with_projects(*, session_paging: bool = True) -> HelloResult:
+    """A handshake that advertises the optional ``projects`` feature.
+
+    ``session_paging`` also advertises ``list_sessions_paging`` so a test can
+    exercise both a paging server and one that can only return a prefix.
+    """
 
     data = FAKE_HELLO.model_dump()
-    data["capabilities"]["features"] = ["assistant_reset", "projects"]
+    features = ["assistant_reset", "projects"]
+    if session_paging:
+        features.append("list_sessions_paging")
+    data["capabilities"]["features"] = features
     return HelloResult.model_validate(data)
 
 
@@ -60,6 +67,8 @@ class ProjectsFixture:
         memory_versions: dict[tuple[str, str, str], dict[str, Any]] | None = None,
         inbox: dict[tuple[str, str], dict[str, Any]] | None = None,
         sessions: list[dict[str, Any]] | None = None,
+        session_paging: bool = True,
+        session_page_size: int | None = None,
     ) -> None:
         self.projects = projects or []
         self.details = details or {}
@@ -67,6 +76,10 @@ class ProjectsFixture:
         self.memory_versions = memory_versions or {}
         self.inbox = inbox or {}
         self.sessions = sessions or []
+        # Whether the fake server advertises ``list_sessions_paging`` and, when
+        # it does, how many sessions each page holds (``None`` means one page).
+        self.session_paging = session_paging
+        self.session_page_size = session_page_size
 
     def _require(self, project_id: object) -> str:
         if not isinstance(project_id, str) or not project_id:
@@ -91,7 +104,7 @@ class ProjectsFixture:
         if method == "project_inbox":
             return self._inbox(project_id, params)
         if method == "list_sessions":
-            return self._sessions(project_id)
+            return self._sessions(project_id, params)
         raise ZetaRpcError(-32601, f"method {method} is not supported")
 
     def _list_projects(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -120,14 +133,43 @@ class ProjectsFixture:
 
     def _inbox(self, project_id: str, params: dict[str, Any]) -> dict[str, Any]:
         status = str(params.get("status", "new"))
-        return self.inbox.get(
-            (project_id, status),
-            {"status": status, "messages": [], "untrusted": False, "next_offset": None},
-        )
+        stored = self.inbox.get((project_id, status))
+        messages = list(stored.get("messages", [])) if stored else []
+        offset = int(params.get("offset", 0))
+        limit = params.get("limit")
+        page = messages[offset:]
+        if limit is not None:
+            page = page[: int(limit)]
+        end = offset + len(page)
+        untrusted = any(item.get("origin", "local") != "local" for item in page)
+        return {
+            "status": status,
+            "messages": page,
+            "untrusted": untrusted,
+            "next_offset": end if end < len(messages) else None,
+        }
 
-    def _sessions(self, project_id: str) -> dict[str, Any]:
+    def _sessions(self, project_id: str, params: dict[str, Any]) -> dict[str, Any]:
         linked = [item for item in self.sessions if item.get("project_id") == project_id]
-        return {"sessions": linked}
+        if not self.session_paging:
+            # No paging feature: return the largest fitting prefix. A frame bound
+            # (modelled by ``session_page_size``) cuts the page and marks it
+            # truncated; the client cannot request the rest.
+            size = self.session_page_size
+            if size is not None and len(linked) > size:
+                return {"sessions": linked[:size], "truncated": True, "next_offset": size}
+            return {"sessions": linked, "truncated": False, "next_offset": None}
+        if "offset" in params and not isinstance(params["offset"], int):
+            raise ZetaRpcError(-32602, "offset must be an integer")
+        offset = int(params.get("offset", 0))
+        page = linked[offset:]
+        size = self.session_page_size
+        if size is not None:
+            page = page[:size]
+        elif params.get("limit") is not None:
+            page = page[: int(params["limit"])]
+        end = offset + len(page)
+        return {"sessions": page, "next_offset": end if end < len(linked) else None}
 
 
 class FakeConnection(RuntimeConnection):
@@ -156,7 +198,9 @@ class FakeConnection(RuntimeConnection):
 
     @property
     def hello(self) -> HelloResult:
-        return _hello_with_projects() if self.projects is not None else FAKE_HELLO
+        if self.projects is None:
+            return FAKE_HELLO
+        return _hello_with_projects(session_paging=self.projects.session_paging)
 
     @property
     def alive(self) -> bool:

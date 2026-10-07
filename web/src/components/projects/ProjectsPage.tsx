@@ -15,7 +15,7 @@ import { useResource } from "../../lib/useResource";
 import { Icon } from "../Icon";
 import { Node } from "../Node";
 import { ThemeToggle } from "../ThemeToggle";
-import { Badge, IdChip, Time, ViewState } from "./parts";
+import { Badge, IdChip, PageNote, Time, ViewState } from "./parts";
 
 interface Props {
   onOpenProject: (id: string) => void;
@@ -57,13 +57,24 @@ export function ProjectsPage({ onOpenProject, onBack, onUnauthorized }: Props): 
                 repository.
               </p>
             ) : (
-              <ul className="project-list">
-                {data.projects.map((project) => (
-                  <li key={project.id}>
-                    <ProjectRow project={project} now={now} onOpen={() => onOpenProject(project.id)} />
-                  </li>
-                ))}
-              </ul>
+              <>
+                <ul className="project-list">
+                  {data.projects.map((project) => (
+                    <li key={project.id}>
+                      <ProjectRow
+                        project={project}
+                        now={now}
+                        onOpen={() => onOpenProject(project.id)}
+                      />
+                    </li>
+                  ))}
+                </ul>
+                {!data.complete && (
+                  <PageNote>
+                    Showing the first {data.projects.length} projects. Open Zeta to see the rest.
+                  </PageNote>
+                )}
+              </>
             )
           }
         </ViewState>

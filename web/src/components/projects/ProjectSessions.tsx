@@ -16,7 +16,7 @@ import type { ProjectSessionSummary, SessionView } from "../../lib/protocol";
 import { useResource } from "../../lib/useResource";
 import { Spinner } from "../Icon";
 import { Node } from "../Node";
-import { Badge, IdChip, Time, ViewState } from "./parts";
+import { Badge, IdChip, PageNote, Time, ViewState } from "./parts";
 
 interface Props {
   projectId: string;
@@ -76,33 +76,42 @@ export function ProjectSessions({
           data.sessions.length === 0 ? (
             <p className="view-state">No sessions in this project yet.</p>
           ) : (
-            <ul className="session-tree">
-              {group(data.sessions).map(({ root, children }) => (
-                <li key={root.session_id}>
-                  <SessionNode
-                    session={root}
-                    now={now}
-                    busy={busy}
-                    onOpen={() => void open(root)}
-                  />
-                  {children.length > 0 && (
-                    <ul className="session-children">
-                      {children.map((child) => (
-                        <li key={child.session_id}>
-                          <SessionNode
-                            session={child}
-                            now={now}
-                            busy={busy}
-                            onOpen={() => void open(child)}
-                            child
-                          />
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </li>
-              ))}
-            </ul>
+            <>
+              {data.truncated && (
+                <PageNote>
+                  This Zeta could not return every session in one response, and does not support
+                  paging them. Showing {data.sessions.length}; open the project in Zeta to see the
+                  rest.
+                </PageNote>
+              )}
+              <ul className="session-tree">
+                {group(data.sessions).map(({ root, children }) => (
+                  <li key={root.session_id}>
+                    <SessionNode
+                      session={root}
+                      now={now}
+                      busy={busy}
+                      onOpen={() => void open(root)}
+                    />
+                    {children.length > 0 && (
+                      <ul className="session-children">
+                        {children.map((child) => (
+                          <li key={child.session_id}>
+                            <SessionNode
+                              session={child}
+                              now={now}
+                              busy={busy}
+                              onOpen={() => void open(child)}
+                              child
+                            />
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </>
           )
         }
       </ViewState>

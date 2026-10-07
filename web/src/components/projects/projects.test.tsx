@@ -10,11 +10,11 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
-  MemoryLogResponse,
   MemoryVersionDetail,
+  PagedInbox,
+  PagedMemoryLog,
+  PagedProjects,
   ProjectDetailResponse,
-  ProjectInboxResponse,
-  ProjectListResponse,
   ProjectSessionsResponse,
   SessionView,
 } from "../../lib/protocol";
@@ -62,7 +62,7 @@ afterEach(() => {
 
 const noop = () => {};
 
-const projectList: ProjectListResponse = {
+const projectList: PagedProjects = {
   projects: [
     {
       id: "p_alpha",
@@ -81,8 +81,7 @@ const projectList: ProjectListResponse = {
       last_activity: null,
     },
   ],
-  next_offset: null,
-  truncated: false,
+  complete: true,
 };
 
 describe("ProjectsPage", () => {
@@ -107,7 +106,7 @@ describe("ProjectsPage", () => {
   });
 
   it("shows an empty state when there are no projects", async () => {
-    api.projects.mockResolvedValue({ projects: [], next_offset: null, truncated: false });
+    api.projects.mockResolvedValue({ projects: [], complete: true });
     render(<ProjectsPage onOpenProject={noop} onBack={noop} onUnauthorized={noop} />);
     expect(await screen.findByText(/No projects yet/)).toBeTruthy();
   });
@@ -129,6 +128,12 @@ describe("ProjectsPage", () => {
     api.projects.mockRejectedValue(new ApiError(502, "project storage is invalid or unavailable"));
     render(<ProjectsPage onOpenProject={noop} onBack={noop} onUnauthorized={noop} />);
     expect(await screen.findByText(/project storage is invalid/)).toBeTruthy();
+  });
+
+  it("warns that the list is incomplete when paging stopped at the cap", async () => {
+    api.projects.mockResolvedValue({ projects: projectList.projects, complete: false });
+    render(<ProjectsPage onOpenProject={noop} onBack={noop} onUnauthorized={noop} />);
+    expect(await screen.findByText(/Showing the first 2 projects/)).toBeTruthy();
   });
 });
 
@@ -166,7 +171,7 @@ describe("ProjectMemory", () => {
   });
 });
 
-const log: MemoryLogResponse = {
+const log: PagedMemoryLog = {
   versions: [
     {
       version_id: "v_1",
@@ -187,8 +192,7 @@ const log: MemoryLogResponse = {
       target_version_id: "v_1",
     },
   ],
-  next_offset: null,
-  truncated: false,
+  complete: true,
 };
 
 describe("ProjectHistory", () => {
@@ -215,6 +219,22 @@ describe("ProjectHistory", () => {
     fireEvent.click(screen.getByRole("button", { name: "state.md" }));
     expect(await screen.findByText("+new")).toBeTruthy();
     expect(api.projectMemoryVersion).toHaveBeenCalledWith("p_alpha", "v_1", "state.md");
+  });
+
+  it("orders the newest version first across every fetched page", async () => {
+    // The server stores versions oldest first; the view must reverse the whole
+    // set, not one page, so v_2 (newest) leads v_1.
+    api.projectMemoryLog.mockResolvedValue(log);
+    render(<ProjectHistory projectId="p_alpha" onUnauthorized={noop} />);
+
+    const kinds = await screen.findAllByText(/^(auto|accept)$/);
+    expect(kinds.map((node) => node.textContent)).toEqual(["accept", "auto"]);
+  });
+
+  it("warns that newer versions may be missing when paging stopped at the cap", async () => {
+    api.projectMemoryLog.mockResolvedValue({ versions: log.versions, complete: false });
+    render(<ProjectHistory projectId="p_alpha" onUnauthorized={noop} />);
+    expect(await screen.findByText(/This history is very long/)).toBeTruthy();
   });
 });
 
@@ -270,9 +290,15 @@ describe("ProjectSessions", () => {
       resume_session_id: "s_child",
     });
   });
+
+  it("warns when the session list is truncated and cannot be paged", async () => {
+    api.projectSessions.mockResolvedValue({ sessions: sessions.sessions, truncated: true });
+    render(<ProjectSessions projectId="p_alpha" onOpenSession={noop} onUnauthorized={noop} />);
+    expect(await screen.findByText(/could not return every session/)).toBeTruthy();
+  });
 });
 
-function inbox(overrides: Partial<ProjectInboxResponse> = {}): ProjectInboxResponse {
+function inbox(overrides: Partial<PagedInbox> = {}): PagedInbox {
   return {
     status: "new",
     messages: [
@@ -296,8 +322,7 @@ function inbox(overrides: Partial<ProjectInboxResponse> = {}): ProjectInboxRespo
       },
     ],
     untrusted: false,
-    next_offset: null,
-    truncated: false,
+    complete: true,
     ...overrides,
   };
 }
@@ -321,7 +346,7 @@ describe("ProjectInbox", () => {
         untrusted: true,
         messages: [
           {
-            ...(inbox().messages[0] as ProjectInboxResponse["messages"][number]),
+            ...(inbox().messages[0] as PagedInbox["messages"][number]),
             id: "m_foreign",
             origin: "cross-project",
             from_project: "p_other",
@@ -335,5 +360,11 @@ describe("ProjectInbox", () => {
     expect(await screen.findByText(/message from another project/)).toBeTruthy();
     const card = screen.getByText("Find prior work").closest(".inbox-card") as HTMLElement;
     expect(within(card).getByText("cross-project")).toBeTruthy();
+  });
+
+  it("warns that messages are incomplete when paging stopped at the cap", async () => {
+    api.projectInbox.mockResolvedValue(inbox({ complete: false }));
+    render(<ProjectInbox projectId="p_alpha" onUnauthorized={noop} />);
+    expect(await screen.findByText(/Showing the first 1 new messages/)).toBeTruthy();
   });
 });

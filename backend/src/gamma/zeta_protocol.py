@@ -32,7 +32,11 @@ CLIENT_VERSION = "1.1"
 PROJECTS_FEATURE = "projects"
 """Negotiated 1.1 feature: read-only project list, memory, sessions, inbox."""
 
-REQUESTED_FEATURES = ("assistant_reset", PROJECTS_FEATURE)
+LIST_SESSIONS_PAGING_FEATURE = "list_sessions_paging"
+"""Negotiated 1.1 feature: ``list_sessions`` takes ``offset``/``limit`` and
+always returns ``next_offset``, so a client can page past the frame bound."""
+
+REQUESTED_FEATURES = ("assistant_reset", PROJECTS_FEATURE, LIST_SESSIONS_PAGING_FEATURE)
 """Optional (1.1) features gamma asks for; the server echoes the ones it has."""
 
 REQUIRED_REQUESTS = frozenset(
@@ -486,6 +490,7 @@ class ZetaConnection:
 __all__ = [
     "CLIENT_PROTOCOL_VERSION",
     "CLIENT_VERSION",
+    "LIST_SESSIONS_PAGING_FEATURE",
     "MAX_FRAME_BYTES",
     "PROJECTS_FEATURE",
     "REQUESTED_FEATURES",

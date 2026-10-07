@@ -14,7 +14,7 @@ import { api } from "../../lib/api";
 import type { InboxMessage, InboxStatus } from "../../lib/protocol";
 import { useResource } from "../../lib/useResource";
 import { Node } from "../Node";
-import { Badge, IdChip, Time, ViewState } from "./parts";
+import { Badge, IdChip, PageNote, Time, ViewState } from "./parts";
 
 interface Props {
   projectId: string;
@@ -62,13 +62,21 @@ export function ProjectInbox({ projectId, onUnauthorized }: Props): React.JSX.El
             {data.messages.length === 0 ? (
               <p className="view-state">No {status} messages.</p>
             ) : (
-              <ul className="inbox-list">
-                {data.messages.map((message) => (
-                  <li key={message.id}>
-                    <InboxCard message={message} now={now} />
-                  </li>
-                ))}
-              </ul>
+              <>
+                <ul className="inbox-list">
+                  {data.messages.map((message) => (
+                    <li key={message.id}>
+                      <InboxCard message={message} now={now} />
+                    </li>
+                  ))}
+                </ul>
+                {!data.complete && (
+                  <PageNote>
+                    Showing the first {data.messages.length} {status} messages. Open Zeta to see the
+                    rest.
+                  </PageNote>
+                )}
+              </>
             )}
           </>
         )}
