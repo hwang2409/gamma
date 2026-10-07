@@ -383,3 +383,109 @@ async def test_call_after_close_is_refused(scripted: Any) -> None:
     await connection.aclose()
     with pytest.raises(ZetaProtocolError, match="closed"):
         await connection.call("status", {})
+
+
+# --- transport-error normalization ----------------------------------------
+#
+# ``StreamWriter.write``/``drain`` can raise a bare ``OSError`` (broken pipe,
+# reset), and the read loop can set a raw transport error on a request future.
+# ``ZetaConnection.call`` must turn every such mid-request transport death into
+# one ``ZetaProtocolError`` so a caller never leaks the OS exception past its
+# error handling, while a request timeout and cancellation stay distinct.
+
+
+class _StubWriter:
+    """A writer whose ``write`` or ``drain`` can fail like a dead socket."""
+
+    def __init__(
+        self, *, write_error: Exception | None = None, drain_error: Exception | None = None
+    ) -> None:
+        self._write_error = write_error
+        self._drain_error = drain_error
+
+    def write(self, _data: bytes) -> None:
+        if self._write_error is not None:
+            raise self._write_error
+
+    async def drain(self) -> None:
+        if self._drain_error is not None:
+            raise self._drain_error
+
+    def close(self) -> None:
+        pass
+
+    async def wait_closed(self) -> None:
+        pass
+
+
+class _BlockingReader:
+    """A reader that never produces a frame, so the read loop just waits."""
+
+    async def readuntil(self, _separator: bytes) -> bytes:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+class _ResetReader:
+    """A reader that fails like a connection reset on the first read."""
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    async def readuntil(self, _separator: bytes) -> bytes:
+        raise self._error
+
+
+async def test_write_side_broken_pipe_becomes_a_protocol_error() -> None:
+    writer = _StubWriter(write_error=BrokenPipeError("broken pipe"))
+    connection = ZetaConnection(_BlockingReader(), writer)  # type: ignore[arg-type]
+    with pytest.raises(ZetaProtocolError, match="connection failed"):
+        await connection.call("status", {})
+    # The transport is dead, so the connection is marked closed and later calls
+    # fail fast instead of writing into a broken socket.
+    assert connection.closed
+    with pytest.raises(ZetaProtocolError, match="closed"):
+        await connection.call("status", {})
+
+
+async def test_drain_side_reset_becomes_a_protocol_error() -> None:
+    writer = _StubWriter(drain_error=ConnectionResetError("reset"))
+    connection = ZetaConnection(_BlockingReader(), writer)  # type: ignore[arg-type]
+    with pytest.raises(ZetaProtocolError, match="connection failed"):
+        await connection.call("status", {})
+    assert connection.closed
+
+
+async def test_read_side_reset_mid_request_becomes_a_protocol_error() -> None:
+    # The write succeeds, then the read loop hits a raw ``ConnectionResetError``
+    # and sets it on the open request's future. ``call`` normalizes it.
+    reader = _ResetReader(ConnectionResetError("peer reset"))
+    connection = ZetaConnection(reader, _StubWriter())  # type: ignore[arg-type]
+    connection.start()
+    with pytest.raises(ZetaProtocolError, match="connection failed"):
+        await connection.call("status", {})
+    assert connection.closed
+    await connection.aclose()
+
+
+async def test_read_side_eof_mid_request_becomes_a_protocol_error() -> None:
+    # An incomplete read (EOF mid-frame) is already a protocol error; it must
+    # keep its protocol-error type rather than surfacing as a raw EOF.
+    reader = _ResetReader(asyncio.IncompleteReadError(partial=b"{", expected=None))
+    connection = ZetaConnection(reader, _StubWriter())  # type: ignore[arg-type]
+    connection.start()
+    with pytest.raises(ZetaProtocolError):
+        await connection.call("status", {})
+    assert connection.closed
+    await connection.aclose()
+
+
+async def test_cancellation_propagates_and_is_not_normalized() -> None:
+    # A caller cancelling an in-flight call must see ``CancelledError``, not a
+    # swallowed or normalized transport error.
+    connection = ZetaConnection(_BlockingReader(), _StubWriter())  # type: ignore[arg-type]
+    task = asyncio.ensure_future(connection.call("status", {}))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task

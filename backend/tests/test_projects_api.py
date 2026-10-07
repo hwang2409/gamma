@@ -535,6 +535,29 @@ async def test_semantic_error_mid_walk_still_surfaces(settings: Settings) -> Non
         assert "invalid or unavailable" in response.json()["detail"]
 
 
+async def test_transport_reset_on_a_later_page_returns_a_partial_list(
+    settings: Settings,
+) -> None:
+    # Page 1 returns, then the connection resets. A reset after a page was
+    # collected is a transport failure, so the walk keeps page 1 and reports
+    # complete=False rather than losing it or raising.
+    fixture = ProjectsFixture(projects=_many_projects(5), page_size=1, reset_on_page=2)
+    service = ProjectsService(runtime=FakeRuntime(projects=fixture), settings=settings)
+    result = await service.list_projects()
+    assert [item.id for item in result.projects] == ["p_0"]
+    assert result.complete is False
+
+
+async def test_transport_reset_on_the_first_page_is_a_502(settings: Settings) -> None:
+    # Nothing was collected when the connection reset, so there is no partial
+    # list. A transport failure is an upstream failure (502), not a 500.
+    fixture = ProjectsFixture(projects=_many_projects(5), page_size=1, reset_on_page=1)
+    runtime = FakeRuntime(projects=fixture)
+    async for http_client in _make_client(settings, runtime):
+        response = await http_client.get("/api/projects")
+        assert response.status_code == 502
+
+
 # --- storage errors --------------------------------------------------------
 
 

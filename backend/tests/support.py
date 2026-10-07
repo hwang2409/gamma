@@ -12,7 +12,14 @@ import uvicorn
 from fastapi import FastAPI
 
 from gamma.runtime import RuntimeConnection, RuntimeSpec, ZetaRuntime
-from gamma.zeta_protocol import Capabilities, EventHandler, HelloResult, ZetaEvent, ZetaRpcError
+from gamma.zeta_protocol import (
+    Capabilities,
+    EventHandler,
+    HelloResult,
+    ZetaEvent,
+    ZetaProtocolError,
+    ZetaRpcError,
+)
 
 FAKE_HELLO = HelloResult(
     protocol_version="1.1",
@@ -73,6 +80,7 @@ class ProjectsFixture:
         hang_on_page: int | None = None,
         error_on_page: int | None = None,
         page_error: ZetaRpcError | None = None,
+        reset_on_page: int | None = None,
     ) -> None:
         self.projects = projects or []
         self.details = details or {}
@@ -95,6 +103,10 @@ class ProjectsFixture:
         self.hang_on_page = hang_on_page
         self.error_on_page = error_on_page
         self.page_error = page_error
+        # ``reset_on_page`` raises a ``ZetaProtocolError`` on that page, modelling
+        # a transport reset after :class:`ZetaConnection` has already normalized
+        # the raw ``OSError`` to the one protocol error type.
+        self.reset_on_page = reset_on_page
 
     def _slice(self, records: list[Any], params: dict[str, Any]) -> tuple[list[Any], int | None]:
         offset = int(params.get("offset", 0))
@@ -279,6 +291,8 @@ class FakeConnection(RuntimeConnection):
             await asyncio.Event().wait()  # wait until the caller's timeout cancels us
         if self.projects.error_on_page == self._walk_page and self.projects.page_error:
             raise self.projects.page_error
+        if self.projects.reset_on_page == self._walk_page:
+            raise ZetaProtocolError("zeta connection failed: connection reset by peer")
 
     def _metadata(self, session_id: str, params: dict[str, Any]) -> dict[str, Any]:
         return {

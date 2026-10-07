@@ -408,6 +408,30 @@ class ZetaConnection:
                 self._writer.write(frame)
                 await self._writer.drain()
             return await asyncio.wait_for(future, timeout=self._request_timeout)
+        except TimeoutError:
+            # The request outlived ``request_timeout``. This is a liveness
+            # signal, not a dead transport, so callers bound it themselves;
+            # keep it distinct from a connection failure. (``TimeoutError`` is
+            # an ``OSError`` subclass, so it must be re-raised before the
+            # transport-error branch below.)
+            raise
+        except (OSError, EOFError) as exc:
+            # The write side (``write``/``drain``) can raise ``BrokenPipeError``,
+            # ``ConnectionResetError``, or another ``OSError`` directly, and the
+            # read loop can set a raw transport error (connection reset, EOF
+            # mid-frame via ``IncompleteReadError``) on this request's future.
+            # Normalize every such mid-request transport death to one protocol
+            # error so each caller sees a single type instead of leaking the OS
+            # exception past its error handling. ``asyncio.CancelledError`` is a
+            # ``BaseException`` and is not caught here, so cancellation still
+            # propagates.
+            failure = ZetaProtocolError(f"zeta connection failed: {exc}")
+            # Drop this request before failing the rest, so ``_finish`` does not
+            # set an exception on a future no one will await (this call raises
+            # instead), and mark the connection dead so later calls fail fast.
+            self._pending.pop(request_id, None)
+            self._finish(failure)
+            raise failure from exc
         finally:
             self._pending.pop(request_id, None)
 
