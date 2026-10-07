@@ -19,6 +19,9 @@ const PATHS = {
   alert: "M8 2l6.5 11.5h-13zM8 6.5v3M8 11.5v.5",
   plus: "M8 3v10M3 8h10",
   folder: "M2 4.5a1 1 0 011-1h3l1.5 1.5H13a1 1 0 011 1V12a1 1 0 01-1 1H3a1 1 0 01-1-1z",
+  box: "M8 1.8L13.5 4.9v6.2L8 14.2 2.5 11.1V4.9zM2.7 5L8 8l5.3-3M8 8v6",
+  clock: "M8 14A6 6 0 108 2a6 6 0 000 12zM8 5v3.2l2 1.3",
+  inbox: "M2.5 9.5L4 4h8l1.5 5.5M2.5 9.5V12a1 1 0 001 1h9a1 1 0 001-1V9.5M2.5 9.5h3l1 1.5h3l1-1.5h3",
 } as const;
 
 export type IconName = keyof typeof PATHS;

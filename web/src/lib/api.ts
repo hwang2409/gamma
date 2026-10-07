@@ -2,7 +2,14 @@
 
 import type {
   CreateSessionBody,
+  InboxStatus,
+  MemoryVersionDetail,
   OptionsResponse,
+  PagedInbox,
+  PagedMemoryLog,
+  PagedProjects,
+  ProjectDetailResponse,
+  ProjectSessionsResponse,
   SessionView,
   ZetaSessionSummary,
 } from "./protocol";
@@ -39,6 +46,11 @@ export function clearToken(): void {
 
 export function isAuthError(cause: unknown): boolean {
   return cause instanceof ApiError && (cause.status === 401 || cause.status === 403);
+}
+
+/** True when the running Zeta does not offer the projects feature. */
+export function isUnsupported(cause: unknown): boolean {
+  return cause instanceof ApiError && cause.status === 501;
 }
 
 export class ApiError extends Error {
@@ -81,6 +93,16 @@ async function errorDetail(response: Response): Promise<string> {
   }
 }
 
+/**
+ * Read a fully-paged project endpoint.
+ *
+ * Zeta pages a project list, memory history, or inbox, but the backend walks
+ * every page over one `zeta serve` connection and returns the whole set with a
+ * `complete` flag, so the browser makes a single request per view. `complete`
+ * is false only when a safety bound stopped the backend walk, so the view can
+ * warn that the list may be short.
+ */
+
 export const api = {
   options: () => request<OptionsResponse>("/api/options"),
   zetaSessions: (provider: string) =>
@@ -93,4 +115,20 @@ export const api = {
   session: (id: string) => request<SessionView>(`/api/sessions/${encodeURIComponent(id)}`),
   closeSession: (id: string) =>
     request<void>(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  projects: () => request<PagedProjects>("/api/projects"),
+  project: (id: string) =>
+    request<ProjectDetailResponse>(`/api/projects/${encodeURIComponent(id)}`),
+  projectMemoryLog: (id: string) =>
+    request<PagedMemoryLog>(`/api/projects/${encodeURIComponent(id)}/memory/log`),
+  projectMemoryVersion: (id: string, versionId: string, file: string) =>
+    request<MemoryVersionDetail>(
+      `/api/projects/${encodeURIComponent(id)}/memory/versions/${encodeURIComponent(versionId)}` +
+        `?file=${encodeURIComponent(file)}`,
+    ),
+  projectSessions: (id: string) =>
+    request<ProjectSessionsResponse>(`/api/projects/${encodeURIComponent(id)}/sessions`),
+  projectInbox: (id: string, status: InboxStatus) =>
+    request<PagedInbox>(
+      `/api/projects/${encodeURIComponent(id)}/inbox?status=${encodeURIComponent(status)}`,
+    ),
 };

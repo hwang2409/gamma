@@ -12,7 +12,14 @@ import uvicorn
 from fastapi import FastAPI
 
 from gamma.runtime import RuntimeConnection, RuntimeSpec, ZetaRuntime
-from gamma.zeta_protocol import Capabilities, EventHandler, HelloResult, ZetaEvent, ZetaRpcError
+from gamma.zeta_protocol import (
+    Capabilities,
+    EventHandler,
+    HelloResult,
+    ZetaEvent,
+    ZetaProtocolError,
+    ZetaRpcError,
+)
 
 FAKE_HELLO = HelloResult(
     protocol_version="1.1",
@@ -34,6 +41,160 @@ FAKE_HELLO = HelloResult(
 )
 
 
+def _hello_with_projects(*, session_paging: bool = True) -> HelloResult:
+    """A handshake that advertises the optional ``projects`` feature.
+
+    ``session_paging`` also advertises ``list_sessions_paging`` so a test can
+    exercise both a paging server and one that can only return a prefix.
+    """
+
+    data = FAKE_HELLO.model_dump()
+    features = ["assistant_reset", "projects"]
+    if session_paging:
+        features.append("list_sessions_paging")
+    data["capabilities"]["features"] = features
+    return HelloResult.model_validate(data)
+
+
+class ProjectsFixture:
+    """In-memory project data a :class:`FakeConnection` serves.
+
+    It answers the four read-only project requests and the ``project_id``
+    filter on ``list_sessions`` straight from Python data, so the API tests do
+    not need a real harness. An unknown project id raises the same structured
+    ``project_not_found`` error the real server sends.
+    """
+
+    def __init__(
+        self,
+        *,
+        projects: list[dict[str, Any]] | None = None,
+        details: dict[str, dict[str, Any]] | None = None,
+        memory_log: dict[str, list[dict[str, Any]]] | None = None,
+        memory_versions: dict[tuple[str, str, str], dict[str, Any]] | None = None,
+        inbox: dict[tuple[str, str], dict[str, Any]] | None = None,
+        sessions: list[dict[str, Any]] | None = None,
+        session_paging: bool = True,
+        session_page_size: int | None = None,
+        page_size: int | None = None,
+        hang_on_page: int | None = None,
+        error_on_page: int | None = None,
+        page_error: ZetaRpcError | None = None,
+        reset_on_page: int | None = None,
+    ) -> None:
+        self.projects = projects or []
+        self.details = details or {}
+        self.memory_log = memory_log or {}
+        self.memory_versions = memory_versions or {}
+        self.inbox = inbox or {}
+        self.sessions = sessions or []
+        # Whether the fake server advertises ``list_sessions_paging`` and, when
+        # it does, how many sessions each page holds (``None`` means one page).
+        self.session_paging = session_paging
+        self.session_page_size = session_page_size
+        # Records per page for list_projects/memory_log/inbox, overriding the
+        # requested ``limit`` so a test can force a multi-page walk with a tiny
+        # fixture. ``None`` honours the requested ``limit``.
+        self.page_size = page_size
+        # Fault injection for the bounded walk, keyed by 1-based page number of
+        # a paged read. ``hang_on_page`` makes that page wait forever (until the
+        # walk's per-call timeout cancels it); ``error_on_page`` raises
+        # ``page_error`` on that page, modelling a semantic failure mid-walk.
+        self.hang_on_page = hang_on_page
+        self.error_on_page = error_on_page
+        self.page_error = page_error
+        # ``reset_on_page`` raises a ``ZetaProtocolError`` on that page, modelling
+        # a transport reset after :class:`ZetaConnection` has already normalized
+        # the raw ``OSError`` to the one protocol error type.
+        self.reset_on_page = reset_on_page
+
+    def _slice(self, records: list[Any], params: dict[str, Any]) -> tuple[list[Any], int | None]:
+        offset = int(params.get("offset", 0))
+        size = self.page_size
+        if size is None and params.get("limit") is not None:
+            size = int(params["limit"])
+        page = records[offset:]
+        if size is not None:
+            page = page[:size]
+        end = offset + len(page)
+        return page, (end if end < len(records) else None)
+
+    def _require(self, project_id: object) -> str:
+        if not isinstance(project_id, str) or not project_id:
+            raise ZetaRpcError(-32602, "project_id must be a non-empty string")
+        known = {item["id"] for item in self.projects} | set(self.details)
+        if project_id not in known:
+            raise ZetaRpcError(
+                -32602,
+                "project not found",
+                {"code": "project_not_found", "project_id": project_id},
+            )
+        return project_id
+
+    def answer(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method == "list_projects":
+            return self._list_projects(params)
+        project_id = self._require(params.get("project_id"))
+        if method == "project_show":
+            return self.details[project_id]
+        if method == "project_memory_log":
+            return self._memory(project_id, params)
+        if method == "project_inbox":
+            return self._inbox(project_id, params)
+        if method == "list_sessions":
+            return self._sessions(project_id, params)
+        raise ZetaRpcError(-32601, f"method {method} is not supported")
+
+    def _list_projects(self, params: dict[str, Any]) -> dict[str, Any]:
+        page, next_offset = self._slice(self.projects, params)
+        return {"projects": page, "next_offset": next_offset}
+
+    def _memory(self, project_id: str, params: dict[str, Any]) -> dict[str, Any]:
+        if "version_id" in params or "file" in params:
+            key = (project_id, str(params.get("version_id")), str(params.get("file")))
+            if key not in self.memory_versions:
+                raise ZetaRpcError(-32602, "unknown version or file")
+            return {"version": self.memory_versions[key]}
+        versions = self.memory_log.get(project_id, [])
+        page, next_offset = self._slice(versions, params)
+        return {"versions": page, "next_offset": next_offset}
+
+    def _inbox(self, project_id: str, params: dict[str, Any]) -> dict[str, Any]:
+        status = str(params.get("status", "new"))
+        stored = self.inbox.get((project_id, status))
+        messages = list(stored.get("messages", [])) if stored else []
+        page, next_offset = self._slice(messages, params)
+        untrusted = any(item.get("origin", "local") != "local" for item in page)
+        return {
+            "status": status,
+            "messages": page,
+            "untrusted": untrusted,
+            "next_offset": next_offset,
+        }
+
+    def _sessions(self, project_id: str, params: dict[str, Any]) -> dict[str, Any]:
+        linked = [item for item in self.sessions if item.get("project_id") == project_id]
+        if not self.session_paging:
+            # No paging feature: return the largest fitting prefix. A frame bound
+            # (modelled by ``session_page_size``) cuts the page and marks it
+            # truncated; the client cannot request the rest.
+            size = self.session_page_size
+            if size is not None and len(linked) > size:
+                return {"sessions": linked[:size], "truncated": True, "next_offset": size}
+            return {"sessions": linked, "truncated": False, "next_offset": None}
+        if "offset" in params and not isinstance(params["offset"], int):
+            raise ZetaRpcError(-32602, "offset must be an integer")
+        offset = int(params.get("offset", 0))
+        page = linked[offset:]
+        size = self.session_page_size
+        if size is not None:
+            page = page[:size]
+        elif params.get("limit") is not None:
+            page = page[: int(params["limit"])]
+        end = offset + len(page)
+        return {"sessions": page, "next_offset": end if end < len(linked) else None}
+
+
 class FakeConnection(RuntimeConnection):
     """A harness stand-in: records requests and lets a test emit events.
 
@@ -41,19 +202,29 @@ class FakeConnection(RuntimeConnection):
     process start-up time; the real harness is covered separately.
     """
 
-    def __init__(self, spec: RuntimeSpec, on_event: EventHandler) -> None:
+    def __init__(
+        self,
+        spec: RuntimeSpec,
+        on_event: EventHandler,
+        *,
+        projects: ProjectsFixture | None = None,
+    ) -> None:
         self.spec = spec
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.sessions: list[dict[str, Any]] = []
         self.errors: dict[str, ZetaRpcError] = {}
+        self.projects = projects
         self._on_event = on_event
         self._alive = True
         self._counter = 0
+        self._walk_page = 0
         self._pending: dict[str, dict[str, Any]] = {}
 
     @property
     def hello(self) -> HelloResult:
-        return FAKE_HELLO
+        if self.projects is None:
+            return FAKE_HELLO
+        return _hello_with_projects(session_paging=self.projects.session_paging)
 
     @property
     def alive(self) -> bool:
@@ -64,6 +235,12 @@ class FakeConnection(RuntimeConnection):
         self.calls.append((method, params))
         if method in self.errors:
             raise self.errors[method]
+        if self.projects is not None and (
+            method in ("list_projects", "project_show", "project_memory_log", "project_inbox")
+            or (method == "list_sessions" and "project_id" in params)
+        ):
+            await self._maybe_fault(method)
+            return self.projects.answer(method, params)
         match method:
             case "new_session":
                 self._counter += 1
@@ -96,6 +273,27 @@ class FakeConnection(RuntimeConnection):
                 }
         raise ZetaRpcError(-32601, f"method {method} is not supported")
 
+    async def _maybe_fault(self, method: str) -> None:
+        """Inject a hang or a semantic error on a chosen page of a paged read.
+
+        Counts calls to the paged reads only, so a test can make, for example,
+        the second page hang forever or fail while the first page still returns.
+        """
+
+        if self.projects is None or method not in (
+            "list_projects",
+            "project_memory_log",
+            "project_inbox",
+        ):
+            return
+        self._walk_page += 1
+        if self.projects.hang_on_page == self._walk_page:
+            await asyncio.Event().wait()  # wait until the caller's timeout cancels us
+        if self.projects.error_on_page == self._walk_page and self.projects.page_error:
+            raise self.projects.page_error
+        if self.projects.reset_on_page == self._walk_page:
+            raise ZetaProtocolError("zeta connection failed: connection reset by peer")
+
     def _metadata(self, session_id: str, params: dict[str, Any]) -> dict[str, Any]:
         return {
             "version": 1,
@@ -127,17 +325,22 @@ class FakeConnection(RuntimeConnection):
 
 
 class FakeRuntime(ZetaRuntime):
-    def __init__(self) -> None:
+    def __init__(self, *, projects: ProjectsFixture | None = None) -> None:
         self.launched: list[FakeConnection] = []
         self.sessions: list[dict[str, Any]] = []
+        self.projects = projects
+        # Errors applied to every connection this runtime launches, so a test
+        # can make a short-lived project connection fail a specific request.
+        self.errors: dict[str, ZetaRpcError] = {}
 
     @property
     def last(self) -> FakeConnection:
         return self.launched[-1]
 
     async def launch(self, spec: RuntimeSpec, on_event: EventHandler) -> RuntimeConnection:
-        connection = FakeConnection(spec, on_event)
+        connection = FakeConnection(spec, on_event, projects=self.projects)
         connection.sessions = self.sessions
+        connection.errors.update(self.errors)
         self.launched.append(connection)
         return connection
 
@@ -174,4 +377,11 @@ async def serve(app: FastAPI) -> AsyncIterator[str]:
             await asyncio.wait_for(task, timeout=10)
 
 
-__all__ = ["FAKE_HELLO", "FakeConnection", "FakeRuntime", "free_port", "serve"]
+__all__ = [
+    "FAKE_HELLO",
+    "FakeConnection",
+    "FakeRuntime",
+    "ProjectsFixture",
+    "free_port",
+    "serve",
+]

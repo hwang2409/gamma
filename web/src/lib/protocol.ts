@@ -98,3 +98,134 @@ export type ClientCommand =
   | { type: "deny"; request_id: string }
   | { type: "abort" }
   | { type: "ping" };
+
+// --- projects (read-only) --------------------------------------------------
+
+export interface ProjectSummary {
+  id: string;
+  name: string;
+  scope: string | null;
+  roots: string[];
+  session_count: number;
+  last_activity: string | null;
+}
+
+export interface ProjectDetail extends ProjectSummary {
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+/**
+ * One memory file. `automatic` marks content the background updater wrote but
+ * the user has not accepted. A later Zeta memory rewrite will enrich this
+ * shape under a new negotiated version; keep its reading in one component.
+ */
+export interface MemoryFile {
+  name: string;
+  content: string;
+  automatic: boolean;
+  content_truncated: boolean;
+}
+
+export interface MemorySnapshot {
+  version_id: string | null;
+  digest: string | null;
+  files: MemoryFile[];
+}
+
+export interface ProjectDetailResponse {
+  project: ProjectDetail;
+  memory: MemorySnapshot;
+}
+
+export interface MemoryProvenance {
+  session_id?: string;
+  seq_start?: number;
+  seq_end?: number;
+  model?: string;
+  accepted_by?: string;
+  source?: string;
+  peer?: string;
+  [key: string]: unknown;
+}
+
+export interface MemoryVersion {
+  version_id: string;
+  timestamp: string | null;
+  kind: string | null;
+  files_changed: string[];
+  provenance: MemoryProvenance;
+  provenance_truncated: boolean;
+  target_version_id: string | null;
+}
+
+export interface MemoryVersionDetail extends MemoryVersion {
+  file: string;
+  content: string;
+  content_truncated: boolean;
+  diff: string;
+  diff_truncated: boolean;
+}
+
+export interface ProjectSessionSummary {
+  session_id: string;
+  name: string | null;
+  provider: string;
+  model: string | null;
+  cwd: string | null;
+  project_role: string | null;
+  parent_session_id: string | null;
+  updated_at: string | null;
+  first_message_preview: string | null;
+}
+
+export interface ProjectSessionsResponse {
+  sessions: ProjectSessionSummary[];
+  truncated: boolean;
+}
+
+export type InboxStatus = "new" | "claimed" | "done";
+
+export interface InboxMessage {
+  id: string;
+  origin: string;
+  from_project: string | null;
+  from_session: string | null;
+  to_project: string | null;
+  kind: string | null;
+  title: string;
+  body: string;
+  in_reply_to: string | null;
+  created_at: string | null;
+  claimer_session: string | null;
+  claimed_at: string | null;
+  outcome: string | null;
+  reply: string | null;
+  done_at: string | null;
+  truncated_fields: string[];
+}
+
+// --- fully-paged reads -----------------------------------------------------
+//
+// Zeta pages project lists, memory history, and the inbox. The backend walks
+// every page over one `zeta serve` connection and returns the whole set with a
+// `complete` flag, so the browser makes a single request per view. `complete`
+// is false only when a safety bound stopped the backend walk, so the view can
+// say the list may be incomplete.
+
+export interface PagedProjects {
+  projects: ProjectSummary[];
+  complete: boolean;
+}
+
+export interface PagedMemoryLog {
+  versions: MemoryVersion[];
+  complete: boolean;
+}
+
+export interface PagedInbox {
+  status: InboxStatus;
+  messages: InboxMessage[];
+  untrusted: boolean;
+  complete: boolean;
+}

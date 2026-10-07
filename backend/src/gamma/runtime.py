@@ -57,6 +57,9 @@ class RuntimeConnection(abc.ABC):
     def supports(self, request: str) -> bool:
         return self.hello.supports(request)
 
+    def supports_feature(self, feature: str) -> bool:
+        return self.hello.supports_feature(feature)
+
 
 class ZetaRuntime(abc.ABC):
     """Factory for harness connections."""

@@ -10,6 +10,8 @@ import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 
 import { AuthScreen } from "./components/AuthScreen";
 import { Node } from "./components/Node";
+import { ProjectPage } from "./components/projects/ProjectPage";
+import { ProjectsPage } from "./components/projects/ProjectsPage";
 import { SessionPage } from "./components/SessionPage";
 import { StartPage } from "./components/StartPage";
 import { api, clearToken, isAuthError, readToken, writeToken } from "./lib/api";
@@ -20,6 +22,9 @@ type Auth =
   | { kind: "needed"; rejected: boolean }
   | { kind: "ready"; options: OptionsResponse }
   | { kind: "offline"; message: string };
+
+// Where in the app we are, under any session that is open on top.
+type Nav = { kind: "start" } | { kind: "projects" } | { kind: "project"; id: string };
 
 const FixturePage = import.meta.env.DEV ? lazy(() => import("./dev/FixturePage")) : null;
 
@@ -37,6 +42,7 @@ export function App(): React.JSX.Element {
 function Shell(): React.JSX.Element {
   const [auth, setAuth] = useState<Auth>({ kind: "checking" });
   const [open, setOpen] = useState<SessionView | null>(null);
+  const [nav, setNav] = useState<Nav>({ kind: "start" });
 
   const check = useCallback(async () => {
     setAuth({ kind: "checking" });
@@ -70,6 +76,7 @@ function Shell(): React.JSX.Element {
   const unauthorized = useCallback(() => {
     clearToken();
     setOpen(null);
+    setNav({ kind: "start" });
     setAuth({ kind: "needed", rejected: true });
   }, []);
 
@@ -116,17 +123,48 @@ function Shell(): React.JSX.Element {
         </main>
       );
     case "ready":
-      return open === null ? (
-        <StartPage options={auth.options} onOpen={setOpen} onUnauthorized={unauthorized} />
-      ) : (
-        <SessionPage
-          key={open.session_id}
-          sessionId={open.session_id}
-          initial={open}
-          onLeave={() => setOpen(null)}
-          onUnauthorized={unauthorized}
-        />
-      );
+      // A session opens on top of whatever navigation is underneath, so
+      // leaving it returns to the page that opened it (start or a project).
+      if (open !== null) {
+        return (
+          <SessionPage
+            key={open.session_id}
+            sessionId={open.session_id}
+            initial={open}
+            onLeave={() => setOpen(null)}
+            onUnauthorized={unauthorized}
+          />
+        );
+      }
+      switch (nav.kind) {
+        case "start":
+          return (
+            <StartPage
+              options={auth.options}
+              onOpen={setOpen}
+              onProjects={() => setNav({ kind: "projects" })}
+              onUnauthorized={unauthorized}
+            />
+          );
+        case "projects":
+          return (
+            <ProjectsPage
+              onOpenProject={(id) => setNav({ kind: "project", id })}
+              onBack={() => setNav({ kind: "start" })}
+              onUnauthorized={unauthorized}
+            />
+          );
+        case "project":
+          return (
+            <ProjectPage
+              key={nav.id}
+              projectId={nav.id}
+              onBack={() => setNav({ kind: "projects" })}
+              onOpenSession={setOpen}
+              onUnauthorized={unauthorized}
+            />
+          );
+      }
   }
 }
 

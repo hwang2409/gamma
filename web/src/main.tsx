@@ -13,6 +13,7 @@ import "./styles/base.css";
 import "./styles/ledger.css";
 import "./styles/dock.css";
 import "./styles/pages.css";
+import "./styles/projects.css";
 
 const root = document.getElementById("root");
 if (root === null) {
