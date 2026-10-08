@@ -2,7 +2,7 @@
  * Browser checks: screenshots in both themes and two viewports, and axe.
  *
  * They drive a running gamma (backend + Vite dev server, so the dev-only
- * fixture route exists) with the fake provider; nothing here starts
+ * fixture route exists) with Zeta's scripted test provider; nothing here starts
  * servers. See e2e/ui.spec.ts for the environment it reads.
  */
 

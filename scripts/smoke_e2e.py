@@ -6,7 +6,7 @@
 """End-to-end smoke test for gamma.
 
 It starts the real backend, creates a session on a real
-``zeta serve --provider fake`` harness, attaches a WebSocket, sends a message,
+scripted ``zeta serve --provider codex`` harness, attaches a WebSocket, sends a message,
 and checks that the assistant message arrives. It needs no API keys.
 
     uv run scripts/smoke_e2e.py
@@ -62,10 +62,16 @@ async def main() -> int:
         **os.environ,
         "GAMMA_ACCESS_TOKEN": TOKEN,
         "GAMMA_PORT": str(port),
-        "GAMMA_ALLOWED_PROVIDERS": "fake",
+        "GAMMA_ALLOWED_PROVIDERS": "codex",
+        "GAMMA_ALLOWED_MODELS": json.dumps({"codex": ["gpt-5.6-luna"]}),
         "GAMMA_ALLOWED_ROOTS": str(work),
         "GAMMA_ALLOWED_ORIGINS": ORIGIN,
-        "GAMMA_ZETA_ENV": json.dumps({"ZETA_HOME": str(work / "zeta-home")}),
+        "GAMMA_ZETA_ENV": json.dumps(
+            {
+                "ZETA_HOME": str(work / "zeta-home"),
+                "ZETA_TEST_SCRIPTED_PROVIDER": "1",
+            }
+        ),
     }
     process = await asyncio.create_subprocess_exec(
         "uv",
@@ -92,7 +98,11 @@ async def main() -> int:
 
             created = await client.post(
                 f"{base}/api/sessions",
-                json={"provider": "fake", "model": "offline", "cwd": str(work / "project")},
+                json={
+                    "provider": "codex",
+                    "model": "gpt-5.6-luna",
+                    "cwd": str(work / "project"),
+                },
             )
             created.raise_for_status()
             session = created.json()

@@ -230,8 +230,7 @@ class ProjectsService:
     async def sessions(self, project_id: str) -> ProjectSessionsResult:
         """Sessions linked to one project, merged across the allowed providers.
 
-        ``list_sessions`` filters by the harness's own launch provider (a fake
-        server lists only fake sessions, a real server omits them), so one
+        ``list_sessions`` filters by the harness's own launch provider, so one
         connection cannot see a project's whole session set. The service asks
         every allowed provider and merges by session id. A provider that fails
         to launch is skipped, so one bad provider does not hide the rest.
@@ -302,16 +301,12 @@ class ProjectsService:
         return list(self._settings.allowed_providers)
 
     def _read_provider(self) -> str:
-        """A cheap provider for project-level reads (not session filtering).
-
-        Project, memory, and inbox reads are provider-independent, so ``fake``
-        is preferred: it needs no credentials and starts fastest.
-        """
+        """Select an allowed provider for provider-independent project reads."""
 
         providers = self._providers()
         if not providers:
             raise ProjectUnavailable("no provider is allowed")
-        return "fake" if "fake" in providers else providers[0]
+        return providers[0]
 
     @contextlib.asynccontextmanager
     async def _connect(self, provider: str | None = None) -> AsyncIterator[RuntimeConnection]:

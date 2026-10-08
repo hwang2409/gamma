@@ -1,8 +1,8 @@
 """Shared fixtures.
 
-Every test that touches a real harness uses ``zeta serve --provider fake``,
-which needs no API keys, and a private ``ZETA_HOME`` so test sessions never
-mix with the developer's own sessions.
+Every test that touches a real harness enables Zeta's scripted test provider
+with a real catalog provider and model. A private ``ZETA_HOME`` keeps test
+sessions separate from the developer's own sessions.
 """
 
 from __future__ import annotations
@@ -42,11 +42,14 @@ def settings(workspace: Path, zeta_home: Path) -> Settings:
     return Settings(
         access_token="test-token",
         allowed_origins=["http://localhost:5173"],
-        allowed_providers=["fake"],
-        allowed_models={"fake": ["offline", "faster"]},
+        allowed_providers=["codex"],
+        allowed_models={"codex": ["gpt-5.6-luna", "gpt-5.6-sol"]},
         allowed_roots=[workspace],
         zeta_bin=ZETA_BIN or "zeta",
-        zeta_env={"ZETA_HOME": str(zeta_home)},
+        zeta_env={
+            "ZETA_HOME": str(zeta_home),
+            "ZETA_TEST_SCRIPTED_PROVIDER": "1",
+        },
         session_idle_timeout_seconds=3600.0,
         request_timeout_seconds=30.0,
         event_buffer_capacity=50,

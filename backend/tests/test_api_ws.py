@@ -38,7 +38,7 @@ class Harness:
 
     async def create_session(self) -> str:
         async with httpx.AsyncClient(headers={TOKEN_HEADER: TOKEN}) as client:
-            response = await client.post(self.url("/api/sessions"), json={"provider": "fake"})
+            response = await client.post(self.url("/api/sessions"), json={"provider": "codex"})
         response.raise_for_status()
         return str(response.json()["session_id"])
 

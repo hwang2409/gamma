@@ -1,4 +1,4 @@
-"""SessionManager against real ``zeta serve --provider fake`` harnesses."""
+"""SessionManager against real scripted ``zeta serve`` harnesses."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ async def manager(settings: Settings, local_runtime: LocalProcessRuntime):
 
 
 async def test_create_send_and_derived_state(manager: SessionManager, workspace: Path) -> None:
-    session = await manager.create(provider="fake", model="offline", cwd=str(workspace))
+    session = await manager.create(provider="codex", model="gpt-5.6-luna", cwd=str(workspace))
     assert session.zeta_session_id
     assert session.state == "idle"
 
@@ -70,7 +70,7 @@ async def test_create_send_and_derived_state(manager: SessionManager, workspace:
 
 
 async def test_close_reaps_the_harness_process(manager: SessionManager, workspace: Path) -> None:
-    session = await manager.create(provider="fake", cwd=str(workspace))
+    session = await manager.create(provider="codex", cwd=str(workspace))
     pid = session._connection.pid  # type: ignore[attr-defined]
     assert _is_running(pid)
 
@@ -83,8 +83,8 @@ async def test_close_reaps_the_harness_process(manager: SessionManager, workspac
 
 
 async def test_manager_aclose_reaps_every_harness(manager: SessionManager, workspace: Path) -> None:
-    first = await manager.create(provider="fake", cwd=str(workspace))
-    second = await manager.create(provider="fake", cwd=str(workspace))
+    first = await manager.create(provider="codex", cwd=str(workspace))
+    second = await manager.create(provider="codex", cwd=str(workspace))
     pids = [
         first._connection.pid,  # type: ignore[attr-defined]
         second._connection.pid,  # type: ignore[attr-defined]
@@ -98,17 +98,17 @@ async def test_manager_aclose_reaps_every_harness(manager: SessionManager, works
 async def test_list_zeta_sessions_finds_a_session_made_earlier(
     manager: SessionManager, workspace: Path
 ) -> None:
-    session = await manager.create(provider="fake", cwd=str(workspace))
+    session = await manager.create(provider="codex", cwd=str(workspace))
     await session.send("remember me")
     await _wait_for_event(session, "turn_end")
     created_id = session.zeta_session_id
     await manager.close(session.session_id)
 
-    listed = await manager.list_zeta_sessions("fake")
+    listed = await manager.list_zeta_sessions("codex")
 
     assert created_id in [item.session_id for item in listed]
     found = next(item for item in listed if item.session_id == created_id)
-    assert found.provider == "fake"
+    assert found.provider == "codex"
     assert found.cwd == str(workspace.resolve())
 
 
@@ -116,13 +116,13 @@ async def test_resume_reopens_a_session_in_its_own_directory(
     manager: SessionManager, workspace: Path
 ) -> None:
     project = workspace / "project"
-    first = await manager.create(provider="fake", cwd=str(project))
+    first = await manager.create(provider="codex", cwd=str(project))
     await first.send("first turn")
     await _wait_for_event(first, "turn_end")
     zeta_id = first.zeta_session_id
     await manager.close(first.session_id)
 
-    resumed = await manager.create(provider="fake", cwd=str(project), resume_session_id=zeta_id)
+    resumed = await manager.create(provider="codex", cwd=str(project), resume_session_id=zeta_id)
 
     assert resumed.zeta_session_id == zeta_id
     assert resumed.metadata is not None
@@ -137,17 +137,16 @@ async def test_resume_of_an_unknown_session_fails_without_leaking_a_process(
 ) -> None:
     with pytest.raises(SessionError):
         await manager.create(
-            provider="fake", cwd=str(workspace), resume_session_id="does-not-exist"
+            provider="codex", cwd=str(workspace), resume_session_id="does-not-exist"
         )
     assert manager.list() == []
     assert local_runtime.live_count == 0
 
 
 async def test_abort_during_a_long_turn(manager: SessionManager, workspace: Path) -> None:
-    session = await manager.create(provider="fake", cwd=str(workspace))
+    session = await manager.create(provider="codex", cwd=str(workspace))
     await session.send("x" * 4000)
-    await _wait_for_event(session, "assistant_delta")
-
+    await _wait_for_event(session, "turn_start")
     assert session.state == "running"
     result = await session.abort()
     assert result["aborted"] is True
@@ -165,7 +164,7 @@ async def test_idle_sessions_are_reaped(
     manager = SessionManager(runtime=local_runtime, settings=quick)
     manager.start()
     try:
-        session = await manager.create(provider="fake", cwd=str(workspace))
+        session = await manager.create(provider="codex", cwd=str(workspace))
         pid = session._connection.pid  # type: ignore[attr-defined]
         deadline = asyncio.get_running_loop().time() + 15
         while asyncio.get_running_loop().time() < deadline and (manager.list() or _is_running(pid)):

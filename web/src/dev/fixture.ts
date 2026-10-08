@@ -1,8 +1,8 @@
 /**
  * A scripted session for the dev-only fixture route (#/fixture).
  *
- * The fake provider cannot call tools, so this script stands in for a real
- * agent run: user turns, streamed markdown, tool calls that pass, fail, and
+ * The scripted test provider only echoes text, so this script stands in for a
+ * real tool-using agent run: user turns, streamed markdown, tool calls that pass,
  * get denied, and a pending approval. It is a list of gamma events, played
  * through the real transcript reducer, so the fixture shows exactly what a
  * live session with the same events would show.
