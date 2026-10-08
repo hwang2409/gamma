@@ -71,6 +71,7 @@ async def test_launch_handshake_send_and_shutdown(
 
     message = await _collect(events, "assistant_message")
     assert message.fields["message"]["content"][0]["text"] == "you said: hello"
+    await _collect(events, "turn_end")
     names = [event.event for event in events]
     assert "turn_start" in names
     assert "assistant_delta" in names
