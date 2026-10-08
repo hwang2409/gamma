@@ -1,4 +1,4 @@
-"""Wire models and the JSON-RPC client, against a scripted fake server."""
+"""Wire models and the JSON-RPC client, against a scripted test server."""
 
 from __future__ import annotations
 
@@ -54,8 +54,8 @@ def test_session_metadata_keeps_undocumented_fields() -> None:
         "session_id": "abc123",
         "created_at": "2026-10-05T16:02:16+00:00",
         "updated_at": "2026-10-05T16:02:16+00:00",
-        "provider": "fake",
-        "model": "offline",
+        "provider": "codex",
+        "model": "gpt-5.6-luna",
         "cwd": "/tmp/work",
         "name": "",
         "approval_mode": "ask",

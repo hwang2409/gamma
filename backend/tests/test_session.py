@@ -10,7 +10,7 @@ def event(name: str, **fields: object) -> ZetaEvent:
 def session() -> GammaSession:
     return GammaSession(
         session_id="gamma-1",
-        spec=RuntimeSpec(provider="fake", model="offline"),
+        spec=RuntimeSpec(provider="codex", model="gpt-5.6-luna"),
         buffer_capacity=20,
     )
 

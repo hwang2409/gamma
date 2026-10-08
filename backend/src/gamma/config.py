@@ -16,7 +16,6 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 DEFAULT_MODELS: dict[str, list[str]] = {
-    "fake": ["offline", "faster"],
     "claude": [
         "claude-sonnet-5",
         "claude-opus-5-5",
@@ -47,7 +46,7 @@ class Settings(BaseSettings):
     # zeta harness
     zeta_bin: str = "zeta"
     allowed_providers: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["fake", "claude", "codex"]
+        default_factory=lambda: ["claude", "codex"]
     )
     allowed_models: dict[str, list[str]] = Field(default_factory=lambda: dict(DEFAULT_MODELS))
     allowed_roots: Annotated[list[Path], NoDecode] = Field(

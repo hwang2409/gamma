@@ -118,9 +118,8 @@ These are things gamma had to design around. Line numbers refer to
 12. **`abort` emits no `turn_aborted` event** in our runs, although the event
     exists (line 362); the state returns to `idle` and the stream simply stops.
     A client that waits for `turn_aborted` would wait forever.
-13. **`--provider fake` cannot produce tool calls or approvals**
-    (`src/zeta/server/fake_backend.py` streams one text message). There is no
-    key-free way to test the tool-card and approval paths against a real server,
-    so gamma covers them with a test double. A scripted fake backend
-    (tool call, output, approval request) would make offline conformance tests
-    possible for every client.
+13. **The scripted test provider produces deterministic echo replies only.**
+    Gamma's real-process tests set `ZETA_TEST_SCRIPTED_PROVIDER=1` and select a
+    real catalog provider and model, so protocol data stays production-shaped
+    without API keys. The hook does not produce tool calls or approvals, so
+    gamma covers those UI paths with its in-process test double.

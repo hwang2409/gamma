@@ -9,7 +9,7 @@ help:
 	@echo "make backend       run the backend only (prints an access token)"
 	@echo "make web           run the web dev server only"
 	@echo "make test          every test, plus lint, typecheck, and build"
-	@echo "make smoke         end-to-end check against zeta serve --provider fake"
+	@echo "make smoke         end-to-end check against Zeta's scripted test provider"
 
 install:
 	cd $(BACKEND) && uv sync --all-groups

@@ -29,8 +29,8 @@ const call = (id: string, name: string, args: Record<string, unknown>) => ({
 const session: SessionView = {
   session_id: "g1",
   zeta_session_id: "z1",
-  provider: "fake",
-  model: "offline",
+  provider: "codex",
+  model: "gpt-5.6-luna",
   cwd: "/tmp/work",
   protocol_version: "1.1",
   state: "running",

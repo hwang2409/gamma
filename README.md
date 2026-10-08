@@ -53,7 +53,7 @@ web/                Vite + React + TypeScript (pnpm)
   e2e/                    Playwright screenshots and axe checks
   src/lib/useSessionSocket.ts  socket, auth, reconnect-by-cursor
   src/components/         start page, session page, cards, composer
-scripts/smoke_e2e.py  end-to-end check with --provider fake
+scripts/smoke_e2e.py  end-to-end check with Zeta's scripted test provider
 ```
 
 ## Run it
@@ -95,8 +95,8 @@ the button in the top bar forces light or dark.
 In the dev server, `#/fixture`, `#/fixture/streaming`, `#/fixture/empty`, and
 `#/fixture/reconnecting` show the session screen over a scripted transcript
 with tool calls, failures, denials, a pending approval, and a dropped
-connection. The fake provider cannot call tools, so this
-is the way to see those states. Production builds do not include it.
+connection. Zeta's scripted test provider only echoes text, so this is the way
+to see those states. Production builds do not include it.
 
 ## Configuration
 
@@ -108,7 +108,7 @@ All settings come from `GAMMA_*` environment variables (or `backend/.env`).
 | `GAMMA_ACCESS_TOKEN` | random each start | token for REST and WebSocket |
 | `GAMMA_ALLOWED_ORIGINS` | `http://localhost:5173` | comma-separated WebSocket origins |
 | `GAMMA_ZETA_BIN` | `zeta` | harness binary |
-| `GAMMA_ALLOWED_PROVIDERS` | `fake,claude,codex` | providers the browser may pick |
+| `GAMMA_ALLOWED_PROVIDERS` | `claude,codex` | providers the browser may pick |
 | `GAMMA_ALLOWED_MODELS` | built-in map (JSON) | models per provider |
 | `GAMMA_ALLOWED_ROOTS` | `~/me/fun` | `:`-separated roots a session cwd must be inside |
 | `GAMMA_ZETA_ENV` | `{}` | extra environment for each child (JSON), for example `ZETA_HOME` |
@@ -137,16 +137,23 @@ All settings come from `GAMMA_*` environment variables (or `backend/.env`).
 
 ```sh
 make test          # backend pytest, web vitest, build, lint, typecheck
-make smoke         # end-to-end: real backend + real zeta serve --provider fake
+make smoke         # end-to-end: real backend + scripted zeta serve
 ```
 
 Browser checks (screenshots in light and dark at 1440x900 and 390x844, and
-axe accessibility checks) run against a running dev setup whose backend allows
-the `fake` provider:
+axe accessibility checks) run against a test-only dev setup. Start it with the
+scripted-provider hook in the child environment, then run Playwright:
 
 ```sh
+GAMMA_ALLOWED_PROVIDERS=codex \
+GAMMA_ALLOWED_MODELS='{"codex":["gpt-5.6-luna"]}' \
+GAMMA_ZETA_ENV='{"ZETA_TEST_SCRIPTED_PROVIDER":"1"}' make dev
+# In another shell:
 cd web && GAMMA_WEB_URL=http://localhost:5173 pnpm e2e   # screenshots go to /tmp/gamma-screens
 ```
 
-Backend tests drive a real `zeta serve --provider fake` (no API keys) for the
-runtime, session, and resume paths, and a test double for the API surface.
+Backend tests enable `ZETA_TEST_SCRIPTED_PROVIDER=1` and drive a real
+`zeta serve --provider codex --model gpt-5.6-luna` process without API keys for
+the runtime, session, and resume paths. API-surface tests use Gamma's in-process
+test double. The test suite finds `zeta` with `shutil.which("zeta")`; CI must put
+a current Zeta (at least merge `87159ca7`) on `PATH`.

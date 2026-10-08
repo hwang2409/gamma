@@ -1,4 +1,4 @@
-"""LocalProcessRuntime against a real ``zeta serve --provider fake`` process."""
+"""LocalProcessRuntime against a real scripted ``zeta serve`` process."""
 
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ pytestmark = requires_zeta
 
 def _spec(settings: Settings, workspace: Path) -> RuntimeSpec:
     return RuntimeSpec(
-        provider="fake",
-        model="offline",
+        provider="codex",
+        model="gpt-5.6-luna",
         cwd=str(workspace),
         env=dict(settings.zeta_env),
     )
@@ -62,7 +62,7 @@ async def test_launch_handshake_send_and_shutdown(
     assert connection.hello.supports("send")
     assert connection.alive
 
-    created = await connection.call("new_session", {"provider": "fake", "model": "offline"})
+    created = await connection.call("new_session", {"provider": "codex", "model": "gpt-5.6-luna"})
     session_id = created["session"]["session_id"]
     assert created["session"]["cwd"] == str(workspace.resolve())
 
@@ -71,6 +71,7 @@ async def test_launch_handshake_send_and_shutdown(
 
     message = await _collect(events, "assistant_message")
     assert message.fields["message"]["content"][0]["text"] == "you said: hello"
+    await _collect(events, "turn_end")
     names = [event.event for event in events]
     assert "turn_start" in names
     assert "assistant_delta" in names
@@ -92,12 +93,10 @@ async def test_abort_stops_a_running_turn(
 ) -> None:
     events: list[ZetaEvent] = []
     connection = await local_runtime.launch(_spec(settings, workspace), events.append)
-    await connection.call("new_session", {"provider": "fake", "model": "offline"})
-    # The fake backend streams in 8-character steps, so a long prompt gives a
-    # turn that is still running when abort arrives.
+    await connection.call("new_session", {"provider": "codex", "model": "gpt-5.6-luna"})
+    # The scripted backend pauses before its reply, so abort immediately after
+    # the accepted send while the turn is still running.
     await connection.call("send", {"text": "x" * 4000})
-    await _collect(events, "assistant_delta")
-
     aborted = await connection.call("abort", {})
     assert aborted["aborted"] is True
 
@@ -133,8 +132,8 @@ async def test_each_session_gets_its_own_process(
     second = await local_runtime.launch(_spec(settings, workspace), lambda event: None)
     assert first.pid != second.pid  # type: ignore[attr-defined]
 
-    one = await first.call("new_session", {"provider": "fake"})
-    two = await second.call("new_session", {"provider": "fake"})
+    one = await first.call("new_session", {"provider": "codex"})
+    two = await second.call("new_session", {"provider": "codex"})
     assert one["session"]["session_id"] != two["session"]["session_id"]
     await first.aclose()
     await second.aclose()
@@ -143,14 +142,14 @@ async def test_each_session_gets_its_own_process(
 async def test_launch_fails_loudly_for_a_missing_binary(workspace: Path) -> None:
     runtime = LocalProcessRuntime(zeta_bin="zeta-does-not-exist")
     with pytest.raises(RuntimeLaunchError, match="cannot start"):
-        await runtime.launch(RuntimeSpec(provider="fake", cwd=str(workspace)), lambda event: None)
+        await runtime.launch(RuntimeSpec(provider="codex", cwd=str(workspace)), lambda event: None)
     await runtime.aclose()
 
 
 async def test_launch_fails_when_the_binary_never_listens(workspace: Path) -> None:
     runtime = LocalProcessRuntime(zeta_bin="/usr/bin/true", socket_wait_seconds=5)
     with pytest.raises(RuntimeLaunchError, match="before listening"):
-        await runtime.launch(RuntimeSpec(provider="fake", cwd=str(workspace)), lambda event: None)
+        await runtime.launch(RuntimeSpec(provider="codex", cwd=str(workspace)), lambda event: None)
     await runtime.aclose()
 
 

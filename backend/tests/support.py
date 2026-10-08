@@ -301,7 +301,7 @@ class FakeConnection(RuntimeConnection):
             "created_at": "2026-01-01T00:00:00+00:00",
             "updated_at": "2026-01-01T00:00:00+00:00",
             "provider": self.spec.provider,
-            "model": params.get("model") or self.spec.model or "offline",
+            "model": params.get("model") or self.spec.model or "gpt-5.6-luna",
             "cwd": self.spec.cwd or "/tmp",
             "name": "",
             "approval_mode": "ask",

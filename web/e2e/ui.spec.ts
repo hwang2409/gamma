@@ -1,8 +1,8 @@
 /**
  * Visual and accessibility pass over the main screens.
  *
- * Needs a running gamma whose backend allows the `fake` provider and whose
- * web dev server was given the token (`make dev` does both). Environment:
+ * Needs a running gamma whose backend allows `codex`, launches Zeta with
+ * `ZETA_TEST_SCRIPTED_PROVIDER=1`, and gives the token to the web dev server. Environment:
  *   GAMMA_WEB_URL     the web dev server (default http://localhost:5173)
  *   GAMMA_SCREENS_DIR where screenshots go (default /tmp/gamma-screens)
  *
@@ -40,10 +40,10 @@ async function expectNoSeriousViolations(page: Page, label: string): Promise<voi
   expect(summary, `${label}: serious axe violations`).toEqual([]);
 }
 
-async function startFakeSession(page: Page, message: string): Promise<void> {
+async function startScriptedSession(page: Page, message: string): Promise<void> {
   await page.goto("/");
   await page.getByRole("heading", { name: "New session" }).waitFor();
-  await page.getByLabel("Provider").selectOption("fake");
+  await page.getByLabel("Provider").selectOption("codex");
   await page.getByRole("button", { name: "Start session" }).click();
   const input = page.getByRole("textbox", { name: "Message" });
   await expect(input).toBeEnabled();
@@ -54,12 +54,12 @@ async function startFakeSession(page: Page, message: string): Promise<void> {
 
 test.describe.configure({ mode: "serial" });
 
-test("a live fake session streams a reply, then lists on the start page", async ({ page }) => {
-  await startFakeSession(page, "Summarize the open pull requests");
+test("a live scripted session streams a reply, then lists on the start page", async ({ page }) => {
+  await startScriptedSession(page, "Summarize the open pull requests");
   await expect(page.getByText("Ready")).toBeVisible();
   await page.getByRole("button", { name: "Back to sessions" }).click();
   await expect(page.getByRole("heading", { name: "Running" })).toBeVisible();
-  await page.getByLabel("Provider").selectOption("fake");
+  await page.getByLabel("Provider").selectOption("codex");
   await expect(page.getByText("Summarize the open pull requests").first()).toBeVisible();
 
   // End it, so repeated runs stay under the backend's session limit.
@@ -77,13 +77,13 @@ for (const viewport of VIEWPORTS) {
       await page.emulateMedia({ colorScheme: theme });
 
       await page.goto("/");
-      await page.getByLabel("Provider").selectOption("fake");
+      await page.getByLabel("Provider").selectOption("codex");
       await expect(page.getByRole("heading", { name: "Recent" })).toBeVisible();
       await expect(page.getByText("Loading sessions…")).toHaveCount(0);
       await shoot(page, `start-${tag}`);
       await expectNoSeriousViolations(page, `start ${tag}`);
 
-      await startFakeSession(page, "What does this project do?");
+      await startScriptedSession(page, "What does this project do?");
       await shoot(page, `session-live-${tag}`);
       await expectNoSeriousViolations(page, `live session ${tag}`);
       await page.getByRole("button", { name: "End session" }).click();

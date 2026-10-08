@@ -85,8 +85,8 @@ async def test_options_lists_only_allowed_providers_and_roots(
     client: httpx.AsyncClient, workspace: Path
 ) -> None:
     body = (await client.get("/api/options")).json()
-    assert [provider["name"] for provider in body["providers"]] == ["fake"]
-    assert body["providers"][0]["models"] == ["offline", "faster"]
+    assert [provider["name"] for provider in body["providers"]] == ["codex"]
+    assert body["providers"][0]["models"] == ["gpt-5.6-luna", "gpt-5.6-sol"]
     assert body["allowed_roots"] == [str(workspace)]
     assert str(workspace / "project") in body["directories"]
     assert body["approval_mode"] == "ask"
@@ -98,11 +98,11 @@ async def test_options_lists_only_allowed_providers_and_roots(
 async def test_create_session_defaults_to_the_first_model_and_root(
     client: httpx.AsyncClient, workspace: Path, fake_runtime: FakeRuntime
 ) -> None:
-    response = await client.post("/api/sessions", json={"provider": "fake"})
+    response = await client.post("/api/sessions", json={"provider": "codex"})
     assert response.status_code == 201
     body = response.json()
-    assert body["provider"] == "fake"
-    assert body["model"] == "offline"
+    assert body["provider"] == "codex"
+    assert body["model"] == "gpt-5.6-luna"
     assert body["cwd"] == str(workspace)
     assert body["zeta_session_id"] == "fake-session-1"
     assert body["state"] == "idle"
@@ -121,7 +121,7 @@ async def test_create_session_rejects_a_model_outside_the_allowlist(
     client: httpx.AsyncClient,
 ) -> None:
     response = await client.post(
-        "/api/sessions", json={"provider": "fake", "model": "claude-opus-4-6"}
+        "/api/sessions", json={"provider": "codex", "model": "claude-opus-4-6"}
     )
     assert response.status_code == 400
     assert "model" in response.json()["detail"]
@@ -130,7 +130,7 @@ async def test_create_session_rejects_a_model_outside_the_allowlist(
 async def test_create_session_rejects_a_cwd_outside_the_allowed_root(
     client: httpx.AsyncClient,
 ) -> None:
-    response = await client.post("/api/sessions", json={"provider": "fake", "cwd": "/etc"})
+    response = await client.post("/api/sessions", json={"provider": "codex", "cwd": "/etc"})
     assert response.status_code == 400
     assert "outside the allowed roots" in response.json()["detail"]
 
@@ -139,7 +139,7 @@ async def test_create_session_rejects_a_cwd_that_is_not_a_directory(
     client: httpx.AsyncClient, workspace: Path
 ) -> None:
     missing = workspace / "nope"
-    response = await client.post("/api/sessions", json={"provider": "fake", "cwd": str(missing)})
+    response = await client.post("/api/sessions", json={"provider": "codex", "cwd": str(missing)})
     assert response.status_code == 400
     assert "existing directory" in response.json()["detail"]
 
@@ -149,13 +149,13 @@ async def test_create_session_rejects_a_symlink_that_escapes_the_root(
 ) -> None:
     escape = workspace / "escape"
     escape.symlink_to("/etc")
-    response = await client.post("/api/sessions", json={"provider": "fake", "cwd": str(escape)})
+    response = await client.post("/api/sessions", json={"provider": "codex", "cwd": str(escape)})
     assert response.status_code == 400
     assert "outside the allowed roots" in response.json()["detail"]
 
 
 async def test_create_session_rejects_a_relative_cwd(client: httpx.AsyncClient) -> None:
-    response = await client.post("/api/sessions", json={"provider": "fake", "cwd": "project"})
+    response = await client.post("/api/sessions", json={"provider": "codex", "cwd": "project"})
     assert response.status_code == 400
     assert "absolute" in response.json()["detail"]
 
@@ -163,7 +163,7 @@ async def test_create_session_rejects_a_relative_cwd(client: httpx.AsyncClient) 
 async def test_create_session_rejects_unknown_body_fields(
     client: httpx.AsyncClient,
 ) -> None:
-    response = await client.post("/api/sessions", json={"provider": "fake", "tools": "bash"})
+    response = await client.post("/api/sessions", json={"provider": "codex", "tools": "bash"})
     assert response.status_code == 422
 
 
@@ -175,9 +175,9 @@ async def test_session_limit_is_enforced(settings: Settings, fake_runtime: FakeR
             base_url="http://gamma.test",
             headers={TOKEN_HEADER: "test-token"},
         ) as client:
-            first = await client.post("/api/sessions", json={"provider": "fake"})
+            first = await client.post("/api/sessions", json={"provider": "codex"})
             assert first.status_code == 201
-            second = await client.post("/api/sessions", json={"provider": "fake"})
+            second = await client.post("/api/sessions", json={"provider": "codex"})
             assert second.status_code == 409
             assert "too many open sessions" in second.json()["detail"]
 
@@ -186,7 +186,7 @@ async def test_session_limit_is_enforced(settings: Settings, fake_runtime: FakeR
 
 
 async def test_list_create_status_and_close(client: httpx.AsyncClient) -> None:
-    created = (await client.post("/api/sessions", json={"provider": "fake"})).json()
+    created = (await client.post("/api/sessions", json={"provider": "codex"})).json()
     session_id = created["session_id"]
 
     listed = (await client.get("/api/sessions")).json()["sessions"]
@@ -205,7 +205,7 @@ async def test_list_create_status_and_close(client: httpx.AsyncClient) -> None:
 async def test_closing_a_session_closes_its_harness(
     client: httpx.AsyncClient, fake_runtime: FakeRuntime
 ) -> None:
-    created = (await client.post("/api/sessions", json={"provider": "fake"})).json()
+    created = (await client.post("/api/sessions", json={"provider": "codex"})).json()
     connection = fake_runtime.last
     assert connection.alive
     await client.delete(f"/api/sessions/{created['session_id']}")
@@ -222,8 +222,8 @@ async def test_app_shutdown_closes_every_harness(
             base_url="http://gamma.test",
             headers={TOKEN_HEADER: "test-token"},
         ) as client:
-            await client.post("/api/sessions", json={"provider": "fake"})
-            await client.post("/api/sessions", json={"provider": "fake"})
+            await client.post("/api/sessions", json={"provider": "codex"})
+            await client.post("/api/sessions", json={"provider": "codex"})
     assert [connection.alive for connection in fake_runtime.launched] == [False, False]
 
 
@@ -238,8 +238,8 @@ async def test_zeta_sessions_hides_sessions_outside_the_allowed_roots(
             {
                 "version": 1,
                 "session_id": "inside",
-                "provider": "fake",
-                "model": "offline",
+                "provider": "codex",
+                "model": "gpt-5.6-luna",
                 "cwd": str(workspace / "project"),
                 "updated_at": "2026-01-01T00:00:00+00:00",
                 "first_message_preview": "hello there",
@@ -247,14 +247,14 @@ async def test_zeta_sessions_hides_sessions_outside_the_allowed_roots(
             {
                 "version": 1,
                 "session_id": "outside",
-                "provider": "fake",
-                "model": "offline",
+                "provider": "codex",
+                "model": "gpt-5.6-luna",
                 "cwd": "/etc",
                 "updated_at": "2026-01-01T00:00:00+00:00",
             },
         ]
     )
-    body = (await client.get("/api/zeta-sessions", params={"provider": "fake"})).json()
+    body = (await client.get("/api/zeta-sessions", params={"provider": "codex"})).json()
     assert [item["session_id"] for item in body["sessions"]] == ["inside"]
     assert body["sessions"][0]["first_message_preview"] == "hello there"
     # The listing harness is transient: it must not stay open.
@@ -267,7 +267,7 @@ async def test_resume_opens_the_requested_zeta_session(
     response = await client.post(
         "/api/sessions",
         json={
-            "provider": "fake",
+            "provider": "codex",
             "resume_session_id": "old-session",
             "cwd": str(workspace / "project"),
         },
