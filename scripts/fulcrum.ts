@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 
@@ -45,3 +46,4 @@ for (const name of packages) {
   console.log(`packed @fulcrum/${name} as ${basename(filename)}`);
 }
 await writeFile(resolve(vendor, ".source"), `${source}\n`);
+if (existsSync(resolve(root, "node_modules"))) run(["bun", "install", "--force", "--no-save", "--ignore-scripts"], root);
