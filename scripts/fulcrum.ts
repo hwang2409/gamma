@@ -46,4 +46,4 @@ for (const name of packages) {
   console.log(`packed @fulcrum/${name} as ${basename(filename)}`);
 }
 await writeFile(resolve(vendor, ".source"), `${source}\n`);
-if (existsSync(resolve(root, "node_modules"))) run(["bun", "install", "--force", "--no-save", "--ignore-scripts"], root);
+if (existsSync(resolve(root, "node_modules"))) run(["bun", "install", "--force", "--ignore-scripts"], root);
