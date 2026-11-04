@@ -15,7 +15,8 @@ jobs:
       - run: bun install --cwd fulcrum --frozen-lockfile
       - run: bun run fulcrum:pack
         working-directory: gamma
-      - run: bun install --frozen-lockfile
+      # Fresh tarballs have fresh archive metadata, so their lockfile integrity changes even at the same source revision.
+      - run: bun install
         working-directory: gamma
       - run: bun x playwright install --with-deps chromium
         working-directory: gamma
