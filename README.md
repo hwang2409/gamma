@@ -1,8 +1,16 @@
 # gamma
 
-private prototype surface for testing fulcrum as an npm consumer.
+public prototype surface for testing fulcrum as an npm consumer.
 
 ## run
+
+gamma packs the sibling fulcrum checkout into local tarballs before development. this tests the same package contents and dependency rewrites that npm users receive.
+
+```sh
+cd ~/me/fun/gamma
+bun run fulcrum:pack
+bun install
+```
 
 terminal 1:
 
@@ -15,10 +23,9 @@ terminal 2:
 
 ```sh
 cd ~/me/fun/gamma
-bun install
 bun run dev
 ```
 
 open http://localhost:5190.
 
-fulcrum packages are consumed through `file:` dependencies. `predev` and `prebuild` build the sibling fulcrum packages first. the app imports only public package exports.
+`predev` and `prebuild` repack only when the sibling fulcrum head or working tree changes. set `FULCRUM_DIR` when fulcrum is not at `../fulcrum`. the app imports only public package exports.

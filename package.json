@@ -3,23 +3,32 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "predev": "bun run --cwd ../fulcrum build:packages",
+    "fulcrum:pack": "bun scripts/fulcrum.ts",
+    "predev": "bun run fulcrum:pack",
     "dev": "vite --port 5190",
-    "prebuild": "bun run --cwd ../fulcrum build:packages",
+    "prebuild": "bun run fulcrum:pack",
     "build": "tsc -p . && vite build",
     "typecheck": "tsc -p .",
     "test": "bun test",
     "gate": "bun scripts/gate.ts"
   },
   "dependencies": {
-    "@fulcrum/core": "file:../fulcrum/packages/core",
-    "@fulcrum/highlight": "file:../fulcrum/packages/highlight",
-    "@fulcrum/markdown": "file:../fulcrum/packages/markdown",
-    "@fulcrum/mermaid": "file:../fulcrum/packages/mermaid",
-    "@fulcrum/react": "file:../fulcrum/packages/react",
-    "@fulcrum/zeta": "file:../fulcrum/packages/zeta",
+    "@fulcrum/core": "file:./vendor/fulcrum/fulcrum-core.tgz",
+    "@fulcrum/highlight": "file:./vendor/fulcrum/fulcrum-highlight.tgz",
+    "@fulcrum/markdown": "file:./vendor/fulcrum/fulcrum-markdown.tgz",
+    "@fulcrum/mermaid": "file:./vendor/fulcrum/fulcrum-mermaid.tgz",
+    "@fulcrum/react": "file:./vendor/fulcrum/fulcrum-react.tgz",
+    "@fulcrum/virtual": "file:./vendor/fulcrum/fulcrum-virtual.tgz",
+    "@fulcrum/zeta": "file:./vendor/fulcrum/fulcrum-zeta.tgz",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
+  },
+  "overrides": {
+    "@fulcrum/core": "file:./vendor/fulcrum/fulcrum-core.tgz",
+    "@fulcrum/highlight": "file:./vendor/fulcrum/fulcrum-highlight.tgz",
+    "@fulcrum/markdown": "file:./vendor/fulcrum/fulcrum-markdown.tgz",
+    "@fulcrum/react": "file:./vendor/fulcrum/fulcrum-react.tgz",
+    "@fulcrum/virtual": "file:./vendor/fulcrum/fulcrum-virtual.tgz"
   },
   "devDependencies": {
     "@fontsource-variable/jetbrains-mono": "^5.3.0",
