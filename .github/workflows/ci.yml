@@ -11,7 +11,7 @@ jobs:
           path: fulcrum
       - uses: oven-sh/setup-bun@v2
         with: { bun-version: 1.3.13 }
-      - run: bun install --frozen-lockfile
-      - run: bun run typecheck
+      - run: npm ci
+      - run: npm run typecheck
       - run: bun test
-      - run: bun run build
+      - run: npm run build
