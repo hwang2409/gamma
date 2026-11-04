@@ -37,6 +37,11 @@ function UserRow({ id }: { id: string }) {
   );
 }
 const ImageViewer = createContext<((block: any) => void) | null>(null);
+const ApprovalModeContext = createContext<{ yolo: boolean; setYolo(value: boolean): void }>({ yolo: false, setYolo() {} });
+function YoloIndicator({ className = "" }: { className?: string }) {
+  const { yolo } = useContext(ApprovalModeContext);
+  return yolo ? <strong className={`yolo-indicator ${className}`}>YOLO · auto-approve tools</strong> : null;
+}
 function ZetaMessage({ id }: { id: string }) {
   const onOpen = useContext(ImageViewer);
   return <Message id={id} markdown={RichMarkdown} onOpen={onOpen ?? undefined} />;
@@ -79,6 +84,7 @@ export function App() {
   const view = useExternal(sessions);
   const present = sessionPresentation(view.transition);
   const [drawer, setDrawer] = useState(false);
+  const [yolo, setYolo] = useState(false);
   const menu = useRef<HTMLButtonElement>(null);
   const returnFocus = useRef(false);
   const runOpener = useRef<Element | null>(null);
@@ -107,6 +113,7 @@ export function App() {
 
   return (
     <HighlightContext value={highlight}>
+      <ApprovalModeContext value={{ yolo, setYolo }}>
       <div className="app" data-drawer={drawer ? "open" : "closed"}>
         <Sidebar
           state={state}
@@ -125,10 +132,12 @@ export function App() {
               <span aria-hidden="true" className="menu-icon" />
             </button>
             <RunTitle session={current} view={view} />
+            <YoloIndicator className="topbar-yolo" />
           </header>
           <Body state={state} view={view} connection={connection} sessions={sessions} opener={runOpener} focusComposer={focusComposer} onCreate={create} onOpenDrawer={() => setDrawer(true)} />
         </main>
       </div>
+      </ApprovalModeContext>
     </HighlightContext>
   );
 }
@@ -361,7 +370,11 @@ function Body({ state, view, connection, sessions, opener, focusComposer, onCrea
 function Run({ client, sessions, open, opener, focusComposer, readOnly, ready }: { client: ZetaClient | null; sessions: Sessions; open: OpenRun; opener: React.RefObject<Element | null>; focusComposer: React.RefObject<boolean>; readOnly: boolean; ready: boolean }) {
   const scroll = useRef<HTMLDivElement>(null);
   const [viewer, setViewer] = useState<any>(null);
-  useEffect(() => { if (!viewer) return; const onKey = (event: globalThis.KeyboardEvent) => { if (event.key === "Escape") setViewer(null); }; addEventListener("keydown", onKey); return () => removeEventListener("keydown", onKey); }, [viewer]);
+  const viewerDialog = useRef<HTMLDivElement>(null);
+  const viewerOpener = useRef<HTMLElement | null>(null);
+  const openViewer = useCallback((block: any) => { viewerOpener.current = document.activeElement as HTMLElement | null; setViewer(block); }, []);
+  const closeViewer = useCallback(() => { setViewer(null); requestAnimationFrame(() => viewerOpener.current?.focus()); }, []);
+  useEffect(() => { if (!viewer) return; viewerDialog.current?.focus(); const onKey = (event: globalThis.KeyboardEvent) => { if (event.key === "Escape") closeViewer(); }; addEventListener("keydown", onKey); return () => removeEventListener("keydown", onKey); }, [viewer, closeViewer]);
   const decisions = useMemo(() => {
     if (!client || open.stale || readOnly) return { disabledReason: readOnly ? "opening another session — decisions are paused" : "reconnecting — decisions are disabled until the server confirms this session" };
     const decide = (method: "approve" | "deny"): Decide => async (request_id) => {
@@ -387,7 +400,7 @@ function Run({ client, sessions, open, opener, focusComposer, readOnly, ready }:
   return (
     <Decisions.Provider value={decisions}>
       <Undelivered value={undelivered}>
-        <ImageViewer.Provider value={setViewer}>
+        <ImageViewer.Provider value={openViewer}>
         <RunProvider store={open.lease.store} highlight={highlight} onRetry={client ? () => client.retrySession(open.id) : undefined}>
           <RefreshOnIdle sessions={sessions} />
           {client && !readOnly ? <SettingsBar client={client} /> : null}
@@ -398,7 +411,7 @@ function Run({ client, sessions, open, opener, focusComposer, readOnly, ready }:
           <RunComposer key={open.id} client={open.stale || readOnly ? null : client} store={open.lease.store} onUndelivered={onUndelivered} readOnly={readOnly} />
         </RunProvider>
         </ImageViewer.Provider>
-        {viewer ? <div className="image-viewer" role="dialog" aria-label="image viewer" onClick={() => setViewer(null)}><img src={viewer.src} alt={viewer.alt ?? viewer.name ?? "image"} /></div> : null}
+        {viewer ? <div ref={viewerDialog} className="image-viewer" role="dialog" aria-modal="true" aria-label="image viewer" tabIndex={-1} onClick={closeViewer}><img src={viewer.src ?? viewer.url} alt={viewer.alt ?? viewer.name ?? viewer.filename ?? "image"} /></div> : null}
       </Undelivered>
     </Decisions.Provider>
   );
@@ -417,26 +430,46 @@ function EmptyRun() {
 
 const offline = () => Promise.reject(new Error("not connected to zeta serve"));
 
-/** The message box: send while idle, steer while a turn runs (zeta always takes steering), stop the turn. */
+function ModelPicker({ value, models, onChange }: { value: string; models: string[]; onChange(value: string): void }) {
+  const [open, setOpen] = useState(false);
+  const button = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: globalThis.KeyboardEvent) => { if (event.key === "Escape") { setOpen(false); button.current?.focus(); } };
+    addEventListener("keydown", close);
+    return () => removeEventListener("keydown", close);
+  }, [open]);
+  return <div className="model-picker">
+    <span>model</span>
+    <button ref={button} type="button" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen(!open)}>{value || "choose model"}</button>
+    {open ? <div role="listbox" aria-label="model">{models.map((model) => <button type="button" role="option" aria-selected={model === value} key={model} onClick={() => { onChange(model); setOpen(false); button.current?.focus(); }}>{model}</button>)}</div> : null}
+  </div>;
+}
+
+/** Persistent session settings supplied by zeta, not browser-local preferences. */
 function SettingsBar({ client }: { client: ZetaClient }) {
   const supported = (name: string) => client.features.includes(name);
+  const { setYolo } = useContext(ApprovalModeContext);
   const [settings, setSettings] = useState<SessionSettings>({});
   const [models, setModels] = useState<string[]>([]);
   const [error, setError] = useState("");
   const load = useCallback(async () => {
     try {
-      if (supported("session_settings")) setSettings(settingModel(await client.request("session_settings")));
+      if (supported("session_settings")) {
+        const next = settingModel(await client.request("session_settings"));
+        setSettings(next);
+        setYolo(next.approval_mode === "allow");
+      } else setYolo(false);
       if (supported("model_catalog")) setModels(catalogModels(await client.request("model_catalog")));
     } catch (cause) { setError(cause instanceof Error ? cause.message : "settings unavailable"); }
   }, [client]);
-  useEffect(() => { void load(); const off = client.onClose(() => setSettings({})); return off; }, [client, load]);
+  useEffect(() => { void load(); const off = client.onClose(() => { setSettings({}); setYolo(false); }); return off; }, [client, load, setYolo]);
   const change = async (patch: Partial<SessionSettings>) => { setError(""); try { await client.request("set_settings", settingsRequest(settings, patch)); await load(); } catch (cause) { setError(cause instanceof Error ? cause.message : "could not change settings"); } };
   if (!supported("session_settings") && !supported("model_catalog")) return <p className="note">settings are not supported by this server</p>;
   const yolo = settings.approval_mode === "allow";
   return <div className="settings-bar" aria-label="session settings">
-    {supported("model_catalog") && models.length ? <label>model <select value={settings.model ?? ""} onChange={(event) => void change({ model: event.target.value })}>{models.map((model) => <option key={model}>{model}</option>)}</select></label> : null}
+    {supported("model_catalog") && models.length ? <ModelPicker value={settings.model ?? ""} models={models} onChange={(model) => void change({ model })} /> : null}
     {supported("set_settings") ? <button type="button" className="toggle" aria-pressed={yolo} onClick={() => { if (!yolo && !confirm("allow tools to run automatically in this session?")) return; void change({ approval_mode: yolo ? "ask" : "allow" }); }}>{yolo ? "YOLO · auto-approve tools" : "Ask"}</button> : null}
-    {yolo ? <strong className="yolo-indicator">YOLO · auto-approve tools</strong> : null}
     {error ? <span role="alert">{error}</span> : null}
   </div>;
 }
@@ -444,9 +477,18 @@ function SettingsBar({ client }: { client: ZetaClient }) {
 function RunComposer({ client, store, onUndelivered, readOnly }: { client: ZetaClient | null; store: SessionStore; onUndelivered(intents: string[]): void; readOnly: boolean }) {
   const running = useRun((state) => state.agent === "running");
   const [images, setImages] = useState<QueuedImage[]>([]);
+  const imagesRef = useRef<QueuedImage[]>([]);
   const [imageError, setImageError] = useState("");
-  const addFiles = useCallback(async (files: FileList | File[]) => { for (const file of [...files]) { try { const image = await readImage(file); setImages((current) => addImage(current, image)); setImageError(""); } catch (error) { setImageError(error instanceof Error ? error.message : "could not add image"); } } }, []);
-  const removeImage = (index: number) => setImages((current) => { URL.revokeObjectURL(current[index].url); return current.filter((_, item) => item !== index); });
+  const addFiles = useCallback(async (files: FileList | File[]) => {
+    let queue = imagesRef.current;
+    for (const file of [...files]) {
+      try { queue = addImage(queue, await readImage(file)); setImageError(""); }
+      catch (error) { setImageError(error instanceof Error ? error.message : "could not add image"); }
+    }
+    imagesRef.current = queue;
+    setImages(queue);
+  }, []);
+  const removeImage = (index: number) => { URL.revokeObjectURL(imagesRef.current[index].url); imagesRef.current = imagesRef.current.filter((_, item) => item !== index); setImages(imagesRef.current); };
   const delivery = useMemo(() => createDelivery(undefined, (event) => {
     const deliveryId = event.type === "user_message" && event.delivery_id;
     if (deliveryId && !store.hasMessageDelivery(deliveryId)) store.dispatch(event);
@@ -461,7 +503,7 @@ function RunComposer({ client, store, onUndelivered, readOnly }: { client: ZetaC
     if (!client) return offline();
     if (!images.length) return delivery.submit(client, text, steer);
     const request = client.request("send_images", { text, images: images.map(({ name, mime_type, data }) => ({ name, mime_type, data })) });
-    request.then(() => { images.forEach((image) => URL.revokeObjectURL(image.url)); setImages([]); }, (error) => setImageError(error instanceof Error ? error.message : "could not send images"));
+    request.then(() => { images.forEach((image) => URL.revokeObjectURL(image.url)); imagesRef.current = []; setImages([]); }, (error) => setImageError(error instanceof Error ? error.message : "could not send images"));
     return request;
   }, [client, delivery, images]);
   const onStop = useCallback(() => (client ? delivery.stop(client) : offline()), [client, delivery]);
@@ -470,6 +512,7 @@ function RunComposer({ client, store, onUndelivered, readOnly }: { client: ZetaC
       {images.length ? <div className="image-queue" aria-label="queued images">{images.map((image, index) => <figure key={`${image.name}-${index}`}><img src={image.url} alt={image.name} /><button type="button" onClick={() => removeImage(index)} aria-label={`remove ${image.name}`}>remove</button></figure>)}</div> : null}
       {imageError ? <p className="note" role="alert">{imageError}</p> : null}
       {client ? <label className="attach-button">add image<input type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden onChange={(event) => { if (event.target.files) void addFiles(event.target.files); event.currentTarget.value = ""; }} /></label> : null}
+      <YoloIndicator className="composer-yolo" />
       {client ? (
         <Composer state={running ? "steerable" : "idle"} label="message zeta" placeholder={running ? "steer the running turn" : "message zeta"} onSubmit={onSubmit} onStop={onStop} />
       ) : (

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { addImage, MAX_BYTES, MAX_IMAGES, type QueuedImage } from "../src/image-queue";
+import { addImage, MAX_BYTES, MAX_IMAGES, readImage, type QueuedImage } from "../src/image-queue";
 import { settingModel, settingsRequest, catalogModels } from "../src/settings";
 
 const image = (size: number): QueuedImage => ({ name: "a.png", mime_type: "image/png", data: "AA==", url: "blob:a", size });
@@ -11,10 +11,11 @@ describe("slice 1 settings", () => {
   });
 });
 describe("slice 1 image queue", () => {
-  test("enforces zeta count and byte limits", () => {
+  test("enforces zeta count and byte limits", async () => {
     let queue: QueuedImage[] = [];
     for (let i = 0; i < MAX_IMAGES; i++) queue = addImage(queue, image(1));
     expect(() => addImage(queue, image(1))).toThrow("up to 4");
     expect(() => addImage([], image(MAX_BYTES + 1))).toThrow("512 KiB");
+    await expect(readImage(new File([new Uint8Array(MAX_BYTES + 1)], "large.png", { type: "image/png" }))).rejects.toThrow("512 KiB");
   });
 });

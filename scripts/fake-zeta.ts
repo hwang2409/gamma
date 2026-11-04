@@ -57,7 +57,7 @@ const histories: Record<string, Json[]> = {
     // As in zeta: tool_use arguments are emptied, but an approved call's approval rows keep them.
     { id: "t1b", role: "system", event: "approval_request", request_id: "t-ls", tool_call: { id: "t-ls", name: "bash", arguments: { command: "ls packages/react/src" } }, delegated: false },
     { id: "t1c", role: "system", event: "approval_end", request_id: "t-ls", tool_call: { id: "t-ls", name: "bash", arguments: { command: "ls packages/react/src" } }, data: { decision: "allow" } },
-    { id: "t1d", role: "tool_result", content: [text("stdout:\nthemes.css\nthemes.ts\n\nstderr:\n")], tool_result: result("t-ls", "stdout:\nthemes.css\nthemes.ts\n\nstderr:\n") },
+    { id: "t1d", role: "tool_result", content: [text("stdout:\nthemes.css\nthemes.ts\n\nstderr:\n")], tool_result: result("t-ls", "stdout:\nthemes.css\nthemes.ts\n\nstderr:\n", { content_blocks: [{ type: "image", mimeType: "image/png", path: "contrast-preview.png", width: 1, height: 1, size: 68, data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" }] }) },
     { id: "t2", role: "assistant", content: [text("All 12 themes pass on `bg`. On `surface`, **solarized-light** is closest at 4.61:1.\n\n| theme | bg | surface |\n| --- | --- | --- |\n| gruvbox-dark | 5.9 | 5.4 |\n| solarized-light | 4.9 | 4.61 |")], tool_result: null },
   ],
   [LONG]: Array.from({ length: 400 }, (_, index) => index % 2 === 0
@@ -219,6 +219,9 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   let rejectCreate = false;
   let delayedOpen = false;
   let catalogBusy = false;
+  let settingsEnabled = true;
+  let settings = { model: "claude-opus-4-6", approval_mode: "ask" as "ask" | "allow" | "deny" };
+  const imageSends: Json[] = [];
   const decisions: Json[] = [];
   const requests: Array<{ method: string; received: number; started: number; replied?: number }> = [];
   const sockets = new Set<ServerWebSocket<unknown>>();
@@ -301,7 +304,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           if (mode === "incompatible") { reply({ error: { code: -32002, message: "version mismatch", data: { requested: "1.2", supported: ["1.0"] } } }); socket.close(); return; }
           if (mode === "slow") await wait(60_000);
           controller = socket;
-          const features = (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect)) ?? [];
+          const features = (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (settingsEnabled && ["model_catalog", "session_settings", "set_settings", "send_images"].includes(name)) || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect)) ?? [];
           const reconnect = features.includes("approval_reconnect");
           if (reconnect) reconnectControllers.add(socket as object);
           reply({ result: { protocol_version: "1.2", server: "fake-zeta", capabilities: { features } } });
@@ -367,6 +370,16 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           }
           return;
         }
+        if (method === "model_catalog") return reply({ result: { models: ["claude-opus-4-6", "gpt-5.1-codex"] } });
+        if (method === "session_settings") return reply({ result: settings });
+        if (method === "set_settings") {
+          settings = { model: String(params.model), approval_mode: params.approval_mode as "ask" | "allow" | "deny" };
+          return reply({ result: settings });
+        }
+        if (method === "send_images") {
+          imageSends.push(params);
+          return reply({ result: { accepted: true, delivery_id: crypto.randomUUID() } });
+        }
         if (method === "approve" || method === "deny") {
           decisions.push({ method, ...params });
           if (!decide || params.request_id !== "approval-1") return reply({ error: { code: -32006, message: "approval request is missing or already resolved" } });
@@ -390,6 +403,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     port: server.port,
     decisions,
     requests,
+    imageSends,
+    get settings() { return settings; },
     /** Every accepted send and steer, in order. */
     sent: composer.sent,
     clearSent() { composer.clearSent(); },
@@ -414,6 +429,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     /** Hands out a token the server will refuse. */
     async wrongToken() { await write({ port: server.port, token: "stale-token", pid: process.pid, origins: allowed }); },
     setMode(next: Mode) { mode = next; },
+    setSettingsEnabled(value: boolean) { settingsEnabled = value; },
     setOpenDelay(ms: number) { openDelay = ms; },
     /** `true`: new_session fails the way real zeta does while a turn runs (`require_idle`). */
     setRejectCreate(next: boolean) { rejectCreate = next; },

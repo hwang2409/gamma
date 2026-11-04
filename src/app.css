@@ -239,12 +239,21 @@ button:active:not(:disabled) { transform: scale(0.97); }
   .sidebar, .app[data-drawer="open"] .sidebar { transition: none; }
 }
 .settings-bar { display:flex; align-items:center; gap:.7rem; flex-wrap:wrap; padding:.55rem 1rem; border-bottom:1px solid var(--border); font-size:.82rem; }
-.settings-bar select, .toggle, .attach-button { border:1px solid var(--border); background:var(--panel); color:inherit; padding:.35rem .55rem; cursor:pointer; }
-.yolo-indicator { color:var(--danger); letter-spacing:.02em; }
+.settings-bar button, .attach-button { min-height:36px; border:1px solid var(--border); background:var(--panel); color:inherit; padding:.35rem .55rem; cursor:pointer; }
+.model-picker { position:relative; display:flex; align-items:center; gap:.4rem; }
+.model-picker [role="listbox"] { position:absolute; z-index:5; top:calc(100% + .3rem); left:0; min-width:100%; padding:.25rem; border:1px solid var(--border); background:var(--panel); box-shadow:0 8px 24px #0004; }
+.model-picker [role="option"] { display:block; width:100%; text-align:left; white-space:nowrap; }
+.model-picker [role="option"][aria-selected="true"] { color:var(--accent); }
+.yolo-indicator { color:var(--danger); letter-spacing:.02em; font-size:.78rem; }
+.topbar-yolo { margin-left:auto; }
+.composer-yolo { display:block; margin-bottom:.3rem; }
 .attach-button { display:inline-block; margin-bottom:.35rem; }
 .image-queue { display:flex; gap:.5rem; padding:.3rem 0; overflow:auto; }
 .image-queue figure { position:relative; margin:0; }
 .image-queue img { width:52px; height:52px; object-fit:cover; border:1px solid var(--border); }
-.image-queue button { display:block; font-size:.7rem; }
+.image-queue button { display:block; min-height:36px; font-size:.7rem; }
 .image-viewer { position:fixed; inset:0; z-index:20; display:grid; place-items:center; padding:2rem; background:#000c; cursor:zoom-out; }
 .image-viewer img { max-width: min(95vw, 1200px); max-height:90vh; object-fit:contain; }
+@media (max-width: 860px) {
+  .settings-bar button, .attach-button, .image-queue button { min-height:44px; }
+}

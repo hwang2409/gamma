@@ -56,7 +56,7 @@ function audit(minHeight: number) {
   const problems: string[] = [];
   const tokens: string[] = [];
   if (document.documentElement.scrollWidth > innerWidth + 1) problems.push(`page scrolls sideways: ${document.documentElement.scrollWidth} > ${innerWidth}`);
-  for (const native of document.querySelectorAll('select, input, textarea:not([data-part="composer-field"] > textarea)')) problems.push(`native control <${native.tagName.toLowerCase()}>`);
+  for (const native of document.querySelectorAll('select, input:not([hidden]), textarea:not([data-part="composer-field"] > textarea)')) problems.push(`native control <${native.tagName.toLowerCase()}>`);
   for (const button of document.querySelectorAll<HTMLElement>("button, [role=option]")) {
     if (!visible(button) || button.classList.contains("scrim")) continue;
     const name = (button.getAttribute("aria-label") ?? button.textContent ?? "").trim();
@@ -155,28 +155,31 @@ try {
     await check("slow catalog keeps the selected transcript and composer usable", async () => {
       fake.setLive(false);
       fake.setMode("slow-catalog");
-      await page.goto("about:blank");
-      fake.drop();
-      await fake.start();
-      await page.goto(`${origin}/?theme=tokyo-night#session=${ACTIVE}`);
-      await page.locator('[data-part="timeline"] [data-kind="user"]').first().waitFor({ timeout: 10_000 });
-      await page.getByText(/loading sessions/).waitFor({ timeout: 10_000 });
-      await page.locator(".dock textarea").fill("sent while the catalog loads");
-      await page.locator(".dock textarea").press("Enter");
-      await page.getByText("sent while the catalog loads", { exact: true }).waitFor({ timeout: 2000 });
-      await shoot(page, "slow-catalog-1440");
-      await page.setViewportSize({ width: 390, height: 844 });
-      await page.locator(".menu").click();
-      await page.getByRole("button", { name: "new session" }).waitFor();
-      await shoot(page, "slow-catalog-390");
-      await page.setViewportSize({ width: 1440, height: 900 });
-      fake.setMode("ok");
-      await Bun.sleep(31_000);
-      fake.clearSent();
-      await fake.start();
-      fake.setLive(true);
-      await page.goto(`${origin}/?theme=tokyo-night`);
-      await page.locator(".badge", { hasText: "connected" }).waitFor({ timeout: 5000 });
+      try {
+        await page.goto("about:blank");
+        fake.drop();
+        await fake.start();
+        await page.goto(`${origin}/?theme=tokyo-night#session=${ACTIVE}`);
+        await page.locator('[data-part="timeline"] [data-kind="user"]').first().waitFor({ timeout: 15_000 }).catch(() => { throw new Error("selected transcript did not open before the slow catalog"); });
+        await page.getByText(/loading sessions/).waitFor({ timeout: 10_000 }).catch(() => { throw new Error("slow catalog did not show its loading state"); });
+        await page.locator(".dock textarea").fill("sent while the catalog loads");
+        await page.locator(".dock textarea").press("Enter");
+        await page.getByText("sent while the catalog loads", { exact: true }).waitFor({ timeout: 2000 });
+        await shoot(page, "slow-catalog-1440");
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.locator(".menu").click();
+        await page.getByRole("button", { name: "new session" }).waitFor();
+        await shoot(page, "slow-catalog-390");
+      } finally {
+        await page.setViewportSize({ width: 1440, height: 900 });
+        fake.setMode("ok");
+        await Bun.sleep(31_000);
+        fake.clearSent();
+        await fake.start();
+        fake.setLive(true);
+        await page.goto(`${origin}/?theme=tokyo-night`);
+        await page.locator(".badge", { hasText: "connected" }).waitFor({ timeout: 5000 });
+      }
     });
 
     // Connected: list, history, live run, approval, follow-bottom.
@@ -334,6 +337,72 @@ try {
       await page.keyboard.press("ArrowDown");
       await page.keyboard.press("Escape");
       if (await page.getByRole("listbox").count()) throw new Error("Escape did not close the picker");
+    });
+    await check("model, YOLO, reconnect persistence, image queue, and image viewer", async () => {
+      await page.locator("button.session", { hasText: "check every theme" }).click({ timeout: 5000 }).catch(() => { throw new Error("could not open the settings fixture session"); });
+      await page.locator('[aria-label="session settings"]').waitFor({ timeout: 5000 });
+      const settings = page.locator('[aria-label="session settings"]');
+      await settings.getByRole("button", { name: "claude-opus-4-6" }).click({ timeout: 5000 }).catch(() => { throw new Error("model picker did not open"); });
+      await settings.getByRole("option", { name: "gpt-5.1-codex" }).click({ timeout: 5000 }).catch(() => { throw new Error("model option could not be selected"); });
+      await page.waitForFunction(() => document.querySelector('[aria-label="session settings"]')?.textContent?.includes("gpt-5.1-codex"), undefined, { timeout: 5000 }).catch(() => { throw new Error("model change did not reload from zeta"); });
+      if (fake.settings.model !== "gpt-5.1-codex") throw new Error("model change did not reach zeta");
+
+      page.once("dialog", (dialog) => dialog.accept());
+      await page.getByRole("button", { name: "Ask", exact: true }).click({ timeout: 5000 }).catch(() => { throw new Error("Ask control could not enable YOLO"); });
+      await page.locator(".topbar-yolo", { hasText: "YOLO · auto-approve tools" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("top bar YOLO indicator did not appear"); });
+      await page.locator(".composer-yolo", { hasText: "YOLO · auto-approve tools" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("composer YOLO indicator did not appear"); });
+      if (fake.settings.approval_mode !== "allow") throw new Error("YOLO mode did not reach zeta");
+      await shoot(page, "yolo-1440");
+      fake.drop();
+      await page.getByText(/connection lost|reconnecting/).first().waitFor({ timeout: 3000 });
+      await page.locator(".badge", { hasText: "connected" }).waitFor({ timeout: 10_000 });
+      await page.locator(".topbar-yolo", { hasText: "YOLO · auto-approve tools" }).waitFor({ timeout: 5000 });
+
+      const input = page.locator('.attach-button input[type="file"]');
+      const image = { name: "pixel.png", mimeType: "image/png", buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64") };
+      await input.setInputFiles(image);
+      await page.getByRole("button", { name: "remove pixel.png" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("file chooser image did not queue"); });
+      await page.getByRole("button", { name: "remove pixel.png" }).click();
+      await page.locator(".dock").evaluate((dock) => {
+        const transfer = new DataTransfer();
+        transfer.items.add(new File([new Uint8Array([137, 80, 78, 71])], "pasted.png", { type: "image/png" }));
+        dock.dispatchEvent(new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true }));
+      });
+      await page.getByRole("button", { name: "remove pasted.png" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("pasted image did not queue"); });
+      await page.getByRole("button", { name: "remove pasted.png" }).click();
+      await page.locator(".dock").evaluate((dock) => {
+        const transfer = new DataTransfer();
+        transfer.items.add(new File([new Uint8Array([137, 80, 78, 71])], "dropped.png", { type: "image/png" }));
+        dock.dispatchEvent(new DragEvent("drop", { dataTransfer: transfer, bubbles: true }));
+      });
+      await page.getByRole("button", { name: "remove dropped.png" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("dropped image did not queue"); });
+      await shoot(page, "queued-images-1440");
+      await page.getByRole("button", { name: "remove dropped.png" }).click();
+      await input.setInputFiles(Array.from({ length: 5 }, (_, index) => ({ ...image, name: `limit-${index}.png` })));
+      await page.getByRole("alert").filter({ hasText: "up to 4 images" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("image count limit did not show its error"); });
+      const limitRemoves = page.getByRole("button", { name: /^remove limit-/ });
+      while (await limitRemoves.count()) await limitRemoves.first().click();
+      await input.setInputFiles({ name: "large.png", mimeType: "image/png", buffer: Buffer.alloc(512 * 1024 + 1) });
+      await page.getByRole("alert").filter({ hasText: "512 KiB" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("image byte limit did not show its error"); });
+
+      await page.locator(".scroll").evaluate((element) => { element.scrollTop = element.scrollHeight; });
+      await settle(page);
+      const openImage = page.getByRole("button", { name: "open image: contrast-preview.png" });
+      await openImage.waitFor({ timeout: 5000 }).catch(() => { throw new Error("desktop output image was not rendered"); });
+      await openImage.click();
+      await page.getByRole("dialog", { name: "contrast-preview.png" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("desktop image viewer did not open"); });
+      await shoot(page, "image-viewer-1440");
+      await page.keyboard.press("Escape");
+      if (!(await openImage.evaluate((element) => document.activeElement === element))) throw new Error("image viewer did not return focus");
+
+      fake.setSettingsEnabled(false);
+      fake.drop();
+      await page.locator(".badge", { hasText: "connected" }).waitFor({ timeout: 10_000 });
+      await page.getByText("settings are not supported by this server").waitFor({ timeout: 5000 });
+      if (await page.getByRole("button", { name: /Ask|YOLO/ }).count()) throw new Error("unsupported server kept approval controls");
+      fake.setSettingsEnabled(true);
+      fake.drop();
+      await page.locator(".badge", { hasText: "connected" }).waitFor({ timeout: 10_000 });
     });
     await check("a 400-row history opens in virtual mode and lands at the bottom", async () => {
       await page.locator("button.session", { hasText: "400 rows" }).click();
@@ -519,7 +588,7 @@ try {
       if (/\bstdout:|\bstderr:/.test(card) || !card.includes("themes.ts") || !card.includes("exit 0")) throw new Error(`the reopened bash card reads "${card.replace(/\s+/g, " ")}"`);
       if (await mobile.locator("button.session").first().isVisible()) throw new Error("sidebar visible without the drawer");
       await shoot(mobile, "connected-390-gruvbox-dark");
-      await mobile.getByRole("button", { name: "sessions" }).click();
+      await mobile.getByRole("button", { name: "sessions" }).click({ timeout: 5000 }).catch(() => { throw new Error("mobile session drawer did not open"); });
       await mobile.getByRole("dialog", { name: "sessions" }).waitFor();
       await settle(mobile);
       await mobile.waitForTimeout(250);
@@ -529,20 +598,36 @@ try {
       await auditThemes(mobile, "390 drawer", 44);
       // A rejected new session keeps the modal focusable; Escape must close it even if Chromium moved focus to body.
       fake.setRejectCreate(true);
-      await mobile.getByRole("dialog", { name: "sessions" }).getByRole("button", { name: "new session" }).click();
+      await mobile.getByRole("dialog", { name: "sessions" }).getByRole("button", { name: "new session" }).click({ timeout: 5000 }).catch(() => { throw new Error("mobile new-session control could not be pressed"); });
       await mobile.getByRole("dialog", { name: "sessions" }).getByRole("alert").filter({ hasText: "could not start a session" }).waitFor({ timeout: 3000 })
         .catch(() => { throw new Error("a failed new session at 390 px closed the drawer or showed no error"); });
       fake.setRejectCreate(false);
       await mobile.keyboard.press("Escape");
       if (await mobile.getByRole("dialog").count()) throw new Error("Escape did not close the drawer");
       if (!(await mobile.evaluate(() => document.activeElement?.getAttribute("aria-label") === "sessions"))) throw new Error("focus did not return to the menu button");
-      await mobile.getByRole("button", { name: "sessions" }).click();
-      await mobile.locator("button.session", { hasText: "check every theme" }).click();
+      await mobile.getByRole("button", { name: "sessions" }).click({ timeout: 5000 }).catch(() => { throw new Error("mobile session drawer did not reopen"); });
+      await mobile.locator("button.session", { hasText: "check every theme" }).click({ timeout: 5000 }).catch(() => { throw new Error("mobile fixture session could not be selected"); });
       if (await mobile.getByRole("dialog").count()) throw new Error("choosing a session did not close the drawer");
       await mobile.locator('[data-part="md-table"]').waitFor({ timeout: 5000 });
       await mobile.evaluate(() => { document.documentElement.dataset.fulcrumTheme = "solarized-light"; });
       await mobile.waitForTimeout(300); // the drawer's 180 ms slide-out
       await shoot(mobile, "connected-390-solarized-light");
+      await mobile.locator(".topbar-yolo", { hasText: "YOLO · auto-approve tools" }).waitFor();
+      await mobile.locator(".composer-yolo", { hasText: "YOLO · auto-approve tools" }).waitFor();
+      await shoot(mobile, "yolo-390");
+      await mobile.locator(".scroll").evaluate((element) => { element.scrollTop = element.scrollHeight; });
+      await settle(mobile);
+      await mobile.waitForTimeout(300);
+      const mobileImage = mobile.getByRole("button", { name: "open image: contrast-preview.png" });
+      await mobileImage.waitFor({ timeout: 5000 }).catch(() => { throw new Error("mobile output image was not rendered"); });
+      await mobileImage.evaluate((element) => element.scrollIntoView({ block: "center" }));
+      await mobileImage.click({ timeout: 5000 }).catch(() => { throw new Error("mobile output image could not be opened"); });
+      await mobile.getByRole("dialog", { name: "contrast-preview.png" }).waitFor();
+      await shoot(mobile, "image-viewer-390");
+      await mobile.keyboard.press("Escape");
+      await mobile.locator('.attach-button input[type="file"]').setInputFiles({ name: "mobile.png", mimeType: "image/png", buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64") });
+      await mobile.getByRole("button", { name: "remove mobile.png" }).waitFor();
+      await shoot(mobile, "queued-images-390");
     });
     await check("390: the field text is at least 16 px, so iOS does not zoom on focus", async () => {
       const size = await mobile.locator(".dock textarea").evaluate((node) => parseFloat(getComputedStyle(node).fontSize));
