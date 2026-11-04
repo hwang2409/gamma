@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 
@@ -46,4 +45,6 @@ for (const name of packages) {
   console.log(`packed @fulcrum/${name} as ${basename(filename)}`);
 }
 await writeFile(resolve(vendor, ".source"), `${source}\n`);
-if (existsSync(resolve(root, "node_modules"))) run(["bun", "install", "--force", "--ignore-scripts"], root);
+// Bun cannot refresh integrity for regenerated file tarballs in place, so replace the lock atomically through install.
+await rm(resolve(root, "bun.lock"), { force: true });
+run(["bun", "install", "--ignore-scripts"], root);
