@@ -96,16 +96,30 @@ try {
       await page!.getByRole("button", { name: `model: ${model}` }).waitFor({ timeout: 20_000 });
       replies.push(`picked: ${model}`);
     };
-    await check("a text turn streams a real reply (zeta's default anthropic model)", async () => {
+    await check("loads and picks an anthropic model and YOLO before the first turn", async () => {
       await field.waitFor({ timeout: 60_000 });
+      await page!.getByRole("button", { name: /^model:/ }).click({ timeout: 20_000 });
+      await page!.screenshot({ path: join(shots, "live-empty-model-picker-1440.png") });
+      const options = page!.getByRole("option");
+      const names = await options.allTextContents();
+      const model = names.find((name) => /^claude-sonnet-5$/.test(name)) ?? names.find((name) => /sonnet/.test(name));
+      if (!model) throw new Error(`no anthropic sonnet model in ${names.join(", ")}`);
+      await options.filter({ hasText: new RegExp(`^${model}$`) }).click();
+      await page!.getByRole("button", { name: `model: ${model}` }).waitFor({ timeout: 20_000 });
+      replies.push(`picked: ${model}`);
+      await page!.getByRole("button", { name: /^approval mode: Ask/ }).click();
+      await page!.getByRole("button", { name: /^approval mode: YOLO/ }).waitFor();
+    });
+    await check("the first text turn uses the selected model and YOLO mode", async () => {
       await field.fill("do not use any tools. reply with one short sentence that says the gamma live check works.");
       await field.press("Enter");
       const reply = await finished(1);
       if (!reply) throw new Error("empty reply");
-      replies.push(`model: ${(await page!.getByRole("button", { name: /^model:/ }).textContent())?.trim()}`, `text reply: ${reply}`);
+      await page!.getByRole("button", { name: /^model: claude-sonnet-5/ }).waitFor();
+      await page!.getByRole("button", { name: /^approval mode: YOLO/ }).waitFor();
+      replies.push("first turn: claude-sonnet-5 / YOLO", `text reply: ${reply}`);
       await page!.screenshot({ path: join(shots, "live-anthropic-text-1440.png") });
     });
-    await check("picks an anthropic model in the composer footer", pickModel);
     await check("an image turn gets a reply that describes the image", async () => {
       await page.locator('.dock [data-part="composer"] input[type=file]').setInputFiles({ name: "circle.png", mimeType: "image/png", buffer: circle });
       const thumb = page.locator('.dock [data-part="attachment"] img');
