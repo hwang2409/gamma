@@ -30,8 +30,10 @@ export function useArtifacts(sessionId: string, store: SessionStore) {
       void request(`/sessions/${encodeURIComponent(sessionId)}/context`, { method: "POST", body: JSON.stringify({ tool_call_id: tool }) });
     };
     const load = async () => {
-      try { const result = await request<{ artifacts: Artifact[] }>(`/sessions/${encodeURIComponent(sessionId)}/artifacts`); if (!disposed) setArtifacts(result.artifacts); }
-      catch { /* a reconnect can rotate registration between polls */ }
+      try {
+        const result = await request<{ artifacts: Artifact[] }>(`/sessions/${encodeURIComponent(sessionId)}/artifacts`);
+        if (!disposed) setArtifacts((current) => current.length === result.artifacts.length && current.every((item, index) => item.artifact_id === result.artifacts[index]?.artifact_id && item.version === result.artifacts[index]?.version) ? current : result.artifacts);
+      } catch { /* a reconnect can rotate registration between polls */ }
     };
     syncContext(); void load();
     const unsubscribe = store.subscribe(syncContext); const timer = setInterval(load, 1_000);
