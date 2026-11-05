@@ -1,7 +1,7 @@
 import { createHighlighter } from "@fulcrum/highlight";
 import { Markdown, type Fences, type MarkdownProps } from "@fulcrum/markdown/react";
 import { MermaidFence } from "@fulcrum/mermaid";
-import { Approval, Code, Composer, Fallback, FileBlock, HighlightContext, ImageBlock, Message, RunProvider, Timeline, useItemSelector, useRun, useRunStore, useTimeline, type Renderers } from "@fulcrum/react";
+import { Approval, Code, Composer, Fallback, FileBlock, HighlightContext, ImageBlock, Message, RunProvider, Timeline, ToolCall, useItemSelector, useRun, useRunStore, useTimeline, type Renderers } from "@fulcrum/react";
 import type { SessionStore, ZetaClient } from "@fulcrum/zeta";
 import { forwardRef, createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type ReactNode } from "react";
 import { createConnection, serveCommand, type Connection, type ConnectionState } from "./connection";
@@ -61,7 +61,7 @@ function ArtifactList({ anchor }: { anchor: string | null }) {
 }
 function ToolWithArtifacts({ id }: { id: string }) {
   const toolId = useItemSelector(id, (item) => item?.type === "tool" ? item.tool_call.id : null);
-  return <><Fallback id={id} />{toolId ? <ArtifactList anchor={toolId} /> : null}</>;
+  return <><ToolCall id={id} />{toolId ? <ArtifactList anchor={toolId} /> : null}</>;
 }
 const ApprovalModeContext = createContext<{ yolo: boolean; setYolo(value: boolean): void }>({ yolo: false, setYolo() {} });
 function YoloIndicator({ className = "" }: { className?: string }) {
