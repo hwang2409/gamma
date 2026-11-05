@@ -80,14 +80,16 @@ export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaC
       const catalog = await client.request("model_catalog", sessionId ? { session_id: sessionId } : {}, { timeoutMs: 15_000 });
       localStorage.setItem(CATALOG, JSON.stringify(catalog));
       setModels(catalogModels(catalog));
-      if (sessionId) {
+    } catch (cause) {
+      if ((cause as { code?: unknown }).code === -32601) { setUnsupported(true); return; }
+      if (!sessionId) return;
+    }
+    if (sessionId) {
+      try {
         const next = settingModel(await client.request("session_settings", { session_id: sessionId }, { timeoutMs: 15_000 }));
         setSettings(next);
         onYolo(next.approval_mode === "allow");
-      }
-    } catch (cause) {
-      if ((cause as { code?: unknown }).code === -32601) setUnsupported(true);
-      else if (sessionId) setError(cause instanceof Error ? cause.message : "settings unavailable");
+      } catch (cause) { setError(cause instanceof Error ? cause.message : "settings unavailable"); }
     }
   }, [client, sessionId, onYolo]);
   useEffect(() => { setError(""); void load(); }, [load]);
