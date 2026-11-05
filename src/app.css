@@ -1,8 +1,9 @@
-/* fulcrum web: the shipped styles' language. Square corners, 1 px hairlines, no shadows or gradients. Color marks
-   state (square marks, the 2 px rail) and syntax; text stays fg or muted so every theme keeps 4.5:1. */
-:root { --control: 36px; --rail: 2px; --side: 300px; }
+/* gamma: fulcrum's language. Square corners, 1 px hairlines, no shadows or gradients. Color marks state (square marks,
+   the 2 px rail) and syntax; text stays fg or muted so every theme keeps 4.5:1. One run, one column: header, transcript,
+   and the composer as the anchor at the bottom, all on the same 880 px measure. */
+:root { --control: 36px; --rail: 2px; --measure: 880px; --gutter: 24px; }
 * { box-sizing: border-box; border-radius: 0; }
-/* The page is fixed to the viewport: only the run and the session list scroll. */
+/* The page is fixed to the viewport: only the run scrolls. */
 html, body { height: 100%; overflow: hidden; }
 body {
   margin: 0;
@@ -35,84 +36,39 @@ button:disabled { color: var(--fulcrum-muted); cursor: not-allowed; }
 .primary { border-color: var(--fulcrum-fg); background: var(--fulcrum-fg); color: var(--fulcrum-bg); font-weight: 700; }
 .primary:hover { text-decoration: underline; text-underline-offset: 3px; }
 .primary:focus-visible { outline-offset: 2px; }
-/* The one call to action in the sidebar: accent outline and text on a faint accent tint, filled on hover. */
-.accent { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: var(--control); padding: 0 14px; border-color: var(--fulcrum-accent); background: color-mix(in srgb, var(--fulcrum-accent) 8%, var(--fulcrum-bg)); color: var(--fulcrum-accent); font-weight: 700; white-space: nowrap; }
-.accent::before { content: "+"; font-weight: 800; }
-.accent:hover:not(:disabled) { background: var(--fulcrum-accent); color: var(--fulcrum-bg); }
-.accent:disabled { border-color: var(--fulcrum-border); background: transparent; }
 button:active:not(:disabled) { transform: scale(0.97); }
 
-/* Frame: sessions on the left, the run on the right. */
-.app { display: grid; grid-template-columns: var(--side) minmax(0, 1fr); height: 100dvh; overflow: hidden; }
-.sidebar { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--fulcrum-border); background: var(--fulcrum-bg); }
-.main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.app { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
+.main { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
 
-.brand { display: flex; align-items: center; gap: 10px; min-height: 56px; padding: 0 16px; border-bottom: 1px solid var(--fulcrum-border); }
-.brand-mark { position: relative; width: 16px; height: 16px; }
-.brand-mark::before, .brand-mark::after { content: ""; position: absolute; width: 11px; height: 11px; }
+/* Header: brand, the run's title, and the run's two actions. Its content sits on the transcript's measure. */
+.topbar { display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 6px max(var(--gutter), (100% - var(--measure)) / 2); border-bottom: 1px solid var(--fulcrum-border); }
+.brand { display: flex; flex: none; align-items: center; gap: 8px; padding-right: 12px; border-right: 1px solid var(--fulcrum-border); }
+.brand-mark { position: relative; width: 14px; height: 14px; }
+.brand-mark::before, .brand-mark::after { content: ""; position: absolute; width: 9px; height: 9px; }
 .brand-mark::before { top: 0; left: 0; background: var(--fulcrum-accent); }
 .brand-mark::after { right: 0; bottom: 0; background: var(--fulcrum-tok-string); }
-.brand-name { font-weight: 800; letter-spacing: 0.02em; }
-.brand-sub { color: var(--fulcrum-muted); font-size: 12px; }
+.brand-name { font-weight: 800; letter-spacing: 0.04em; }
+.run-title { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.run-title h1 { overflow: hidden; font-size: 14px; font-weight: 700; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.run-meta { display: flex; min-width: 0; color: var(--fulcrum-muted); font-size: 12px; }
+.run-meta .cwd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topbar .ghost { padding: 0 12px; font-size: 12px; }
+.yolo-indicator { flex: none; padding: 3px 8px; border: 1px solid var(--fulcrum-danger); color: var(--fulcrum-danger); font-size: 12px; font-weight: 700; white-space: nowrap; }
 
-/* State words: the word stays fg; its square mark carries the color. */
-.badge, .state { display: inline-flex; align-items: center; gap: 6px; color: var(--fulcrum-fg); font-size: 12px; white-space: nowrap; }
-.badge { --tone: var(--fulcrum-muted); margin-left: auto; padding: 3px 8px; border: 1px solid color-mix(in srgb, var(--tone) 55%, transparent); background: color-mix(in srgb, var(--tone) 12%, var(--fulcrum-bg)); }
-.badge[data-tone="ok"] { --tone: var(--fulcrum-ok); }
-.badge[data-tone="busy"] { --tone: var(--fulcrum-accent); }
-.badge[data-tone="warn"] { --tone: var(--fulcrum-warn); }
-.badge[data-tone="danger"] { --tone: var(--fulcrum-danger); }
-.badge::before, .state::before { content: ""; flex: none; width: 7px; height: 7px; background: var(--fulcrum-muted); }
-.badge[data-tone="ok"]::before, .state[data-status="open"]::before { background: var(--fulcrum-ok); }
-.badge[data-tone="busy"]::before, .state[data-status="running"]::before { background: var(--fulcrum-accent); animation: pulse 1s infinite alternate; }
-.badge[data-tone="warn"]::before, .state[data-status="approval"]::before { background: var(--fulcrum-warn); }
-.badge[data-tone="danger"]::before { background: var(--fulcrum-danger); }
-.state[data-status="idle"]::before { background: var(--fulcrum-muted); }
-.run-meta .state[data-status="approval"] { font-weight: 700; }
+/* Settings: a popover under its button with the theme picker and the vim switch. */
+.settings-menu { position: relative; flex: none; }
+.settings-popover { position: absolute; top: calc(100% + 6px); right: 0; z-index: 4; display: grid; gap: 8px; width: min(320px, calc(100vw - 24px)); padding: 12px; border: 1px solid var(--fulcrum-fg); background: var(--fulcrum-bg); }
+.vim-toggle { justify-content: space-between; gap: 12px; width: 100%; }
+.vim-toggle .vim-state { color: var(--fulcrum-muted); }
+.vim-toggle[aria-pressed="true"] .vim-state { color: var(--fulcrum-fg); font-weight: 700; }
+.vim-toggle[aria-pressed="true"] .vim-state::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px; vertical-align: 1px; background: var(--fulcrum-ok); }
 
-.list-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--fulcrum-border); }
-.list-head h2 { font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fulcrum-muted); }
-.list-head h2::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 8px; vertical-align: 1px; background: var(--fulcrum-accent); }
-.list-head .count { color: var(--fulcrum-accent); font-size: 12px; font-weight: 700; }
-.list-head .ghost { margin-left: auto; padding: 0 10px; font-size: 12px; }
-.list-head .accent { flex-basis: 100%; }
-.list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 8px; }
-.list ul { margin: 0; padding: 0; list-style: none; }
-.session {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  width: 100%;
-  padding: 10px 16px 10px calc(16px - var(--rail));
-  border: 0;
-  border-left: var(--rail) solid transparent;
-  text-align: left;
-  font-weight: 400;
-  line-height: 1.45;
-}
-/* Rows are split by a hairline, so a wrapped title reads as one row. The live session's rail carries its state. */
-.list li + li .session { border-top: 1px solid color-mix(in srgb, var(--fulcrum-border) 60%, transparent); }
-.session:hover { border-left-color: color-mix(in srgb, var(--fulcrum-accent) 50%, var(--fulcrum-border)); }
-/* The selection is an accent rail on a faint accent tint; its meta turns fg, so text keeps 4.5:1 on the tint. */
-.session[aria-current] { border-left-color: var(--fulcrum-accent); background: color-mix(in srgb, var(--fulcrum-accent) 10%, var(--fulcrum-bg)); }
-.session[aria-current] .session-meta { color: var(--fulcrum-fg); }
-.session[data-status="running"] { border-left-color: var(--fulcrum-accent); }
-.session[data-status="open"] { border-left-color: var(--fulcrum-ok); }
-.session[data-status="approval"] { border-left-color: var(--fulcrum-warn); background: color-mix(in srgb, var(--fulcrum-warn) 8%, var(--fulcrum-bg)); }
-.session[data-status="approval"] .session-meta { color: var(--fulcrum-fg); }
-.session:active:not(:disabled) { transform: none; }
-.session-title { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; font-size: 13px; line-height: 1.35; }
-.session[aria-current] .session-title { font-weight: 700; }
-.session-meta { display: flex; align-items: center; gap: 10px; min-width: 0; color: var(--fulcrum-muted); font-size: 12px; }
-.session-meta .model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.more { width: calc(100% - 32px); margin: 8px 16px 0; }
-.note { padding: 8px 16px; color: var(--fulcrum-muted); font-size: 12px; }
+.note { padding: 8px var(--gutter); color: var(--fulcrum-muted); font-size: 12px; }
 .note[data-tone="danger"] { border-left: var(--rail) solid var(--fulcrum-danger); color: var(--fulcrum-fg); }
-.sidebar-foot { padding: 12px 16px; border-top: 1px solid var(--fulcrum-border); }
 
-/* Theme picker: a listbox that opens upward from the sidebar foot. */
+/* Theme picker: a listbox under its button in the settings popover. */
 .theme-picker { position: relative; }
-/* The label sits above the name, so the longest theme name fits the 300 px sidebar. */
 .theme-button { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 10px; row-gap: 3px; width: 100%; min-height: var(--control); padding: 6px 12px; }
 .theme-button .swatch { grid-area: 1 / 2 / 3 / 3; }
 .theme-label { font-size: 11px; line-height: 1; text-align: left; }
@@ -123,7 +79,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .swatch span { width: 8px; height: 16px; }
 .theme-list {
   position: absolute;
-  inset: auto 0 calc(100% + 4px) 0;
+  inset: calc(100% + 4px) 0 auto 0;
   z-index: 3;
   max-height: min(70dvh, 520px);
   margin: 0;
@@ -139,38 +95,12 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .theme-list li[aria-selected="true"] { font-weight: 700; }
 .theme-list li[aria-selected="true"] > span:first-child::after { content: "  ·  current"; color: var(--fulcrum-muted); font-weight: 400; }
 
-/* Run header. */
-.topbar { display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 6px 24px; border-bottom: 1px solid var(--fulcrum-border); }
-.menu { display: none; flex: none; align-items: center; justify-content: center; width: 44px; height: 44px; margin-left: -10px; border-color: transparent; }
-.menu:hover { border-color: var(--fulcrum-border); }
-.menu-icon, .menu-icon::before, .menu-icon::after { display: block; width: 18px; height: 2px; background: var(--fulcrum-fg); }
-.menu-icon { position: relative; }
-.menu-icon::before, .menu-icon::after { content: ""; position: absolute; left: 0; }
-.menu-icon::before { top: -6px; }
-.menu-icon::after { top: 6px; }
-.run-title { display: flex; flex-direction: column; min-width: 0; }
-.run-title h1 { overflow: hidden; font-size: 15px; font-weight: 700; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
-.run-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0 14px; min-width: 0; color: var(--fulcrum-muted); font-size: 12px; }
-.run-meta > * { min-width: 0; }
-.run-meta .cwd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
 /* The run. No vertical padding: the virtual Timeline measures from the scroll box's top edge. */
-.scroll { flex: 1; min-height: 0; overflow: auto; padding: 0 24px; }
+.scroll { flex: 1; min-height: 0; overflow: auto; padding: 0 var(--gutter); }
 .scroll:focus-visible { outline: none; }
-.scroll > [data-part="timeline"] { max-width: 880px; margin: 0 auto; }
+.scroll > [data-part="timeline"] { max-width: var(--measure); margin: 0 auto; }
 /* The shipped control has no hit area of its own. */
 .scroll [data-part="jump-to-latest"] { display: flex; align-items: center; min-height: var(--control); padding: 0 14px; border: 0; }
-
-/* The composer docks under the run, on the timeline's column. */
-.dock { flex: none; padding: 8px 24px max(16px, env(safe-area-inset-bottom)); }
-.dock > [data-part="composer"] { max-width: 880px; margin: 0 auto; }
-/* Idle and ready: the frame takes a share of the accent, so the input reads as the next step. */
-.dock > [data-part="composer"][data-state="idle"]:not(:focus-within) { border-color: color-mix(in srgb, var(--fulcrum-accent) 45%, var(--fulcrum-border)); border-left-color: var(--fulcrum-accent); }
-
-/* An empty session: a short note in the run's column instead of a blank run. */
-.empty-run { max-width: 880px; margin: max(32px, 10dvh) auto 0; padding: 16px 20px; border: 1px solid var(--fulcrum-border); border-left: var(--rail) solid var(--fulcrum-accent); }
-.empty-run h2 { margin-bottom: 4px; font-size: 14px; font-weight: 700; }
-.empty-run p { color: var(--fulcrum-muted); font-size: 13px; }
 
 /* A steer that a stop dropped: the row stays, struck through, with a danger rail and a note that says why. */
 .scroll [data-kind="user"]:has(+ .undelivered) { border-left-color: var(--fulcrum-danger); color: var(--fulcrum-muted); text-decoration: line-through; text-decoration-color: var(--fulcrum-danger); }
@@ -192,81 +122,96 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .command code { flex: 1; min-width: 0; padding: 8px 12px; color: var(--fulcrum-fg); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .command code::before { content: "$ "; color: var(--fulcrum-muted); }
 .command .ghost { border-width: 0 0 0 1px; }
-.notice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 8px 24px; border-bottom: 1px solid var(--fulcrum-border); border-left: var(--rail) solid var(--fulcrum-danger); font-size: 13px; }
+.notice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 8px var(--gutter); border-bottom: 1px solid var(--fulcrum-border); border-left: var(--rail) solid var(--fulcrum-danger); font-size: 13px; }
 .notice[data-tone="warn"] { border-left-color: var(--fulcrum-warn); }
 .notice[data-tone="busy"] { border-left-color: var(--fulcrum-accent); }
 .notice .ghost { min-height: 30px; }
 .notice .command { flex-basis: 100%; margin: 0; }
-.only-narrow { display: none; }
-.scrim { display: none; }
+
+/* The dock: the status line, then the composer, on the transcript's measure. */
+.dock { flex: none; padding: 6px var(--gutter) max(16px, env(safe-area-inset-bottom)); }
+.dock > * { max-width: var(--measure); margin-inline: auto; }
+
+/* Status line: one state word with its square mark; approval and error carry an action. */
+.status-line { --tone: var(--fulcrum-muted); display: flex; align-items: center; gap: 10px; min-height: 28px; font-size: 12px; }
+.status-line[data-tone="ok"] { --tone: var(--fulcrum-ok); }
+.status-line[data-tone="busy"] { --tone: var(--fulcrum-accent); }
+.status-line[data-tone="warn"] { --tone: var(--fulcrum-warn); }
+.status-line[data-tone="danger"] { --tone: var(--fulcrum-danger); }
+.status-line::before { content: ""; flex: none; width: 7px; height: 7px; background: var(--tone); }
+.status-line[data-tone="busy"]::before { animation: pulse 1s infinite alternate; }
+.status-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status-line[data-tone="danger"] .status-text { font-weight: 700; }
+.status-link { min-height: 28px; padding: 0 8px; border-color: var(--fulcrum-warn); font-size: 12px; font-weight: 700; }
+.status-link::after { content: " ↓"; }
+.status-retry { min-height: 28px; padding: 0 10px; font-size: 12px; }
+
+/* The composer: fulcrum's parts, plus gamma's tray, footer tools, and vim mode. */
+.dock [data-part="composer"] { position: relative; }
+.dock [data-part="composer"][data-state="idle"]:not(:focus-within) { border-color: color-mix(in srgb, var(--fulcrum-accent) 45%, var(--fulcrum-border)); border-left-color: var(--fulcrum-accent); }
+.dock [data-part="composer"][data-drop="active"] { border: 1px dashed var(--fulcrum-accent); border-left: var(--rail) solid var(--fulcrum-accent); }
+.drop-hint { position: absolute; inset: 0; z-index: 1; display: grid; place-items: center; background: color-mix(in srgb, var(--fulcrum-accent) 12%, var(--fulcrum-bg)); color: var(--fulcrum-fg); font-weight: 700; pointer-events: none; }
+.attachments { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: var(--inset) var(--inset) 0; list-style: none; }
+[data-part="attachment"] { display: flex; align-items: center; max-width: 220px; border: 1px solid var(--fulcrum-border); background: var(--fulcrum-surface); font-size: 12px; }
+[data-part="attachment"] img { flex: none; width: 34px; height: 34px; object-fit: cover; border-right: 1px solid var(--fulcrum-border); }
+[data-part="attachment"] span { min-width: 0; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-error { padding: 6px var(--inset) 0; color: var(--fulcrum-danger); font-size: 12px; font-weight: 700; }
+[data-part="composer-bar"] { flex-wrap: wrap; row-gap: 6px; }
+.composer-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; margin-left: auto; }
+.vim-mode { flex: none; padding: 2px 6px; border: 1px solid var(--fulcrum-border); color: var(--fulcrum-muted); font-size: 11px; font-weight: 700; letter-spacing: 0.06em; }
+.vim-mode[data-mode="normal"] { border-color: var(--fulcrum-accent); color: var(--fulcrum-accent); }
+/* Footer tools are quiet outlines; only send is filled. */
+.dock [data-part="composer"] .composer-tool { --action: var(--fulcrum-border); min-width: 36px; padding: 0 10px; background: var(--fulcrum-bg); color: var(--fulcrum-fg); font-weight: 500; }
+.dock [data-part="composer"] .composer-tool:hover { border-color: var(--fulcrum-fg); }
+.dock [data-part="composer"] .attach { display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+.dock [data-part="attachment"] .composer-tool { min-width: 34px; min-height: 34px; border-width: 0 0 0 1px; font-size: 16px; }
+.dock [data-part="composer"] .approval-mode[data-yolo] { --action: var(--fulcrum-danger); color: var(--fulcrum-danger); font-weight: 700; }
+.model-picker { position: relative; }
+.model-picker > button { max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-picker [role="listbox"] { position: absolute; z-index: 5; right: 0; bottom: calc(100% + 4px); display: grid; min-width: 100%; padding: 4px 0; border: 1px solid var(--fulcrum-fg); background: var(--fulcrum-bg); }
+.dock .model-picker [role="option"] { --action: transparent; min-height: 32px; padding: 0 12px; border: 0; background: transparent; color: var(--fulcrum-fg); font-weight: 400; text-align: left; white-space: nowrap; }
+.dock .model-picker [role="option"][aria-selected="true"] { font-weight: 700; }
+.dock .model-picker [role="option"]:hover, .dock .model-picker [role="option"]:focus-visible { background: var(--fulcrum-surface); }
+.settings-error { max-width: 20ch; overflow: hidden; color: var(--fulcrum-danger); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+
+/* A run with no messages: a short note on the transcript's measure. */
+.empty-run { max-width: var(--measure); margin: max(32px, 14dvh) auto 0; padding: 16px 20px; border: 1px solid var(--fulcrum-border); border-left: var(--rail) solid var(--fulcrum-accent); }
+.empty-run h2 { margin-bottom: 4px; font-size: 14px; font-weight: 700; }
+.empty-run p { color: var(--fulcrum-muted); font-size: 13px; }
 
 @keyframes pulse { to { opacity: 0.3; } }
 @media (prefers-reduced-motion: reduce) {
-  .badge::before, .state::before { animation: none !important; }
+  .status-line::before { animation: none !important; }
   button:active:not(:disabled) { transform: none; }
 }
 
-/* Touch widths: 44 px targets, and the session list becomes a drawer. */
+/* Touch widths: 44 px targets and tighter gutters. */
 @media (max-width: 860px), (pointer: coarse) {
   :root { --control: 44px; }
-  .list-head .ghost, .notice .ghost { min-height: 44px; }
+  .notice .ghost, .status-retry, .status-link { min-height: 44px; }
   .scroll [data-part] button { min-height: 44px; }
+  .dock [data-part="composer"] .composer-tool, .dock [data-part="composer"] button { min-height: 44px; }
+  .dock [data-part="attachment"] .composer-tool { min-width: 44px; min-height: 44px; }
+  [data-part="attachment"] img { width: 44px; height: 44px; }
+  .dock .model-picker [role="option"] { min-height: 44px; }
 }
 @media (max-width: 860px) {
-  .app { grid-template-columns: minmax(0, 1fr); }
-  .sidebar {
-    position: fixed;
-    inset: 0 auto 0 0;
-    z-index: 2;
-    width: min(88vw, 340px);
-    transform: translateX(-100%);
-    visibility: hidden;
-    transition: transform 180ms cubic-bezier(0.2, 0, 0, 1), visibility 0s linear 180ms;
-  }
-  .app[data-drawer="open"] .sidebar { transform: none; visibility: visible; transition: transform 180ms cubic-bezier(0.2, 0, 0, 1); }
-  .scrim { display: block; position: fixed; inset: 0; z-index: 1; border: 0; background: color-mix(in srgb, var(--fulcrum-bg) 70%, transparent); cursor: default; }
-  .scrim:active { transform: none !important; }
-  .menu { display: inline-flex; }
-  .session { min-height: 56px; }
-  .topbar { padding: 6px 16px; }
-  .scroll { padding: 0 12px; }
-  .dock { padding: 8px 12px max(12px, env(safe-area-inset-bottom)); }
-  .notice { padding: 8px 16px; }
+  :root { --gutter: 12px; }
+  .topbar { gap: 8px; padding: 6px 12px; }
+  .brand { padding-right: 8px; }
+  .run-meta { display: none; }
   .panel { width: calc(100% - 24px); margin-top: 24px; padding: 16px; }
-  .only-narrow { display: flex; }
-}
-@media (max-width: 860px) and (prefers-reduced-motion: reduce) {
-  .sidebar, .app[data-drawer="open"] .sidebar { transition: none; }
-}
-.settings-bar { display:flex; align-items:center; gap:.7rem; flex-wrap:wrap; padding:.55rem 1rem; border-bottom:1px solid var(--border); font-size:.82rem; }
-.settings-bar button, .attach-button { min-height:36px; border:1px solid var(--border); background:var(--panel); color:inherit; padding:.35rem .55rem; cursor:pointer; }
-.model-picker { position:relative; display:flex; align-items:center; gap:.4rem; }
-.model-picker [role="listbox"] { position:absolute; z-index:5; top:calc(100% + .3rem); left:0; min-width:100%; padding:.25rem; border:1px solid var(--border); background:var(--panel); box-shadow:0 8px 24px #0004; }
-.model-picker [role="option"] { display:block; width:100%; text-align:left; white-space:nowrap; }
-.model-picker [role="option"][aria-selected="true"] { color:var(--accent); }
-.yolo-indicator { color:var(--danger); letter-spacing:.02em; font-size:.78rem; }
-.topbar-yolo { margin-left:auto; }
-.composer-yolo { display:block; margin-bottom:.3rem; }
-.attach-button { display:inline-block; margin-bottom:.35rem; }
-.image-queue { display:flex; gap:.5rem; padding:.3rem 0; overflow:auto; }
-.image-queue figure { position:relative; margin:0; }
-.image-queue img { width:52px; height:52px; object-fit:cover; border:1px solid var(--border); }
-.image-queue button { display:block; min-height:36px; font-size:.7rem; }
-.image-viewer { position:fixed; inset:0; z-index:20; display:grid; place-items:center; padding:2rem; background:#000c; cursor:zoom-out; }
-.image-viewer img { max-width: min(95vw, 1200px); max-height:90vh; object-fit:contain; }
-@media (max-width: 860px) {
-  .settings-bar button, .attach-button, .image-queue button { min-height:44px; }
 }
 .artifacts { display: grid; gap: 8px; margin-block-start: 8px; padding-inline-start: 18px; border-inline-start: 2px solid var(--fulcrum-border); }
 .artifact-markdown { padding: 12px; border: 1px solid var(--fulcrum-border); background: var(--fulcrum-surface); }
-.artifact-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--fulcrum-muted); font: 12px var(--font-mono); margin-block-end: 8px; }
-.inspector { position: fixed; z-index: 50; inset: 24px; display: grid; grid-template-rows: auto 1fr; background: var(--fulcrum-bg); border: 1px solid var(--fulcrum-border); box-shadow: 0 16px 60px #0008; }
+.artifact-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--fulcrum-muted); font: 12px var(--fulcrum-font); margin-block-end: 8px; }
+.inspector { position: fixed; z-index: 50; inset: 24px; display: grid; grid-template-rows: auto 1fr; background: var(--fulcrum-bg); border: 1px solid var(--fulcrum-border); }
 .inspector-bar { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-block-end: 1px solid var(--fulcrum-border); }
 .inspector-bar strong { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .inspector-bar a { color: var(--fulcrum-accent); }
 .inspector-body { min-height: 0; overflow: auto; padding: 16px; }
 .inspector-body > img, .inspector-body > iframe { display: block; width: 100%; height: 100%; object-fit: contain; border: 0; background: white; }
-.inspector-body table { border-collapse: collapse; font: 13px var(--font-mono); }
+.inspector-body table { border-collapse: collapse; font: 13px var(--fulcrum-font); }
 .inspector-body td { border: 1px solid var(--fulcrum-border); padding: 5px 8px; white-space: pre-wrap; }
 .inspector-body pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 600px) { .inspector { inset: 0; } .artifacts { padding-inline-start: 8px; } }

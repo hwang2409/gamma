@@ -1,17 +1,18 @@
 import { createHighlighter } from "@fulcrum/highlight";
 import { Markdown, type Fences, type MarkdownProps } from "@fulcrum/markdown/react";
 import { MermaidFence } from "@fulcrum/mermaid";
-import { Approval, Code, Composer, Fallback, FileBlock, HighlightContext, ImageBlock, Message, RunProvider, Timeline, ToolCall, useItemSelector, useRun, useRunStore, useTimeline, type Renderers } from "@fulcrum/react";
-import type { SessionStore, ZetaClient } from "@fulcrum/zeta";
-import { forwardRef, createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type ReactNode } from "react";
+import { Approval, Code, Fallback, FileBlock, HighlightContext, ImageBlock, Message, RunProvider, Timeline, ToolCall, useItemSelector, useRun, useRunStore, useTimeline, type Renderers } from "@fulcrum/react";
+import { createRunStore } from "@fulcrum/core";
+import type { ZetaClient } from "@fulcrum/zeta";
+import { forwardRef, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createConnection, serveCommand, type Connection, type ConnectionState } from "./connection";
-import { createDelivery } from "./delivery";
-import { ago, createSessions, sessionPresentation, sessionTitle, topLevel, type OpenRun, type SessionMeta, type Sessions, type SessionsState } from "./session";
+import { createDelivery, stopTurn } from "./delivery";
+import { createRun, sessionPresentation, sessionTitle, transitionRun, type OpenRun, type RunControl, type RunState, type SessionMeta } from "./session";
 import { ThemePicker, useTheme } from "./theme";
-import { addImage, readImage, type QueuedImage } from "./image-queue";
+import { GammaComposer, type Submit } from "./composer";
+import { nextRunModel, RunSettings, SettingsMenu, useVimSetting, VimToggle } from "./controls";
 import { artifactContentUrl, hostBindings, useArtifacts } from "./host-client";
 import type { Artifact } from "./host/types";
-import { catalogModels, settingModel, settingsRequest, type SessionSettings } from "./settings";
 
 const highlight = createHighlighter();
 addEventListener("pagehide", () => highlight.dispose(), { once: true });
@@ -66,7 +67,7 @@ function ToolWithArtifacts({ id }: { id: string }) {
 const ApprovalModeContext = createContext<{ yolo: boolean; setYolo(value: boolean): void }>({ yolo: false, setYolo() {} });
 function YoloIndicator({ className = "" }: { className?: string }) {
   const { yolo } = useContext(ApprovalModeContext);
-  return yolo ? <strong className={`yolo-indicator ${className}`}>YOLO · auto-approve tools</strong> : null;
+  return yolo ? <strong className={`yolo-indicator ${className}`} title="tools run without asking">YOLO</strong> : null;
 }
 function ZetaMessage({ id }: { id: string }) {
   const onOpen = useContext(ImageViewer);
@@ -94,308 +95,287 @@ function useCountdown(at: number | null) {
   return at === null ? null : Math.max(0, Math.ceil((at - now) / 1000));
 }
 
-const hashSession = () => new URLSearchParams(location.hash.slice(1)).get("session");
+const RUN = "gamma-run";
+/** The run to resume: `?run=` first (a shared link), else the one this browser had open. */
+const initialRun = () => new URLSearchParams(location.search).get("run") ?? localStorage.getItem(RUN);
+const rememberRun = (id: string | null) => {
+  const url = new URL(location.href);
+  if (id) { url.searchParams.set("run", id); localStorage.setItem(RUN, id); }
+  else { url.searchParams.delete("run"); localStorage.removeItem(RUN); }
+  history.replaceState(null, "", url);
+};
 
 export function App() {
   const [theme, setTheme] = useTheme();
+  const [vim, setVim] = useVimSetting();
   const connection = useMemo(() => createConnection({ origin: location.origin }), []);
-  const sessions = useMemo(
-    () => createSessions(connection, {
-      selected: hashSession(),
-      onSelect: (id) => history.replaceState(null, "", `#session=${encodeURIComponent(id)}`),
-      bindings: hostBindings,
-    }),
-    [connection],
-  );
-  useEffect(() => () => { sessions.dispose(); connection.stop(); }, [connection, sessions]);
+  const runs = useMemo(() => createRun(connection, { selected: initialRun(), onSelect: rememberRun, bindings: hostBindings }), [connection]);
+  useEffect(() => () => { runs.dispose(); connection.stop(); }, [connection, runs]);
   const state = useExternal(connection);
-  const view = useExternal(sessions);
-  const present = sessionPresentation(view.transition);
-  const [drawer, setDrawer] = useState(false);
+  const view = useExternal(runs);
+  const open = sessionPresentation(view.transition).open;
+  // A new run remounts the dock (a fresh draft and delivery state) over a fresh empty store.
+  const [epoch, setEpoch] = useState(0);
+  const blank = useMemo(() => createRunStore(), [epoch]);
+  const store = open?.lease.store ?? blank;
   const [yolo, setYolo] = useState(false);
-  const menu = useRef<HTMLButtonElement>(null);
-  const returnFocus = useRef(false);
-  const runOpener = useRef<Element | null>(null);
-  // A session the user just started opens with the composer focused, ready to type.
-  const focusComposer = useRef(false);
-  const closeDrawer = useCallback(() => { returnFocus.current = true; setDrawer(false); }, []);
-  // After the render that drops `inert` from main, so the menu button can take focus again.
-  useEffect(() => { if (!drawer && returnFocus.current) { returnFocus.current = false; menu.current?.focus(); } }, [drawer]);
-  const select = useCallback((id: string) => {
-    runOpener.current = document.activeElement;
-    focusComposer.current = false;
-    sessions.select(id);
-    setDrawer(false);
-  }, [sessions]);
-  // The drawer stays open until zeta has made the session: a refusal (zeta rejects while a turn runs) shows in the
-  // drawer, where the user pressed the button, not in a run hidden behind it.
-  const create = useCallback(() => {
-    focusComposer.current = true;
-    void sessions.create().then(() => {
-      if (sessions.state.createError) { focusComposer.current = false; return; }
-      setDrawer(false);
-    });
-  }, [sessions]);
-  const current = view.sessions.find((session) => session.session_id === (present.open?.id ?? present.selected));
-  useEffect(() => { document.title = current ? `${sessionTitle(current)} · zeta` : "zeta · fulcrum"; }, [current]);
+  const [undelivered, setUndelivered] = useState<ReadonlySet<string>>(() => new Set());
+  const onUndelivered = useCallback((intents: string[]) => {
+    if (intents.length) setUndelivered((current) => new Set([...current, ...intents]));
+  }, []);
+  const newRun = useCallback(async () => {
+    if (store.getState().agent === "running") {
+      if (!confirm("a turn is running. stop it and start a new run?")) return;
+      if (connection.client) await stopTurn(connection.client).catch(() => {});
+    }
+    runs.reset();
+    setUndelivered(new Set());
+    setEpoch((value) => value + 1);
+  }, [connection, runs, store]);
+  const client = state.phase === "connected" ? connection.client : null;
 
   return (
     <HighlightContext value={highlight}>
       <ApprovalModeContext value={{ yolo, setYolo }}>
-      <div className="app" data-drawer={drawer ? "open" : "closed"}>
-        <Sidebar
-          state={state}
-          view={view}
-          sessions={sessions}
-          onSelect={select}
-          onCreate={create}
-          open={drawer}
-          onClose={closeDrawer}
-          footer={<ThemePicker theme={theme} onChange={setTheme} />}
-        />
-        {drawer ? <button type="button" className="scrim" aria-label="close sessions" tabIndex={-1} onClick={closeDrawer} /> : null}
-        <main className="main" inert={drawer || undefined}>
-          <header className="topbar">
-            <button ref={menu} type="button" className="menu" aria-label="sessions" aria-expanded={drawer} aria-controls="sessions" onClick={() => setDrawer(true)}>
-              <span aria-hidden="true" className="menu-icon" />
-            </button>
-            <RunTitle session={current} view={view} />
-            <YoloIndicator className="topbar-yolo" />
-          </header>
-          <Body state={state} view={view} connection={connection} sessions={sessions} opener={runOpener} focusComposer={focusComposer} onCreate={create} onOpenDrawer={() => setDrawer(true)} />
-        </main>
-      </div>
+        <RunProvider store={store} highlight={highlight} onRetry={client && open ? () => client.retrySession(open.id) : undefined}>
+          <Undelivered value={undelivered}>
+            <div className="app">
+              <header className="topbar">
+                <span className="brand"><span className="brand-mark" aria-hidden="true" /><span className="brand-name">gamma</span></span>
+                <RunTitle session={view.session} blank={!sessionPresentation(view.transition).selected} />
+                <YoloIndicator className="topbar-yolo" />
+                <button type="button" className="ghost new-run" onClick={() => void newRun()} disabled={!sessionPresentation(view.transition).selected}>new run</button>
+                <SettingsMenu>
+                  <ThemePicker theme={theme} onChange={setTheme} />
+                  <VimToggle on={vim} onChange={setVim} />
+                </SettingsMenu>
+              </header>
+              <main className="main">
+                <Body state={state} view={view} connection={connection} runs={runs} onNewRun={() => void newRun()} />
+                <Dock key={epoch} state={state} view={view} connection={connection} runs={runs} vim={vim} onUndelivered={onUndelivered} />
+              </main>
+            </div>
+          </Undelivered>
+        </RunProvider>
       </ApprovalModeContext>
     </HighlightContext>
   );
 }
 
-function ConnectionBadge({ state }: { state: ConnectionState }) {
-  const [word, tone] =
-    state.phase === "connected" ? ["connected", "ok"]
-    : state.phase === "connecting" ? [state.lost ? "reconnecting" : "connecting", "busy"]
-    : state.phase === "dropped" ? ["connection lost", "danger"]
-    : state.phase === "not_running" ? ["not running", "danger"]
-    : state.phase === "auth_failed" ? ["auth failed", "danger"]
-    : state.phase === "busy" ? ["in use", "warn"]
-    : ["unsupported", "danger"];
-  return <span className="badge" data-tone={tone} role="status">{word}</span>;
+/** The first prompt of a run zeta has not titled yet. */
+function useFirstPrompt() {
+  const store = useRunStore();
+  return useRun(useCallback((state: ReturnType<typeof store.getState>) => {
+    const first = state.outline.find((item) => item.kind === "user");
+    const item = first && store.getItem(first.id);
+    return item?.type === "user" && item.event.type === "user_message" ? item.event.text.trim().split("\n")[0] || null : null;
+  }, [store]));
 }
 
-function Sidebar({ state, view, sessions, onSelect, onCreate, open, onClose, footer }: {
-  state: ConnectionState; view: SessionsState; sessions: Sessions; onSelect(id: string): void; onCreate(): void; open: boolean; onClose(): void; footer: ReactNode;
-}) {
-  const list = useRef<HTMLUListElement>(null);
-  const rows = useMemo(() => topLevel(view.sessions), [view.sessions]);
-  const present = sessionPresentation(view.transition);
-  const selected = present.open?.id ?? present.selected;
-  // The drawer takes focus when it opens, on the session on screen.
-  useEffect(() => {
-    if (!open) return;
-    (list.current?.querySelector<HTMLElement>("[tabindex='0']") ?? list.current?.closest("aside")?.querySelector<HTMLElement>("button"))?.focus();
-    const escape = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") { event.preventDefault(); onClose(); }
-    };
-    document.addEventListener("keydown", escape);
-    return () => document.removeEventListener("keydown", escape);
-  }, [open, onClose]);
-  const onKey = (event: KeyboardEvent<HTMLElement>) => {
-    if (event.key === "Escape" && open) { event.preventDefault(); onClose(); return; }
-    const buttons = [...(list.current?.querySelectorAll<HTMLButtonElement>("button.session") ?? [])];
-    const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
-    if (index < 0) return;
-    const next = { ArrowDown: index + 1, ArrowUp: index - 1, Home: 0, End: buttons.length - 1 }[event.key];
-    if (next === undefined) return;
-    event.preventDefault();
-    buttons[Math.max(0, Math.min(buttons.length - 1, next))]?.focus();
-  };
-  const focusable = rows.some((row) => row.session_id === selected) ? selected : rows[0]?.session_id;
-  const now = Date.now();
-  return (
-    <aside id="sessions" className="sidebar" onKeyDown={onKey} role={open ? "dialog" : undefined} aria-modal={open || undefined} aria-label="sessions">
-      <div className="brand">
-        <span className="brand-mark" aria-hidden="true" />
-        <span className="brand-name">zeta</span>
-        <span className="brand-sub">fulcrum</span>
-        <ConnectionBadge state={state} />
-      </div>
-      <div className="list-head">
-        <h2>sessions</h2>
-        <span className="count">{rows.length ? rows.length : ""}</span>
-        <button type="button" className="ghost" onClick={() => void sessions.refresh()} disabled={state.phase !== "connected"}>refresh</button>
-        <NewSession state={state} view={view} onCreate={onCreate} className="accent" />
-      </div>
-      <nav className="list" aria-label="sessions" data-catalog-ready={view.listReady ? "true" : "false"}>
-        {view.listError ? <p className="note" data-tone="danger">could not list sessions: {view.listError} <button type="button" className="ghost" onClick={() => void sessions.refresh()}>retry</button></p> : null}
-        {view.createError ? <p className="note" data-tone="danger" role="alert">could not start a session: {view.createError}</p> : null}
-        {view.listLoading ? <p className="note" role="status">{view.listSlow ? "still loading sessions…" : "loading sessions…"}</p> : null}
-        {state.phase === "connected" && !rows.length && !view.listLoading && !view.listError ? <p className="note">no sessions yet. start one with new session.</p> : null}
-        <ul ref={list}>
-          {rows.map((session) => (
-            <SessionRow key={session.session_id} session={session} now={now} selected={session.session_id === selected} focusable={session.session_id === focusable} opening={present.opening?.id === session.session_id || present.openError?.id === session.session_id} server={state.phase === "connected" ? view.server : null} store={state.phase === "connected" && present.open?.id === session.session_id && !present.open.stale ? present.open.lease.store : null} onSelect={onSelect} />
-          ))}
-        </ul>
-        {view.nextOffset !== null ? <button type="button" className="ghost more" onClick={() => void sessions.loadMore()}>load more sessions</button> : null}
-      </nav>
-      <div className="sidebar-foot">{footer}</div>
-    </aside>
-  );
-}
-
-function NewSession({ state, view, onCreate, className }: { state: ConnectionState; view: SessionsState; onCreate(): void; className: string }) {
-  const unavailable = state.phase !== "connected" || view.creating;
-  return (
-    <button type="button" className={className} onClick={() => { if (!unavailable) onCreate(); }} aria-disabled={unavailable || undefined} aria-busy={view.creating || undefined}>
-      {view.creating ? "starting…" : "new session"}
-    </button>
-  );
-}
-
-type RowProps = { session: SessionMeta; now: number; selected: boolean; focusable: boolean; onSelect(id: string): void };
-type RowStatus = "open" | "running" | "approval" | "opening" | null;
-
-/** The open session's row follows its live run; other rows use the server's last `status`. */
-function SessionRow({ server, store, opening, ...row }: RowProps & { server: SessionsState["server"]; store: SessionStore | null; opening: boolean }) {
-  const live = server?.id === row.session.session_id;
-  const status = opening ? "opening" : !live ? null : server.approvals ? "approval" : server.state === "idle" ? "open" : "running";
-  return <Row {...row} status={status} store={store} />;
-}
-
-function LiveStatus() {
-  const status = useRunStatus();
-  const value = status === "idle" ? "open" : status;
-  return <span className="state" data-status={value}>{value === "approval" ? "needs approval" : value}</span>;
-}
-
-function Row({ session, now, selected, focusable, onSelect, status, store }: RowProps & { status: RowStatus; store: SessionStore | null }) {
-  return (
-    <li>
-      <button type="button" className="session" data-status={status ?? undefined} aria-current={selected ? "true" : undefined} tabIndex={focusable ? 0 : -1} onClick={() => onSelect(session.session_id)}>
-        <span className="session-title">{sessionTitle(session)}</span>
-        <span className="session-meta">
-          <time dateTime={session.updated_at} title={new Date(session.updated_at).toLocaleString()}>{ago(session.updated_at, now)}</time>
-          {store ? <RunProvider store={store}><LiveStatus /></RunProvider> : status ? <span className="state" data-status={status}>{status === "approval" ? "needs approval" : status}</span> : null}
-          {session.model ? <span className="model">{session.model}</span> : null}
-        </span>
-      </button>
-    </li>
-  );
-}
-
-function RunTitle({ session, view }: { session: SessionMeta | undefined; view: SessionsState }) {
-  const present = sessionPresentation(view.transition);
-  if (!session) return <div className="run-title"><h1>{present.selected ? "session" : "zeta"}</h1></div>;
+function RunTitle({ session, blank }: { session: SessionMeta | null; blank: boolean }) {
+  const prompt = useFirstPrompt();
+  const title = sessionTitle(session) ?? prompt;
+  useEffect(() => { document.title = title ? `${title} · gamma` : "gamma"; }, [title]);
   return (
     <div className="run-title">
-      <h1 title={sessionTitle(session)}>{sessionTitle(session)}</h1>
-      <p className="run-meta">
-        {present.open?.id === session.session_id && !present.open.stale ? (
-          <RunProvider store={present.open.lease.store}><RunStatus /></RunProvider>
-        ) : null}
-        {session.model ? <span>{session.model}</span> : null}
-        {session.cwd ? <span className="cwd" title={session.cwd}>{session.cwd.replace(/^\/Users\/[^/]+|^\/home\/[^/]+/, "~")}</span> : null}
-      </p>
+      <h1 title={title ?? undefined}>{title ?? (blank ? "new run" : "run")}</h1>
+      {session?.cwd ? <p className="run-meta"><span className="cwd" title={session.cwd}>{session.cwd.replace(/^\/Users\/[^/]+|^\/home\/[^/]+/, "~")}</span></p> : null}
     </div>
   );
 }
 
-/** A run blocked on an approval is waiting for the user, not running. Approvals are few, so this reads only them. */
-function useRunStatus(): "idle" | "running" | "approval" {
+type RunPhase =
+  | { kind: "ready" | "thinking" | "reconnecting" | "connecting" }
+  | { kind: "running"; tool: string }
+  | { kind: "approval" }
+  | { kind: "error"; message: string; retry?: () => void };
+
+/** What the run is doing now, from the store: a pending approval wins over a running tool, which wins over thinking. */
+function useAgentPhase(): { kind: "idle" | "thinking" | "approval" } | { kind: "running"; tool: string } | { kind: "failed"; message: string } {
+  const store = useRunStore();
+  const phase = useRun(useCallback((state: ReturnType<typeof store.getState>) => {
+    if (state.agent !== "running") {
+      const last = state.outline.at(-1);
+      const item = last && store.getItem(last.id);
+      return item?.type === "error" && item.event.type === "error" && item.event.error.code !== "aborted" ? `failed:${item.event.error.message}` : "idle";
+    }
+    if (Object.values(state.toolApprovals).some((id) => { const item = store.getItem(id); return item?.type === "approval" && !item.ended; })) return "approval";
+    const tool = Object.keys(state.activeToolIds).at(-1);
+    const item = tool ? store.getItem(`tool:${tool}`) : undefined;
+    return item?.type === "tool" ? `running:${item.tool_call.name}` : "thinking";
+  }, [store]));
+  if (phase.startsWith("failed:")) return { kind: "failed", message: phase.slice(7) };
+  if (phase.startsWith("running:")) return { kind: "running", tool: phase.slice(8) };
+  return { kind: phase as "idle" | "thinking" | "approval" };
+}
+
+/** Moves focus to the pending approval's first decision, scrolling the run to it first. */
+function focusApproval() {
+  const scroll = document.querySelector<HTMLElement>(".scroll");
+  const find = () => scroll?.querySelector<HTMLElement>('[data-part="approval"][data-state="pending"]');
+  const target = find();
+  if (!target && scroll) scroll.scrollTop = scroll.scrollHeight;
+  requestAnimationFrame(() => {
+    const row = find();
+    row?.scrollIntoView({ block: "center" });
+    row?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus({ preventScroll: true });
+  });
+}
+
+/** One line over the composer: exactly one of ready, thinking, running a tool, waiting for approval, reconnecting, error. */
+function StatusLine({ phase }: { phase: RunPhase }) {
+  const tone = phase.kind === "error" ? "danger" : phase.kind === "approval" ? "warn" : phase.kind === "ready" ? "ok" : "busy";
+  return (
+    <div className="status-line" data-state={phase.kind} data-tone={tone} role="status">
+      {phase.kind === "approval" ? (
+        <button type="button" className="status-link" onClick={focusApproval}>waiting for your approval</button>
+      ) : phase.kind === "error" ? (
+        <>
+          <span className="status-text" title={phase.message}>error · {phase.message}</span>
+          {phase.retry ? <button type="button" className="ghost status-retry" onClick={phase.retry}>retry</button> : null}
+        </>
+      ) : (
+        <span className="status-text">{phase.kind === "running" ? `running ${phase.tool}` : phase.kind === "connecting" ? "connecting…" : phase.kind === "reconnecting" ? "reconnecting…" : phase.kind === "thinking" ? "thinking…" : "ready"}</span>
+      )}
+    </div>
+  );
+}
+
+const connectionError: Partial<Record<ConnectionState["phase"], string>> = {
+  not_running: "zeta serve is not running",
+  auth_failed: "zeta serve refused this page",
+  busy: "zeta serve is in use by another client",
+  incompatible: "unsupported protocol version",
+};
+
+function Dock({ state, view, connection, runs, vim, onUndelivered }: {
+  state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; vim: boolean; onUndelivered(intents: string[]): void;
+}) {
+  const present = sessionPresentation(view.transition);
+  const open = present.open;
+  const blank = !present.selected;
+  const client = state.phase === "connected" ? connection.client : null;
+  const agent = useAgentPhase();
+  const running = agent.kind === "thinking" || agent.kind === "approval" || agent.kind === "running";
+  const { setYolo } = useContext(ApprovalModeContext);
+  // This dock's own first send is starting the run: the composer stays put while zeta creates and opens it.
+  const [starting, setStarting] = useState(false);
+  const delivery = useMemo(() => createDelivery(undefined, (event) => {
+    const store = transitionRun(runs.state.transition)?.lease.store;
+    const deliveryId = event.type === "user_message" && event.delivery_id;
+    if (store && deliveryId && !store.hasMessageDelivery(deliveryId)) store.dispatch(event);
+  }), [runs]);
+  const wasRunning = useRef(running);
+  useEffect(() => {
+    // shortcut: a resend that fails is not shown; upgrade when the composer can take a host-reported error.
+    if (!running && wasRunning.current && client) delivery.turnEnded(client).then(onUndelivered, () => {});
+    wasRunning.current = running;
+  }, [running, client, delivery, onUndelivered]);
+
+  const onSubmit: Submit = useCallback(async (text, images, { steer }) => {
+    const target = connection.client;
+    if (!target) throw new Error("not connected to zeta serve");
+    if (!transitionRun(runs.state.transition)) {
+      setStarting(true);
+      try { await runs.create(nextRunModel()); } finally { setStarting(false); }
+    }
+    const id = transitionRun(runs.state.transition)!.id;
+    if (!images.length) return delivery.submit(target, text, steer);
+    return target.request("send_images", { session_id: id, text, images: images.map(({ name, mime_type, data }) => ({ name, mime_type, data })) }, { timeoutMs: 30_000 });
+  }, [connection, runs, delivery]);
+  const onStop = useCallback(() => (client ? delivery.stop(client) : Promise.reject(new Error("not connected to zeta serve"))), [client, delivery]);
+  const lastPrompt = useLastPrompt();
+
+  const failure = present.openError;
+  const phase: RunPhase =
+    state.phase === "connecting" || state.phase === "dropped" ? { kind: state.phase === "connecting" && !state.lost ? "connecting" : "reconnecting" }
+    : state.phase !== "connected" ? { kind: "error", message: connectionError[state.phase]!, retry: state.phase === "incompatible" ? undefined : () => connection.retryNow() }
+    : failure && !failure.restored ? { kind: "error", message: `could not open this run: ${failure.message}`, retry: () => runs.select(failure.id) }
+    : (present.opening || open?.stale) && !starting ? { kind: "reconnecting" }
+    : agent.kind === "approval" ? { kind: "approval" }
+    : agent.kind === "running" ? { kind: "running", tool: agent.tool }
+    : agent.kind === "thinking" ? { kind: "thinking" }
+    : agent.kind === "failed" ? { kind: "error", message: agent.message, retry: client && lastPrompt ? () => void delivery.submit(client, lastPrompt, false).catch(() => {}) : undefined }
+    : { kind: "ready" };
+
+  const readOnly = !client ? "reconnecting · sending is paused until the server confirms this run"
+    : starting ? null
+    : present.opening || (open && open.stale) ? "opening the run · sending is paused"
+    : failure && !open ? "this run did not open · start a new run or try again"
+    : null;
+  return (
+    <div className="dock">
+      <StatusLine phase={phase} />
+      {readOnly ? (
+        <GammaComposer state="read-only" reason={readOnly} vim={vim} onSubmit={onSubmit} />
+      ) : (
+        <GammaComposer
+          state={running ? "steerable" : "idle"}
+          vim={vim}
+          autoFocus
+          onSubmit={onSubmit}
+          onStop={onStop}
+          footer={<RunSettings client={client} sessionId={blank || starting ? null : open?.id ?? null} onYolo={setYolo} />}
+        />
+      )}
+    </div>
+  );
+}
+
+/** The last prompt the user sent, so a failed turn can be retried with it. */
+function useLastPrompt() {
   const store = useRunStore();
   return useRun(useCallback((state: ReturnType<typeof store.getState>) => {
-    if (state.agent !== "running") return "idle";
-    const waiting = Object.values(state.toolApprovals).some((id) => { const item = store.getItem(id); return item?.type === "approval" && !item.ended; });
-    return waiting ? "approval" : "running";
+    const last = [...state.outline].reverse().find((item) => item.kind === "user");
+    const item = last && store.getItem(last.id);
+    return item?.type === "user" && item.event.type === "user_message" ? item.event.text : null;
   }, [store]));
 }
 
-function RunStatus() {
-  const status = useRunStatus();
-  return <span className="state" data-status={status}>{status === "approval" ? "waiting for approval" : status}</span>;
-}
-
-/** Refreshes the list when a run ends, so times and titles stay current without polling. */
-function RefreshOnIdle({ sessions }: { sessions: Sessions }) {
-  const agent = useRun((state) => state.agent);
-  const prior = useRef(agent);
-  useEffect(() => {
-    if (prior.current === "running" && agent !== "running") void sessions.refresh();
-    prior.current = agent;
-  }, [agent, sessions]);
-  return null;
-}
-
-function sessionName(view: SessionsState, id: string) {
-  const session = view.sessions.find((item) => item.session_id === id);
-  return session ? sessionTitle(session) : "session";
-}
-
-function OpenRunBody({ state, view, connection, sessions, opener, focusComposer }: {
-  state: ConnectionState; view: SessionsState; connection: Connection; sessions: Sessions; opener: React.RefObject<Element | null>; focusComposer: React.RefObject<boolean>;
-}) {
+function Body({ state, view, connection, runs, onNewRun }: { state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; onNewRun(): void }) {
+  const present = sessionPresentation(view.transition);
   const offline = state.phase !== "connected";
-  const present = sessionPresentation(view.transition);
-  const open = present.open!;
-  const replacing = Boolean(present.opening && present.opening.id !== open.id);
-  const failed = present.openError;
-  return (
-    <>
-      {offline ? <ConnectionNotice state={state} connection={connection} compact /> : null}
-      {replacing ? <p className="note" data-tone="busy" role="status">opening {sessionName(view, present.opening!.id)}…</p> : null}
-      {!replacing && !open.history.complete ? <p className="note" data-tone="busy" role="status">loading earlier messages… {open.history.messages.toLocaleString("en")} loaded</p> : null}
-      {!replacing && open.syncing ? <p className="note" data-tone="busy" role="status">live updates paused while this session is busy; it will catch up</p> : null}
-      {failed ? <div className="note" data-tone="danger" role="alert"><span>could not open {sessionName(view, failed.id)}: {failed.message}</span> <button type="button" className="ghost" onClick={() => sessions.dismissOpenError()}>dismiss</button> <button type="button" className="ghost" onClick={() => sessions.select(failed.id)}>try again</button></div> : null}
-      <Run client={offline ? null : connection.client} sessions={sessions} open={open} opener={opener} focusComposer={focusComposer} readOnly={Boolean(replacing || (failed && !failed.restored))} ready={open.id === present.selected && !present.opening} />
-    </>
-  );
-}
-
-function OpeningPanel({ view }: { view: SessionsState }) {
-  const opening = sessionPresentation(view.transition).opening!;
-  return <Panel title={`opening ${sessionName(view, opening.id)}`} tone="busy"><p>loading history{opening.messages ? ` · ${opening.messages.toLocaleString("en")} messages` : ""}</p></Panel>;
-}
-
-function FailurePanel({ view, sessions }: { view: SessionsState; sessions: Sessions }) {
-  const failure = sessionPresentation(view.transition).openError!;
-  const running = view.server?.id && view.server.id !== failure.id ? view.server.id : null;
-  if (!failure.busy) return <Panel title="could not open this session" tone="danger"><p className="mono">{failure.message}</p><div className="actions"><button type="button" className="primary" onClick={() => sessions.select(failure.id)}>try again</button></div></Panel>;
-  return (
-    <Panel title="zeta is busy with another session" tone="warn">
-      <p>zeta serve opens a session only when no turn runs. wait for the running turn to end, or open the running session.</p>
-      <div className="actions">
-        {running ? <button type="button" className="primary" onClick={() => sessions.select(running)}>open the running session</button> : null}
-        <button type="button" className="ghost" onClick={() => sessions.select(failure.id)}>try again</button>
+  if (present.open) {
+    const open = present.open;
+    const failed = present.openError;
+    return (
+      <>
+        {offline && state.phase !== "connecting" && state.phase !== "dropped" ? <ConnectionNotice state={state} connection={connection} compact /> : null}
+        {!open.history.complete ? <p className="note" data-tone="busy" role="status">loading earlier messages… {open.history.messages.toLocaleString("en")} loaded</p> : null}
+        {open.syncing ? <p className="note" data-tone="busy" role="status">live updates paused while this run is busy; it will catch up</p> : null}
+        {failed ? <div className="note" data-tone="danger" role="alert"><span>could not reopen this run: {failed.message}</span> <button type="button" className="ghost" onClick={() => runs.dismissOpenError()}>dismiss</button> <button type="button" className="ghost" onClick={() => runs.select(failed.id)}>try again</button></div> : null}
+        <Run client={offline ? null : connection.client} open={open} readOnly={Boolean(present.opening || (failed && !failed.restored))} />
+      </>
+    );
+  }
+  if (offline && state.phase !== "connecting" && state.phase !== "dropped") return <div className="scroll"><ConnectionNotice state={state} connection={connection} /></div>;
+  // A run this page just created shows the blank note until it opens, not a loading panel.
+  if (present.selected && !present.openError && view.session?.session_id !== present.selected) return <div className="scroll"><Panel title="opening the run" tone="busy"><p>loading history{present.opening?.messages ? ` · ${present.opening.messages.toLocaleString("en")} messages` : ""}</p></Panel></div>;
+  if (present.openError) {
+    const failure = present.openError;
+    return (
+      <div className="scroll">
+        <Panel title={failure.busy ? "zeta is busy with another run" : "could not open this run"} tone={failure.busy ? "warn" : "danger"}>
+          <p className="mono">{failure.busy ? "zeta serve opens a run only when no turn runs. wait for the running turn to end, then try again." : failure.message}</p>
+          <div className="actions">
+            <button type="button" className="primary" onClick={() => runs.select(failure.id)}>try again</button>
+            <button type="button" className="ghost" onClick={onNewRun}>new run</button>
+          </div>
+        </Panel>
       </div>
-    </Panel>
-  );
-}
-
-function EmptyPanel({ state, view, onCreate, onOpenDrawer }: { state: ConnectionState; view: SessionsState; onCreate(): void; onOpenDrawer(): void }) {
-  const any = view.sessions.length > 0;
+    );
+  }
   return (
-    <Panel title={any ? "choose a session" : "start a session"} tone="busy">
-      <p>{any ? "pick a session from the list to follow its run, or start a new one." : "this zeta has no sessions yet. start one to write to zeta."}</p>
-      {view.createError ? <p className="mono" role="alert">could not start a session: {view.createError}</p> : null}
-      <div className="actions">
-        <NewSession state={state} view={view} onCreate={onCreate} className="primary" />
-        {any ? <button type="button" className="ghost only-narrow" onClick={onOpenDrawer}>show sessions</button> : null}
+    <div className="scroll">
+      <div className="empty-run" role="note">
+        <h2>new run</h2>
+        <p>write below to start. zeta creates the run when you send the first message.</p>
       </div>
-    </Panel>
+    </div>
   );
 }
 
-function Body({ state, view, connection, sessions, opener, focusComposer, onCreate, onOpenDrawer }: {
-  state: ConnectionState; view: SessionsState; connection: Connection; sessions: Sessions; opener: React.RefObject<Element | null>; focusComposer: React.RefObject<boolean>; onCreate(): void; onOpenDrawer(): void;
-}) {
-  const present = sessionPresentation(view.transition);
-  if (present.open) return <OpenRunBody state={state} view={view} connection={connection} sessions={sessions} opener={opener} focusComposer={focusComposer} />;
-  if (state.phase !== "connected") return <ConnectionNotice state={state} connection={connection} />;
-  if (present.opening) return <OpeningPanel view={view} />;
-  if (present.openError) return <FailurePanel view={view} sessions={sessions} />;
-  return <EmptyPanel state={state} view={view} onCreate={onCreate} onOpenDrawer={onOpenDrawer} />;
-}
-
-function Run({ client, sessions, open, opener, focusComposer, readOnly, ready }: { client: ZetaClient | null; sessions: Sessions; open: OpenRun; opener: React.RefObject<Element | null>; focusComposer: React.RefObject<boolean>; readOnly: boolean; ready: boolean }) {
+function Run({ client, open, readOnly }: { client: ZetaClient | null; open: OpenRun; readOnly: boolean }) {
   const scroll = useRef<HTMLDivElement>(null);
   const artifacts = useArtifacts(open.id, open.lease.store);
   const [viewer, setViewer] = useState<any>(null);
@@ -405,7 +385,7 @@ function Run({ client, sessions, open, opener, focusComposer, readOnly, ready }:
   const closeViewer = useCallback(() => { setViewer(null); requestAnimationFrame(() => viewerOpener.current?.focus()); }, []);
   useEffect(() => { if (!viewer) return; viewerDialog.current?.focus(); const onKey = (event: globalThis.KeyboardEvent) => { if (event.key === "Escape") closeViewer(); }; addEventListener("keydown", onKey); return () => removeEventListener("keydown", onKey); }, [viewer, closeViewer]);
   const decisions = useMemo(() => {
-    if (!client || open.stale || readOnly) return { disabledReason: readOnly ? "opening another session — decisions are paused" : "reconnecting — decisions are disabled until the server confirms this session" };
+    if (!client || open.stale || readOnly) return { disabledReason: readOnly ? "opening the run — decisions are paused" : "reconnecting — decisions are disabled until the server confirms this run" };
     const decide = (method: "approve" | "deny"): Decide => async (request_id) => {
       try {
         return await client.request(method, { request_id }, { timeoutMs: 15_000 });
@@ -416,35 +396,18 @@ function Run({ client, sessions, open, opener, focusComposer, readOnly, ready }:
     };
     return { approve: decide("approve"), deny: decide("deny") };
   }, [client, open.stale, readOnly]);
-  useLayoutEffect(() => {
-    if (focusComposer.current) {
-      focusComposer.current = false;
-      scroll.current?.parentElement?.querySelector<HTMLTextAreaElement>(".dock textarea")?.focus({ preventScroll: true });
-    } else if (!opener.current?.closest("#sessions") && (document.activeElement === opener.current || document.activeElement === document.body)) scroll.current?.focus({ preventScroll: true });
-  }, [open.lease.store, opener, focusComposer]);
-  const [undelivered, setUndelivered] = useState<ReadonlySet<string>>(() => new Set());
-  const onUndelivered = useCallback((intents: string[]) => {
-    if (intents.length) setUndelivered((current) => new Set([...current, ...intents]));
-  }, []);
   return (
     <Decisions.Provider value={decisions}>
-      <Undelivered value={undelivered}>
-        <ImageViewer.Provider value={openViewer}>
+      <ImageViewer.Provider value={openViewer}>
         <Artifacts.Provider value={artifacts}>
-        <RunProvider store={open.lease.store} highlight={highlight} onRetry={client ? () => client.retrySession(open.id) : undefined}>
-          <RefreshOnIdle sessions={sessions} />
-          {client && !readOnly ? <SettingsBar client={client} /> : null}
-          <div ref={scroll} className="scroll" tabIndex={-1} data-stale={open.stale || undefined} data-run-ready={ready ? "true" : undefined}>
-            <Timeline renderers={renderers} virtual scrollRef={scroll} aria-label="session activity" />
+          <div ref={scroll} className="scroll" tabIndex={-1} data-stale={open.stale || undefined} data-run-ready={readOnly ? undefined : "true"}>
+            <Timeline renderers={renderers} virtual scrollRef={scroll} aria-label="run activity" />
             <ArtifactList anchor={null} />
             <EmptyRun />
           </div>
-          <RunComposer key={open.id} client={open.stale || readOnly ? null : client} store={open.lease.store} onUndelivered={onUndelivered} readOnly={readOnly} />
-        </RunProvider>
         </Artifacts.Provider>
-        </ImageViewer.Provider>
-        {viewer ? <Inspector ref={viewerDialog} value={viewer} onClose={closeViewer} /> : null}
-      </Undelivered>
+      </ImageViewer.Provider>
+      {viewer ? <Inspector ref={viewerDialog} value={viewer} onClose={closeViewer} /> : null}
     </Decisions.Provider>
   );
 }
@@ -481,109 +444,15 @@ const Inspector = forwardRef<HTMLDivElement, { value: any; onClose(): void }>(fu
   </div>;
 });
 
-/** A session with no rows yet says what to do instead of showing a blank run. */
+/** A run with no rows yet says what to do instead of showing a blank transcript. */
 function EmptyRun() {
   const empty = useTimeline().length === 0;
   return empty ? (
     <div className="empty-run" role="note">
-      <h2>empty session</h2>
-      <p>no messages yet. write to zeta below to start a run.</p>
+      <h2>no messages yet</h2>
+      <p>write below to start the first turn.</p>
     </div>
   ) : null;
-}
-
-const offline = () => Promise.reject(new Error("not connected to zeta serve"));
-
-function ModelPicker({ value, models, onChange }: { value: string; models: string[]; onChange(value: string): void }) {
-  const [open, setOpen] = useState(false);
-  const button = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: globalThis.KeyboardEvent) => { if (event.key === "Escape") { setOpen(false); button.current?.focus(); } };
-    addEventListener("keydown", close);
-    return () => removeEventListener("keydown", close);
-  }, [open]);
-  return <div className="model-picker">
-    <span>model</span>
-    <button ref={button} type="button" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen(!open)}>{value || "choose model"}</button>
-    {open ? <div role="listbox" aria-label="model">{models.map((model) => <button type="button" role="option" aria-selected={model === value} key={model} onClick={() => { onChange(model); setOpen(false); button.current?.focus(); }}>{model}</button>)}</div> : null}
-  </div>;
-}
-
-/** Persistent session settings supplied by zeta, not browser-local preferences. */
-function SettingsBar({ client }: { client: ZetaClient }) {
-  const supported = (name: string) => client.features.includes(name);
-  const { setYolo } = useContext(ApprovalModeContext);
-  const [settings, setSettings] = useState<SessionSettings>({});
-  const [models, setModels] = useState<string[]>([]);
-  const [error, setError] = useState("");
-  const load = useCallback(async () => {
-    try {
-      if (supported("session_settings")) {
-        const next = settingModel(await client.request("session_settings"));
-        setSettings(next);
-        setYolo(next.approval_mode === "allow");
-      } else setYolo(false);
-      if (supported("model_catalog")) setModels(catalogModels(await client.request("model_catalog")));
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "settings unavailable"); }
-  }, [client]);
-  useEffect(() => { void load(); const off = client.onClose(() => { setSettings({}); setYolo(false); }); return off; }, [client, load, setYolo]);
-  const change = async (patch: Partial<SessionSettings>) => { setError(""); try { await client.request("set_settings", settingsRequest(settings, patch)); await load(); } catch (cause) { setError(cause instanceof Error ? cause.message : "could not change settings"); } };
-  if (!supported("session_settings") && !supported("model_catalog")) return <p className="note">settings are not supported by this server</p>;
-  const yolo = settings.approval_mode === "allow";
-  return <div className="settings-bar" aria-label="session settings">
-    {supported("model_catalog") && models.length ? <ModelPicker value={settings.model ?? ""} models={models} onChange={(model) => void change({ model })} /> : null}
-    {supported("set_settings") ? <button type="button" className="toggle" aria-pressed={yolo} onClick={() => { if (!yolo && !confirm("allow tools to run automatically in this session?")) return; void change({ approval_mode: yolo ? "ask" : "allow" }); }}>{yolo ? "YOLO · auto-approve tools" : "Ask"}</button> : null}
-    {error ? <span role="alert">{error}</span> : null}
-  </div>;
-}
-
-function RunComposer({ client, store, onUndelivered, readOnly }: { client: ZetaClient | null; store: SessionStore; onUndelivered(intents: string[]): void; readOnly: boolean }) {
-  const running = useRun((state) => state.agent === "running");
-  const [images, setImages] = useState<QueuedImage[]>([]);
-  const imagesRef = useRef<QueuedImage[]>([]);
-  const [imageError, setImageError] = useState("");
-  const addFiles = useCallback(async (files: FileList | File[]) => {
-    let queue = imagesRef.current;
-    for (const file of [...files]) {
-      try { queue = addImage(queue, await readImage(file)); setImageError(""); }
-      catch (error) { setImageError(error instanceof Error ? error.message : "could not add image"); }
-    }
-    imagesRef.current = queue;
-    setImages(queue);
-  }, []);
-  const removeImage = (index: number) => { URL.revokeObjectURL(imagesRef.current[index].url); imagesRef.current = imagesRef.current.filter((_, item) => item !== index); setImages(imagesRef.current); };
-  const delivery = useMemo(() => createDelivery(undefined, (event) => {
-    const deliveryId = event.type === "user_message" && event.delivery_id;
-    if (deliveryId && !store.hasMessageDelivery(deliveryId)) store.dispatch(event);
-  }), [store]);
-  const wasRunning = useRef(running);
-  useEffect(() => {
-    // shortcut: a resend that fails is not shown; upgrade when the composer can take a host-reported error.
-    if (!running && wasRunning.current && client) delivery.turnEnded(client).then(onUndelivered, () => {});
-    wasRunning.current = running;
-  }, [running, client, delivery, onUndelivered]);
-  const onSubmit = useCallback((text: string, { steer }: { steer: boolean }) => {
-    if (!client) return offline();
-    if (!images.length) return delivery.submit(client, text, steer);
-    const request = client.request("send_images", { text, images: images.map(({ name, mime_type, data }) => ({ name, mime_type, data })) });
-    request.then(() => { images.forEach((image) => URL.revokeObjectURL(image.url)); imagesRef.current = []; setImages([]); }, (error) => setImageError(error instanceof Error ? error.message : "could not send images"));
-    return request;
-  }, [client, delivery, images]);
-  const onStop = useCallback(() => (client ? delivery.stop(client) : offline()), [client, delivery]);
-  return (
-    <div className="dock" onPaste={(event) => { const files = [...event.clipboardData.files]; if (files.length) { event.preventDefault(); void addFiles(files); } }} onDrop={(event) => { event.preventDefault(); void addFiles(event.dataTransfer.files); }} onDragOver={(event) => event.preventDefault()}>
-      {images.length ? <div className="image-queue" aria-label="queued images">{images.map((image, index) => <figure key={`${image.name}-${index}`}><img src={image.url} alt={image.name} /><button type="button" onClick={() => removeImage(index)} aria-label={`remove ${image.name}`}>remove</button></figure>)}</div> : null}
-      {imageError ? <p className="note" role="alert">{imageError}</p> : null}
-      {client ? <label className="attach-button">add image<input type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden onChange={(event) => { if (event.target.files) void addFiles(event.target.files); event.currentTarget.value = ""; }} /></label> : null}
-      <YoloIndicator className="composer-yolo" />
-      {client ? (
-        <Composer state={running ? "steerable" : "idle"} label="message zeta" placeholder={running ? "steer the running turn" : "message zeta"} onSubmit={onSubmit} onStop={onStop} />
-      ) : (
-        <Composer state="read-only" reason={readOnly ? "opening another session · sending is paused" : "reconnecting · sending is paused until the server confirms this session"} label="message zeta" onSubmit={onSubmit} />
-      )}
-    </div>
-  );
 }
 
 function Panel({ title, tone, children }: { title: string; tone?: string; children: ReactNode }) {
@@ -663,7 +532,7 @@ function ConnectionNotice({ state, connection, compact = false }: { state: Conne
       break;
     case "incompatible":
       title = "unsupported protocol version";
-      body = <p>this zeta does not speak protocol 1.0 to 1.2. update zeta or fulcrum, then reload.</p>;
+      body = <p>this zeta does not speak protocol 1.0 to 1.2. update zeta or gamma, then reload.</p>;
       break;
   }
   if (compact) {

@@ -23,39 +23,13 @@ export type ServerStatus = {
   pending_approvals_truncated?: boolean;
 };
 
-export const PAGE_SIZE = 100;
-
-/** The name, else the first prompt, else where it ran and a short id, so untitled rows still differ. */
-export const sessionTitle = (session: SessionMeta) =>
-  session.name?.trim() || session.first_message_preview?.trim() ||
-  (session.cwd ? `${session.cwd.split("/").filter(Boolean).at(-1) ?? "/"} · ${session.session_id.slice(0, 8)}` : "untitled session");
-
-/** "now", "4m", "3h", "2d", then a short date. Short, because the list is narrow and scanned, not read. */
-export function ago(iso: string, now: number): string {
-  const then = Date.parse(iso);
-  if (Number.isNaN(then)) return "";
-  const seconds = Math.max(0, Math.round((now - then) / 1000));
-  if (seconds < 60) return "now";
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
-  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h`;
-  if (seconds < 7 * 86_400) return `${Math.floor(seconds / 86_400)}d`;
-  return new Date(then).toLocaleDateString("en", { month: "short", day: "numeric", ...(new Date(then).getFullYear() === new Date(now).getFullYear() ? {} : { year: "numeric" }) });
-}
-
-/** Newest first. Child sessions (workers a session started) are left out; the parent row stands for them. */
-export const topLevel = (sessions: readonly SessionMeta[]) =>
-  sessions.filter((session) => !session.parent_session_id).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
-
-export async function listSessions(client: ZetaClient, offset = 0): Promise<{ sessions: SessionMeta[]; nextOffset: number | null }> {
-  const paged = client.features.includes("list_sessions_paging");
-  const result = (await client.request("list_sessions", paged ? { offset, limit: PAGE_SIZE } : {})) as { sessions?: SessionMeta[]; next_offset?: number | null };
-  return { sessions: result.sessions ?? [], nextOffset: paged ? result.next_offset ?? null : null };
-}
+/** The name, else the first prompt; null when zeta has neither yet. */
+export const sessionTitle = (session: SessionMeta | null) => session?.name?.trim() || session?.first_message_preview?.trim() || null;
 
 export const getStatus = (client: ZetaClient, signal?: AbortSignal) => client.request("status", {}, { timeoutMs: 15_000, signal }) as Promise<ServerStatus>;
 
 export type OpenProgress = (messages: number, complete: boolean) => void;
-export type OpenResult = { lease: SessionLease; syncing: boolean; complete: Promise<{ lease?: SessionLease; syncing: boolean }> };
+export type OpenResult = { lease: SessionLease; session: SessionMeta | null; syncing: boolean; complete: Promise<{ lease?: SessionLease; syncing: boolean }> };
 
 type HistoryPage = { messages?: unknown[]; next_offset?: number | null };
 const isApprovalEvent = (event: RunEvent) => event.type === "approval_request" || event.type === "approval_end";
@@ -229,7 +203,7 @@ export async function openSession(
       throw error;
     }
   })();
-  return { lease, syncing: initialStatus.state !== "idle", complete };
+  return { lease, session: initialStatus.session, syncing: initialStatus.state !== "idle", complete };
 }
 
 export const isBusyError = (error: unknown) => (error as { code?: unknown } | null)?.code === -32004;
@@ -290,19 +264,10 @@ export const sessionPresentation = (transition: SessionTransition) => {
   };
 };
 
-export type SessionsState = {
-  sessions: SessionMeta[];
-  nextOffset: number | null;
-  listError: string | null;
-  listLoading: boolean;
-  listSlow: boolean;
-  listReady: boolean;
-  /** The server's own session from `status` and what it is doing. */
-  server: { id: string | null; state: ServerStatus["state"]; approvals: number } | null;
+export type RunState = {
   transition: SessionTransition;
-  /** A `new_session` in flight, and why the last one failed. */
-  creating: boolean;
-  createError: string | null;
+  /** zeta's metadata for the run on screen: its title, model, and cwd. Null for a blank run. */
+  session: SessionMeta | null;
 };
 
 type Source = { readonly client: ZetaClient | null; subscribe(listener: () => void): () => void };
@@ -310,58 +275,20 @@ type Source = { readonly client: ZetaClient | null; subscribe(listener: () => vo
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 /**
- * Session list and selection over a connection. On every connect it reloads the list and reopens the selected
- * session, or the server's own session when nothing is selected. The newest `select` wins; leases of abandoned
- * opens are released.
+ * The one run the page shows, over a connection. On every connect it reopens the selected run; with none selected the
+ * page is a blank run until `create`, and the server's own session is never opened on its own. The newest open wins;
+ * leases of abandoned opens are released.
  */
-export function createSessions(connection: Source, { selected = null, onSelect, bindings }: { selected?: string | null; onSelect?: (id: string) => void; bindings?: HostBindings } = {}) {
-  let state: SessionsState = { sessions: [], nextOffset: null, listError: null, listLoading: false, listSlow: false, listReady: false, server: null, transition: { kind: "idle", selected }, creating: false, createError: null };
+export function createRun(connection: Source, { selected = null, onSelect, bindings }: { selected?: string | null; onSelect?: (id: string | null) => void; bindings?: HostBindings } = {}) {
+  let state: RunState = { transition: { kind: "idle", selected }, session: null };
   const listeners = new Set<() => void>();
-  const set = (patch: Partial<SessionsState>) => { state = { ...state, ...patch }; listeners.forEach((listener) => listener()); };
+  const set = (patch: Partial<RunState>) => { state = { ...state, ...patch }; listeners.forEach((listener) => listener()); };
   const transition = (event: TransitionEvent) => set({ transition: reduceSessionTransition(state.transition, event) });
   let client: ZetaClient | null = null;
   let openGeneration = 0;
   let openAbort: AbortController | null = null;
   const live = (target: ZetaClient) => client === target;
-
-  type Catalog = { client: ZetaClient; inFlight: Promise<void> | null; slowTimer: ReturnType<typeof setTimeout> | null };
-  let catalog: Catalog | null = null;
-  const localSessions = new Map<string, { session: SessionMeta; createdGeneration: number }>();
-  let listGeneration = 0;
-  const currentCatalog = (owner: Catalog) => catalog === owner;
-  const retireCatalog = () => {
-    const timer = catalog?.slowTimer;
-    if (timer !== null && timer !== undefined) clearTimeout(timer);
-    catalog = null;
-  };
-  const refresh = async () => {
-    const owner = catalog;
-    if (!owner) return;
-    if (owner.inFlight) return owner.inFlight;
-    const generation = ++listGeneration;
-    set({ listLoading: true, listSlow: false, listError: null, listReady: false });
-    owner.slowTimer = setTimeout(() => { if (currentCatalog(owner)) set({ listSlow: true }); }, 5_000);
-    owner.inFlight = (async () => {
-      try {
-        const list = await listSessions(owner.client);
-        if (!currentCatalog(owner)) return;
-        const visible = new Map(list.sessions.map((session) => [session.session_id, session]));
-        for (const [id, local] of localSessions) {
-          if (local.createdGeneration < generation) localSessions.delete(id);
-          else if (!visible.has(id)) visible.set(id, local.session);
-        }
-        set({ sessions: [...visible.values()], nextOffset: list.nextOffset, listError: null, listReady: true });
-      } catch (error) {
-        if (currentCatalog(owner)) set({ listError: message(error) });
-      } finally {
-        if (owner.slowTimer !== null) clearTimeout(owner.slowTimer);
-        owner.slowTimer = null;
-        owner.inFlight = null;
-        if (currentCatalog(owner)) set({ listLoading: false, listSlow: false });
-      }
-    })();
-    return owner.inFlight;
-  };
+  const register = (target: ZetaClient, id?: string) => bindings && target.features.includes("session_host_commands") ? bindings.register(id) : undefined;
 
   const open = async (id: string, knownStatus?: ServerStatus) => {
     const target = client;
@@ -375,16 +302,15 @@ export function createSessions(connection: Source, { selected = null, onSelect, 
     const previousId = previous?.id !== id ? previous?.id : null;
     try {
       let history = { messages: 0, complete: false };
-      const registration = bindings && target.features.includes("session_host_commands") ? await bindings.register(id) : undefined;
       const opened = await openSession(target, id, (messages, complete) => {
         history = { messages, complete };
         if (mine !== openGeneration) return;
         transition({ type: "progress", id, messages });
-      }, abort.signal, knownStatus, registration);
-      if (!state.listLoading && !state.listReady) void refresh();
+      }, abort.signal, knownStatus, await register(target, id));
       const { lease } = opened;
       if (mine !== openGeneration || !live(target)) return lease.release();
       previous?.lease.release();
+      if (opened.session) set({ session: opened.session });
       transition({ type: "opened", run: { id, lease, stale: false, history, syncing: opened.syncing } });
       void opened.complete.then((result) => {
         if (mine !== openGeneration || !live(target)) return result.lease?.release();
@@ -405,7 +331,7 @@ export function createSessions(connection: Source, { selected = null, onSelect, 
       let restored = false;
       if (previousId) {
         try {
-          const binding = bindings && target.features.includes("session_host_commands") ? await bindings.register(previousId) : undefined;
+          const binding = await register(target, previousId);
           await target.request("resume", { session_id: previousId, ...(binding ? { host_commands: [binding.command] } : {}) }, { timeoutMs: 30_000 });
           restored = true;
         } catch { /* keep the retained run read-only with an explicit reopen action */ }
@@ -426,40 +352,26 @@ export function createSessions(connection: Source, { selected = null, onSelect, 
     }
   };
   const disconnect = (disconnected: ZetaClient | null) => {
-    retireCatalog();
-    set({ listLoading: false, listSlow: false, listReady: false });
     openGeneration++;
     openAbort?.abort();
     markApprovalsReconnecting(disconnected);
     transition({ type: "stale" });
   };
-  const loadConnection = async (target: ZetaClient) => {
+  const connect = async (target: ZetaClient) => {
+    const id = transitionSelected(state.transition);
+    if (!id) return;
     try {
       const status = await getStatus(target);
-      if (!live(target)) return;
-      set({ server: { id: status.session?.session_id ?? null, state: status.state, approvals: status.pending_approvals?.length ?? 0 } });
-      const id = transitionSelected(state.transition) ?? status.session?.session_id ?? null;
-      if (id) {
-        await open(id, status);
-        if (!live(target)) return;
-      } else void refresh();
+      if (live(target)) await open(id, status);
     } catch (error) {
-      if (!live(target)) return;
-      const id = transitionSelected(state.transition) ?? "";
-      transition({ type: "failed", id, error: { id, message: message(error), busy: isBusyError(error) } });
+      if (live(target)) transition({ type: "failed", id, error: { id, message: message(error), busy: isBusyError(error) } });
     }
-  };
-  const connect = (target: ZetaClient) => {
-    retireCatalog();
-    catalog = { client: target, inFlight: null, slowTimer: null };
-    set({ listLoading: false, listSlow: false, listReady: false, listError: null });
-    void loadConnection(target);
   };
   const onConnection = () => {
     if (connection.client === client) return;
     const disconnected = client;
     client = connection.client;
-    if (client) connect(client);
+    if (client) void connect(client);
     else disconnect(disconnected);
   };
   const unsubscribe = connection.subscribe(onConnection);
@@ -468,50 +380,46 @@ export function createSessions(connection: Source, { selected = null, onSelect, 
   return {
     get state() { return state; },
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    /** Opens `id` again, for a retry after a failed open. */
     select(id: string) {
       const run = transitionRun(state.transition);
       if (id === transitionSelected(state.transition) && ((state.transition.kind === "opening" || state.transition.kind === "replacing") || (run?.id === id && !run.stale))) return;
       onSelect?.(id);
       void open(id);
     },
-    refresh,
     dismissOpenError() { transition({ type: "dismiss" }); },
-    /** Starts a session with zeta's `new_session` (which makes it the server's own), then opens it. */
-    async create() {
+    /**
+     * Starts the run with zeta's `new_session` (which makes it the server's own) and opens it. `model` and `provider`
+     * pick the model the first turn uses. Rejects with zeta's error, so the composer keeps the draft and says why.
+     */
+    async create(choice: { model?: string; provider?: string } = {}) {
       const target = client;
-      if (!target || state.creating) return;
-      set({ creating: true, createError: null });
-      try {
-        const binding = bindings && target.features.includes("session_host_commands") ? await bindings.register() : undefined;
-        const { session } = (await target.request("new_session", binding ? { host_commands: [binding.command] } : {}, { timeoutMs: 30_000 })) as { session: SessionMeta };
-        if (binding) await bindings!.bind(binding.registration_id, session.session_id);
-        if (!live(target)) return set({ creating: false });
-        localSessions.set(session.session_id, { session, createdGeneration: listGeneration });
-        set({ creating: false, sessions: [session, ...state.sessions.filter((item) => item.session_id !== session.session_id)] });
-        onSelect?.(session.session_id);
-        await open(session.session_id);
-        void refresh();
-      } catch (error) {
-        set({ creating: false, createError: live(target) ? message(error) : null });
-      }
+      if (!target) throw new Error("not connected to zeta serve");
+      const binding = await register(target);
+      const { session } = (await target.request("new_session", { ...choice, ...(binding ? { host_commands: [binding.command] } : {}) }, { timeoutMs: 30_000 })) as { session: SessionMeta };
+      if (binding) await bindings!.bind(binding.registration_id, session.session_id);
+      if (!live(target)) throw new Error("the connection dropped while the run started");
+      set({ session });
+      onSelect?.(session.session_id);
+      await open(session.session_id);
+      const failure = state.transition.kind === "failed" ? state.transition.error : null;
+      if (failure) throw new Error(failure.message);
+      return session.session_id;
     },
-    async loadMore() {
-      const target = client;
-      if (!target || state.nextOffset === null) return;
-      try {
-        const page = await listSessions(target, state.nextOffset);
-        if (live(target)) set({ sessions: [...state.sessions, ...page.sessions], nextOffset: page.nextOffset });
-      } catch (error) {
-        if (live(target)) set({ listError: message(error) });
-      }
+    /** Back to a blank run: the next send starts a new session. */
+    reset() {
+      openGeneration++;
+      openAbort?.abort();
+      transitionRun(state.transition)?.lease.release();
+      onSelect?.(null);
+      set({ transition: { kind: "idle", selected: null }, session: null });
     },
     dispose() {
       unsubscribe();
-      retireCatalog();
       openGeneration++;
       openAbort?.abort();
       transitionRun(state.transition)?.lease.release();
     },
   };
 }
-export type Sessions = ReturnType<typeof createSessions>;
+export type RunControl = ReturnType<typeof createRun>;

@@ -123,13 +123,27 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
   let aborts = 0;
   let chat: { session: string; steers: string[]; aborted: boolean } | null = null;
   type Send = (event: Json) => void;
-  const chatTurn = async (session: string, send: Send) => {
+  const chatTurn = async (session: string, send: Send, prompt: string) => {
     const turn = { session, steers: [] as string[], aborted: false }; // steers holds delivery ids
     chat = turn;
     running.set(true);
     const e = (event: string, body: Json = {}) => { if (!turn.aborted) send({ event, session_id: session, ...body }); };
     e("agent_start");
     e("turn_start", { data: { turn: sent.length } });
+    const finish = () => { e("turn_end", { data: { turn: sent.length } }); chat = null; running.set(false); e("agent_end"); };
+    // Prompts that steer the scripted turn, for the status line: a provider failure, and a slow tool call.
+    if (prompt.includes("fail this turn")) {
+      await wait(200);
+      e("error", { error: { code: "provider_error", message: "the provider is overloaded (529)" } });
+      return finish();
+    }
+    if (prompt.includes("use a tool")) {
+      const call = { id: `chat-tool-${sent.length}`, name: "bash", arguments: { command: "sleep 2" } };
+      e("tool_start", { tool_call: call, data: {} });
+      await wait(2000);
+      if (turn.aborted) return;
+      e("tool_end", { tool_call: call, tool_result: result(call.id, "", { structured_content: { exit_code: 0, stdout: "", stderr: "" } }), data: {} });
+    }
     let reply = "";
     for (const word of "Reading the files you named, then running the focused tests before the full suite. ".repeat(3).match(/\S+\s*/g)!) {
       await wait(Number(process.env.FAKE_ZETA_WORD_MS ?? 60));
@@ -146,7 +160,9 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
     running.set(false);
     e("agent_end");
   };
-  const deliver = (method: "send" | "steer", params: Json, active: string | null, send: Send): Json => {
+  const deliver = (requested: "send" | "steer" | "send_images", params: Json, active: string | null, send: Send): Json => {
+    const method = requested === "steer" ? "steer" : "send";
+    const images = requested === "send_images" ? (params.images as Json[]) : [];
     const delivery = typeof params.delivery_id === "string" ? params.delivery_id : null;
     const seen = delivery ? deliveries.get(delivery) : undefined;
     if (seen) return { result: statuses.get(delivery!) === "dropped" ? { accepted: false, duplicate: true, status: "dropped" } : { ...seen, duplicate: true } };
@@ -155,13 +171,13 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
     if (method === "steer" && !running.get()) return { error: { code: -32005, message: "no turn is running for steering" } };
     const value = String(params.text ?? "");
     sent.push({ method, text: value, delivery_id: delivery });
-    send({ event: "user_message", session_id: active, text: value, mode: method, attachments: [], ...(delivery ? { delivery_id: delivery } : {}) });
+    send({ event: "user_message", session_id: active, text: value, mode: method, attachments: images.map((image) => ({ name: image.name, mime_type: image.mime_type, size: Math.floor(String(image.data).length * 3 / 4) })), ...(delivery ? { delivery_id: delivery } : {}) });
     const accepted = method === "send" ? { accepted: true, session_id: active } : { accepted: true };
     if (delivery) { deliveries.set(delivery, accepted); statuses.set(delivery, method === "steer" ? "queued" : "delivered"); }
     if (method === "steer") { if (delivery) chat?.steers.push(delivery); return { result: accepted }; }
     histories[active] = [...(histories[active] ?? []), { id: `sent-${sent.length}`, role: "user", content: [text(value)], ...(delivery ? { delivery_id: delivery } : {}), tool_result: null }];
     // After the reply, as zeta starts the turn once the send is persisted.
-    queueMicrotask(() => void chatTurn(active, send));
+    queueMicrotask(() => void chatTurn(active, send, value));
     return { result: accepted };
   };
   const abort = (send: Send): Json => {
@@ -184,7 +200,7 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
     get aborts() { return aborts; },
     /** The reply body for a composer method, or undefined for any other method. */
     handle(method: string, params: Json, active: string | null, send: Send): Json | undefined {
-      if (method === "send" || method === "steer") return deliver(method, params, active, send);
+      if (method === "send" || method === "steer" || method === "send_images") return deliver(method, params, active, send);
       if (method === "abort") return abort(send);
       if (method !== "delivery_status") return undefined;
       const status = statuses.get(String(params.delivery_id));
@@ -370,7 +386,12 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           }
           return;
         }
-        if (method === "model_catalog") return reply({ result: { models: ["claude-opus-4-6", "gpt-5.1-codex"] } });
+        // As in zeta (server/ergonomics.py `active`): these name the active session or fail.
+        if (["model_catalog", "session_settings", "set_settings", "send_images"].includes(method)) {
+          if (typeof params.session_id !== "string" || !params.session_id) return reply({ error: { code: -32602, message: "session_id must be a nonempty string" } });
+          if (params.session_id !== active) return reply({ error: { code: -32003, message: "session is not active" } });
+        }
+        if (method === "model_catalog") return reply({ result: { models: ["claude-opus-4-6", "gpt-5.1-codex"], providers: { "claude-opus-4-6": "claude", "gpt-5.1-codex": "codex" } } });
         if (method === "session_settings") return reply({ result: settings });
         if (method === "set_settings") {
           settings = { model: String(params.model), approval_mode: params.approval_mode as "ask" | "allow" | "deny" };
@@ -378,7 +399,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         }
         if (method === "send_images") {
           imageSends.push(params);
-          return reply({ result: { accepted: true, delivery_id: crypto.randomUUID() } });
+          const handled = composer.handle("send_images", params, active, send);
+          return reply(handled!);
         }
         if (method === "approve" || method === "deny") {
           decisions.push({ method, ...params });
