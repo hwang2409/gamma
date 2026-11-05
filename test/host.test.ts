@@ -26,6 +26,7 @@ describe("host store", () => {
     const path = await root(); const store = new HostStore(path); await store.ready(); store.mint("one");
     await expect(store.create("one", { bytes: png, mediaType: "application/octet-stream" })).rejects.toMatchObject({ code: "unsupported_media_type" });
     await expect(store.create("one", { bytes: new TextEncoder().encode("not png"), mediaType: "image/png" })).rejects.toMatchObject({ code: "invalid_content" });
+    await expect(store.create("one", { bytes: new TextEncoder().encode("<svg><path></svg"), mediaType: "image/svg+xml" })).rejects.toMatchObject({ code: "invalid_content" });
     await expect(store.create("one", { bytes: new Uint8Array(ITEM_LIMIT + 1), mediaType: "text/plain" })).rejects.toMatchObject({ code: "item_too_large" });
     store.db.run("INSERT INTO artifacts VALUES ('a', 'one', 1, 'text/plain', ?, NULL, NULL, ?, NULL, 'unused')", [SESSION_LIMIT, new Date().toISOString()]);
     await expect(store.create("one", { bytes: new Uint8Array([1]), mediaType: "text/plain" })).rejects.toMatchObject({ code: "session_quota_exceeded" });
@@ -39,11 +40,15 @@ describe("host http interface", () => {
     try {
       const unauthorized = await fetch(`${host.url}/api/artifacts`); expect(unauthorized.status).toBe(401); expect(await unauthorized.json()).toEqual({ error: { code: "unauthorized", message: "invalid bearer token" } });
       const foreignOrigin = await fetch(`${host.url}/api/artifacts`, { headers: { Authorization: `Bearer ${session.token}`, Origin: "http://evil.test" } }); expect(foreignOrigin.status).toBe(403);
+      const foreignHost = await fetch(`${host.url}/api/artifacts`, { headers: { Authorization: `Bearer ${session.token}`, Host: "evil.test" } }); expect(foreignHost.status).toBe(403);
       const pathAttempt = await fetch(`${host.url}/api/render`, { method: "POST", headers: { Authorization: `Bearer ${session.token}`, "Content-Type": "application/json" }, body: JSON.stringify({ path: "/private/secret.png" }) });
       expect(pathAttempt.status).toBe(201); // JSON is content; the server does not interpret its `path` field.
       expect(host.store.list("one")).toHaveLength(1);
       const upload = await fetch(`${host.url}/api/render`, { method: "POST", headers: { Authorization: `Bearer ${session.token}`, "Content-Type": "image/png", "X-Gamma-Title": "chart" }, body: png });
       expect(upload.status).toBe(201); expect((await upload.json() as any).title).toBe("chart");
+      for (let index = 0; index < 28; index++) await fetch(`${host.url}/api/render`, { method: "POST", headers: { Authorization: `Bearer ${session.token}`, "Content-Type": "application/octet-stream" }, body: "x" });
+      const limited = await fetch(`${host.url}/api/render`, { method: "POST", headers: { Authorization: `Bearer ${session.token}`, "Content-Type": "text/plain" }, body: "x" });
+      expect(limited.status).toBe(429); expect(await limited.json()).toEqual({ error: { code: "rate_limited", message: "write rate exceeded" } });
     } finally { host.stop(); }
   });
 });

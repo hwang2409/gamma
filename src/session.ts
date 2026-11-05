@@ -1,5 +1,7 @@
 import { fromZetaEvent, fromZetaHistory, type SessionLease, type ZetaClient } from "@fulcrum/zeta";
 import type { RunEvent } from "@fulcrum/core";
+import type { hostBindings, Registration } from "./host-client";
+type HostBindings = typeof hostBindings;
 
 /** The `SessionMetadata` fields this app reads from `list_sessions` (zeta docs/serve-protocol.md). */
 export type SessionMeta = {
@@ -96,6 +98,7 @@ export async function openSession(
   progress?: OpenProgress,
   signal?: AbortSignal,
   knownStatus?: ServerStatus,
+  registration?: Registration,
 ): Promise<OpenResult> {
   if (client.features.includes("session_replay_seq")) throw new Error("session_replay_seq needs the sequence replay coordinator");
   const approvalReconnect = client.features.includes("approval_reconnect");
@@ -176,7 +179,10 @@ export async function openSession(
     }
     firstLoad = false;
     const before = knownStatus ?? await getStatus(client, activeSignal);
-    if (before.session?.session_id === id) initialStatus = before;
+    if (registration) {
+      const resumed = await client.request("resume", { session_id: id, host_commands: [registration.command] }, { timeoutMs: 30_000, signal: activeSignal }) as { session?: SessionMeta };
+      initialStatus = before.session?.session_id === id ? before : { session: resumed.session ?? null, state: "idle", pending_approvals: [] };
+    } else if (before.session?.session_id === id) initialStatus = before;
     else {
       const resumed = await client.request("resume", { session_id: id }, { timeoutMs: 30_000, signal: activeSignal }) as { session?: SessionMeta };
       initialStatus = { session: resumed.session ?? null, state: "idle", pending_approvals: [] };
@@ -308,7 +314,7 @@ const message = (error: unknown) => (error instanceof Error ? error.message : St
  * session, or the server's own session when nothing is selected. The newest `select` wins; leases of abandoned
  * opens are released.
  */
-export function createSessions(connection: Source, { selected = null, onSelect }: { selected?: string | null; onSelect?: (id: string) => void } = {}) {
+export function createSessions(connection: Source, { selected = null, onSelect, bindings }: { selected?: string | null; onSelect?: (id: string) => void; bindings?: HostBindings } = {}) {
   let state: SessionsState = { sessions: [], nextOffset: null, listError: null, listLoading: false, listSlow: false, listReady: false, server: null, transition: { kind: "idle", selected }, creating: false, createError: null };
   const listeners = new Set<() => void>();
   const set = (patch: Partial<SessionsState>) => { state = { ...state, ...patch }; listeners.forEach((listener) => listener()); };
@@ -369,11 +375,12 @@ export function createSessions(connection: Source, { selected = null, onSelect }
     const previousId = previous?.id !== id ? previous?.id : null;
     try {
       let history = { messages: 0, complete: false };
+      const registration = bindings && target.features.includes("session_host_commands") ? await bindings.register(id) : undefined;
       const opened = await openSession(target, id, (messages, complete) => {
         history = { messages, complete };
         if (mine !== openGeneration) return;
         transition({ type: "progress", id, messages });
-      }, abort.signal, knownStatus);
+      }, abort.signal, knownStatus, registration);
       if (!state.listLoading && !state.listReady) void refresh();
       const { lease } = opened;
       if (mine !== openGeneration || !live(target)) return lease.release();
@@ -398,7 +405,8 @@ export function createSessions(connection: Source, { selected = null, onSelect }
       let restored = false;
       if (previousId) {
         try {
-          await target.request("resume", { session_id: previousId }, { timeoutMs: 30_000 });
+          const binding = bindings && target.features.includes("session_host_commands") ? await bindings.register(previousId) : undefined;
+          await target.request("resume", { session_id: previousId, ...(binding ? { host_commands: [binding.command] } : {}) }, { timeoutMs: 30_000 });
           restored = true;
         } catch { /* keep the retained run read-only with an explicit reopen action */ }
       }
@@ -474,7 +482,9 @@ export function createSessions(connection: Source, { selected = null, onSelect }
       if (!target || state.creating) return;
       set({ creating: true, createError: null });
       try {
-        const { session } = (await target.request("new_session", {}, { timeoutMs: 30_000 })) as { session: SessionMeta };
+        const binding = bindings && target.features.includes("session_host_commands") ? await bindings.register() : undefined;
+        const { session } = (await target.request("new_session", binding ? { host_commands: [binding.command] } : {}, { timeoutMs: 30_000 })) as { session: SessionMeta };
+        if (binding) await bindings!.bind(binding.registration_id, session.session_id);
         if (!live(target)) return set({ creating: false });
         localSessions.set(session.session_id, { session, createdGeneration: listGeneration });
         set({ creating: false, sessions: [session, ...state.sessions.filter((item) => item.session_id !== session.session_id)] });

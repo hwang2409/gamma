@@ -19,7 +19,8 @@ const validSignature = (type: string, bytes: Uint8Array) => {
   if (type === "application/pdf") return new TextDecoder().decode(bytes.subarray(0, 5)) === "%PDF-";
   if (type === "image/svg+xml") {
     const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes).trim();
-    return /^<\?xml[\s\S]*?\?>\s*<svg(?:\s|>)/i.test(text) || /^<svg(?:\s|>)/i.test(text);
+    const root = text.replace(/^<\?xml[\s\S]*?\?>\s*/i, "");
+    return !/<!DOCTYPE|<!ENTITY/i.test(root) && /^<svg(?:\s|>)/i.test(root) && (/<\/svg>\s*$/i.test(root) || /<svg\b[^>]*\/>\s*$/i.test(root));
   }
   return true;
 };
@@ -67,7 +68,9 @@ export class HostStore {
     const mediaType = normalizeType(input.mediaType);
     if (!mediaType) throw Object.assign(new Error("unsupported content type"), { code: "unsupported_media_type", status: 415 });
     if (input.bytes.byteLength > ITEM_LIMIT) throw Object.assign(new Error("item exceeds 25 MiB"), { code: "item_too_large", status: 413 });
-    if (!validSignature(mediaType, input.bytes)) throw Object.assign(new Error("content does not match its media type"), { code: "invalid_content", status: 400 });
+    let signatureValid = false;
+    try { signatureValid = validSignature(mediaType, input.bytes); } catch { /* invalid UTF-8 SVG */ }
+    if (!signatureValid) throw Object.assign(new Error("content does not match its media type"), { code: "invalid_content", status: 400 });
     if (input.title !== undefined && (input.title.trim().length < 1 || input.title.length > 200)) throw Object.assign(new Error("title must be 1 to 200 characters"), { code: "invalid_title", status: 400 });
     const total = (this.db.query("SELECT COALESCE(SUM(size), 0) total FROM artifacts WHERE session_id = ?").get(sessionId) as { total: number }).total;
     if (total + input.bytes.byteLength > SESSION_LIMIT) throw Object.assign(new Error("session exceeds 100 MiB"), { code: "session_quota_exceeded", status: 413 });

@@ -19,7 +19,8 @@ const rate = (key: string, kind: "writes" | "reads", limit: number) => {
 const safeName = (value: string | null) => value?.replace(/[^A-Za-z0-9._ -]/g, "_").slice(0, 120) || "artifact";
 
 export async function startHost(options: { root?: string; appOrigin: string; port?: number } ) {
-  const root = options.root ?? join(process.env.HOME!, ".gamma", "sessions");
+  const home = process.env.GAMMA_HOME ?? join(process.env.HOME!, ".gamma");
+  const root = options.root ?? join(home, "sessions");
   await mkdir(root, { recursive: true, mode: 0o700 });
   const store = new HostStore(root); await store.ready();
   store.db.run("DELETE FROM sessions"); // capabilities are process-local and rotate on every gamma restart
@@ -28,7 +29,7 @@ export async function startHost(options: { root?: string; appOrigin: string; por
   const server = Bun.serve({ hostname: "127.0.0.1", port: options.port ?? 0, maxRequestBodySize: 25 * 1024 * 1024 + 64 * 1024, async fetch(request) {
     try {
       const target = new URL(request.url);
-      if (request.headers.get("host") !== target.host) return failure(Object.assign(new Error("invalid host"), { code: "invalid_host", status: 403 }));
+      if (request.headers.get("host") !== new URL(url).host) return failure(Object.assign(new Error("invalid host"), { code: "invalid_host", status: 403 }));
       const origin = request.headers.get("origin");
       if (origin && origin !== options.appOrigin) return failure(Object.assign(new Error("invalid origin"), { code: "invalid_origin", status: 403 }));
       const app = request.headers.get("x-gamma-app-token") === appToken;
@@ -73,8 +74,9 @@ export async function startHost(options: { root?: string; appOrigin: string; por
     } catch (error) { return failure(error); }
   }});
   url = `http://127.0.0.1:${server.port}`;
-  const discoveryDir = join(process.env.HOME!, ".gamma"); await mkdir(discoveryDir, { recursive: true, mode: 0o700 });
+  const discoveryDir = options.root ?? home; await mkdir(discoveryDir, { recursive: true, mode: 0o700 });
   const discovery = join(discoveryDir, "api.json"); await writeFile(discovery, JSON.stringify({ url, pid: process.pid, cli: resolve(new URL("../../bin/gamma", import.meta.url).pathname) }) + "\n", { mode: 0o600 }); await chmod(discovery, 0o600);
+  const control = join(discoveryDir, "control.json"); await writeFile(control, JSON.stringify({ url, pid: process.pid, app_origin: options.appOrigin, app_token: appToken }) + "\n", { mode: 0o600 }); await chmod(control, 0o600);
   return { url, appToken, store, stop() { server.stop(true); store.close(); } };
 }
 

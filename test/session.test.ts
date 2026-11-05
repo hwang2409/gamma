@@ -490,3 +490,32 @@ test("a failed create keeps the current session and says why", async () => {
   expect(view.state.createError).toBe("a turn is already running");
   expect(present(view).open?.id).toBe("b");
 });
+
+test("host commands are rebound on attach, reconnect, resume, and new session", async () => {
+  let generation = 0;
+  const bound: Array<[string, string]> = [];
+  const bindings = {
+    register: async (sessionId?: string) => {
+      const token = `token-${++generation}`;
+      return { registration_id: sessionId ?? `pending-${generation}`, command: { name: "gamma" as const, executable: "/gamma/bin/gamma", summary: "web commands", environment: { GAMMA_API_URL: "http://127.0.0.1:1/api", GAMMA_API_TOKEN: token } } };
+    },
+    bind: async (registrationId: string, sessionId: string) => { bound.push([registrationId, sessionId]); },
+  };
+  const first = await server({ ...handlers("b"), new_session: () => ({ session: meta("new", "z") }) }, ["session_host_commands"]);
+  const connection = source(first.client);
+  const view = createSessions(connection, { bindings });
+  await tick();
+  expect(first.calls.find(([method]) => method === "resume")?.[1]).toMatchObject({ session_id: "b", host_commands: [{ name: "gamma", environment: { GAMMA_API_TOKEN: "token-1" } }] });
+
+  const second = await server({ ...handlers("b"), new_session: () => ({ session: meta("new", "z") }) }, ["session_host_commands"]);
+  connection.set(second.client); await tick();
+  expect(second.calls.find(([method]) => method === "resume")?.[1]).toMatchObject({ session_id: "b", host_commands: [{ environment: { GAMMA_API_TOKEN: "token-2" } }] });
+
+  await view.create(); await tick();
+  const created = second.calls.find(([method]) => method === "new_session")?.[1];
+  expect(created).toMatchObject({ host_commands: [{ environment: { GAMMA_API_TOKEN: "token-3" } }] });
+  expect(bound).toEqual([["pending-3", "new"]]);
+  const newResume = second.calls.filter(([method, params]) => method === "resume" && params.session_id === "new").at(-1)?.[1];
+  expect(newResume).toMatchObject({ host_commands: [{ environment: { GAMMA_API_TOKEN: "token-4" } }] });
+  view.dispose();
+});

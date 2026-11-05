@@ -1,14 +1,16 @@
 import { createHighlighter } from "@fulcrum/highlight";
 import { Markdown, type Fences, type MarkdownProps } from "@fulcrum/markdown/react";
 import { MermaidFence } from "@fulcrum/mermaid";
-import { Approval, Code, Composer, Fallback, HighlightContext, Message, RunProvider, Timeline, useItemSelector, useRun, useRunStore, useTimeline, type Renderers } from "@fulcrum/react";
+import { Approval, Code, Composer, Fallback, FileBlock, HighlightContext, ImageBlock, Message, RunProvider, Timeline, useItemSelector, useRun, useRunStore, useTimeline, type Renderers } from "@fulcrum/react";
 import type { SessionStore, ZetaClient } from "@fulcrum/zeta";
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type ReactNode } from "react";
+import { forwardRef, createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type ReactNode } from "react";
 import { createConnection, serveCommand, type Connection, type ConnectionState } from "./connection";
 import { createDelivery } from "./delivery";
 import { ago, createSessions, sessionPresentation, sessionTitle, topLevel, type OpenRun, type SessionMeta, type Sessions, type SessionsState } from "./session";
 import { ThemePicker, useTheme } from "./theme";
 import { addImage, readImage, type QueuedImage } from "./image-queue";
+import { artifactContentUrl, hostBindings, useArtifacts } from "./host-client";
+import type { Artifact } from "./host/types";
 import { catalogModels, settingModel, settingsRequest, type SessionSettings } from "./settings";
 
 const highlight = createHighlighter();
@@ -37,6 +39,30 @@ function UserRow({ id }: { id: string }) {
   );
 }
 const ImageViewer = createContext<((block: any) => void) | null>(null);
+const Artifacts = createContext<readonly Artifact[]>([]);
+function ArtifactContent({ artifact }: { artifact: Artifact }) {
+  const onOpen = useContext(ImageViewer);
+  const url = artifactContentUrl(artifact);
+  const block = { type: artifact.media_type.startsWith("image/") ? "image" : "file", url, mediaType: artifact.media_type, size: artifact.size, title: artifact.title ?? undefined, filename: artifact.filename ?? undefined, artifact } as any;
+  return <div className="artifact" data-media-type={artifact.media_type}>
+    {artifact.media_type.startsWith("image/") ? <ImageBlock id={`${artifact.artifact_id}:${artifact.version}`} block={block} streaming={false} onOpen={onOpen ?? undefined} />
+    : artifact.media_type === "text/markdown" ? <ArtifactMarkdown artifact={artifact} block={block} onOpen={onOpen} />
+    : <FileBlock id={`${artifact.artifact_id}:${artifact.version}`} block={block} streaming={false} onOpen={onOpen ?? undefined} />}
+  </div>;
+}
+function ArtifactMarkdown({ artifact, block, onOpen }: { artifact: Artifact; block: any; onOpen: ((block: any) => void) | null }) {
+  const [source, setSource] = useState<string | null>(null);
+  useEffect(() => { let live = true; void fetch(artifactContentUrl(artifact)).then((response) => response.text()).then((text) => { if (live) setSource(text); }); return () => { live = false; }; }, [artifact]);
+  return <div className="artifact-markdown"><div className="artifact-label"><span>{artifact.title ?? artifact.filename ?? "markdown"}</span>{onOpen ? <button type="button" onClick={() => onOpen(block)}>open</button> : null}</div>{source === null ? <span>loading…</span> : <RichMarkdown source={source} streaming={false} />}</div>;
+}
+function ArtifactList({ anchor }: { anchor: string | null }) {
+  const artifacts = useContext(Artifacts).filter((artifact) => artifact.anchor_tool_call_id === anchor);
+  return artifacts.length ? <div className="artifacts" aria-label="rendered files">{artifacts.map((artifact) => <ArtifactContent key={`${artifact.artifact_id}:${artifact.version}`} artifact={artifact} />)}</div> : null;
+}
+function ToolWithArtifacts({ id }: { id: string }) {
+  const toolId = useItemSelector(id, (item) => item?.type === "tool" ? item.tool_call.id : null);
+  return <><Fallback id={id} />{toolId ? <ArtifactList anchor={toolId} /> : null}</>;
+}
 const ApprovalModeContext = createContext<{ yolo: boolean; setYolo(value: boolean): void }>({ yolo: false, setYolo() {} });
 function YoloIndicator({ className = "" }: { className?: string }) {
   const { yolo } = useContext(ApprovalModeContext);
@@ -50,6 +76,7 @@ const renderers: Renderers = {
   message: ({ id }) => <ZetaMessage id={id} />,
   approval: ZetaApproval,
   user: UserRow,
+  tool: ToolWithArtifacts,
 };
 
 const useExternal = <T,>(source: { subscribe(listener: () => void): () => void; readonly state: T }) =>
@@ -76,6 +103,7 @@ export function App() {
     () => createSessions(connection, {
       selected: hashSession(),
       onSelect: (id) => history.replaceState(null, "", `#session=${encodeURIComponent(id)}`),
+      bindings: hostBindings,
     }),
     [connection],
   );
@@ -369,6 +397,7 @@ function Body({ state, view, connection, sessions, opener, focusComposer, onCrea
 
 function Run({ client, sessions, open, opener, focusComposer, readOnly, ready }: { client: ZetaClient | null; sessions: Sessions; open: OpenRun; opener: React.RefObject<Element | null>; focusComposer: React.RefObject<boolean>; readOnly: boolean; ready: boolean }) {
   const scroll = useRef<HTMLDivElement>(null);
+  const artifacts = useArtifacts(open.id, open.lease.store);
   const [viewer, setViewer] = useState<any>(null);
   const viewerDialog = useRef<HTMLDivElement>(null);
   const viewerOpener = useRef<HTMLElement | null>(null);
@@ -401,21 +430,56 @@ function Run({ client, sessions, open, opener, focusComposer, readOnly, ready }:
     <Decisions.Provider value={decisions}>
       <Undelivered value={undelivered}>
         <ImageViewer.Provider value={openViewer}>
+        <Artifacts.Provider value={artifacts}>
         <RunProvider store={open.lease.store} highlight={highlight} onRetry={client ? () => client.retrySession(open.id) : undefined}>
           <RefreshOnIdle sessions={sessions} />
           {client && !readOnly ? <SettingsBar client={client} /> : null}
           <div ref={scroll} className="scroll" tabIndex={-1} data-stale={open.stale || undefined} data-run-ready={ready ? "true" : undefined}>
             <Timeline renderers={renderers} virtual scrollRef={scroll} aria-label="session activity" />
+            <ArtifactList anchor={null} />
             <EmptyRun />
           </div>
           <RunComposer key={open.id} client={open.stale || readOnly ? null : client} store={open.lease.store} onUndelivered={onUndelivered} readOnly={readOnly} />
         </RunProvider>
+        </Artifacts.Provider>
         </ImageViewer.Provider>
-        {viewer ? <div ref={viewerDialog} className="image-viewer" role="dialog" aria-modal="true" aria-label="image viewer" tabIndex={-1} onClick={closeViewer}><img src={viewer.src ?? viewer.url} alt={viewer.alt ?? viewer.name ?? viewer.filename ?? "image"} /></div> : null}
+        {viewer ? <Inspector ref={viewerDialog} value={viewer} onClose={closeViewer} /> : null}
       </Undelivered>
     </Decisions.Provider>
   );
 }
+
+const Inspector = forwardRef<HTMLDivElement, { value: any; onClose(): void }>(function Inspector({ value, onClose }, ref) {
+  const artifact = value.artifact as Artifact | undefined;
+  const url = artifact ? artifactContentUrl(artifact) : value.src ?? value.url;
+  const type = artifact?.media_type ?? value.mediaType ?? "image/*";
+  const [text, setText] = useState<string | null>(null);
+  const [htmlUrl, setHtmlUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!artifact || (!type.startsWith("text/") && type !== "application/json")) return;
+    let live = true; void fetch(url).then((response) => response.text()).then((source) => {
+      if (!live) return;
+      if (type === "text/html") {
+        const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-src 'none'">`;
+        setHtmlUrl(URL.createObjectURL(new Blob([csp, source], { type: "text/html" })));
+      } else setText(source);
+    });
+    return () => { live = false; };
+  }, [artifact, type, url]);
+  useEffect(() => () => { if (htmlUrl) URL.revokeObjectURL(htmlUrl); }, [htmlUrl]);
+  const rows = type === "text/csv" && text !== null ? text.split(/\r?\n/).slice(0, 200).filter(Boolean).map((line) => line.split(",").slice(0, 50)) : null;
+  return <div ref={ref} className="inspector" role="dialog" aria-modal="true" aria-label="file inspector" tabIndex={-1}>
+    <div className="inspector-bar"><strong>{artifact?.title ?? artifact?.filename ?? value.alt ?? "file"}</strong><a href={url} download={artifact?.filename ?? artifact?.title ?? "artifact"}>download</a><button type="button" onClick={onClose}>close</button></div>
+    <div className="inspector-body">
+      {type.startsWith("image/") ? <img src={url} alt={artifact?.title ?? value.alt ?? "image"} />
+      : type === "application/pdf" ? <iframe title="pdf preview" sandbox="" src={url} />
+      : type === "text/html" ? (htmlUrl ? <iframe title="html preview" data-viewer="html" sandbox="" src={htmlUrl} /> : <span>loading…</span>)
+      : type === "text/markdown" && text !== null ? <RichMarkdown source={text} streaming={false} />
+      : rows ? <table><tbody>{rows.map((row, index) => <tr key={index}>{row.map((cell, column) => <td key={column}>{cell.slice(0, 1000)}</td>)}</tr>)}</tbody></table>
+      : text !== null ? <pre>{text.slice(0, 1_000_000)}</pre> : <span>loading…</span>}
+    </div>
+  </div>;
+});
 
 /** A session with no rows yet says what to do instead of showing a blank run. */
 function EmptyRun() {
