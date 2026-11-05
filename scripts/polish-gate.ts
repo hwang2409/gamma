@@ -128,7 +128,7 @@ try {
       if ((await composer.locator('[data-part="composer-message"]').textContent())?.trim()) throw new Error("the composer repeats the error");
       const seen = ((await page.locator("body").innerText()).match(/overloaded \(529\)/g) ?? []).length;
       if (seen !== 1) throw new Error(`the error shows ${seen} times`);
-      await page.screenshot({ path: join(shots, "ux-turn-error-1440-tokyo-night.png") });
+      await page.screenshot({ path: join(shots, "ux-turn-error-1440.png") });
       // The one action: retry sends the prompt again; only the newest error row offers it.
       await page.locator(".turn-retry").click();
       await failed.nth(1).waitFor({ timeout: 10_000 });
