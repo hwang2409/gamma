@@ -216,10 +216,12 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .inspector-body td { border: 1px solid var(--fulcrum-border); padding: 5px 8px; white-space: pre-wrap; }
 .inspector-body pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 600px) { .inspector { inset: 0; } .artifacts { padding-inline-start: 8px; } }
-/* Narrow composer: fulcrum gives the status its own row; the vim mode then leads the tools row. */
+/* Narrow composer: the vim mode leads the hint on the first row; the tools fill the second row, model first. */
 @container (max-width: 480px) {
-  .dock [data-part="composer-status"] { order: 1; }
-  .dock .vim-mode { order: 2; }
-  .dock .composer-tools { order: 3; }
-  .dock .model-picker > button { max-width: 14ch; }
+  .dock .vim-mode { order: 1; }
+  .dock [data-part="composer-status"] { order: 2; flex: 1 1 0; min-width: 0; height: auto; }
+  .dock .composer-tools { order: 3; flex-basis: 100%; flex-wrap: nowrap; min-width: 0; }
+  .dock .composer-tools > * { flex: none; }
+  .dock .composer-tools > .model-picker { display: flex; flex: 0 1 auto; min-width: 0; }
+  .dock [data-part="composer"] .model-picker > .composer-tool { flex: 0 1 auto; min-width: 0; max-width: none; }
 }

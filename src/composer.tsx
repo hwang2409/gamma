@@ -171,6 +171,8 @@ export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, foo
     submit();
   };
 
+  // Read-only with nothing to keep or say (a problem panel already explains): no empty box.
+  if (state === "read-only" && !text && !reason) return null;
   if (state === "read-only")
     return (
       <div tabIndex={-1} data-part="composer" data-state="read-only" role="group" aria-label="message">

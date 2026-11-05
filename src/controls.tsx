@@ -47,7 +47,7 @@ function ModelPicker({ value, models, onChange }: { value: string; models: strin
   useEffect(() => { if (open) root.current?.querySelector<HTMLElement>("[aria-selected=true], [role=option]")?.focus(); }, [open]);
   return (
     <div className="model-picker" ref={root}>
-      <button ref={button} type="button" className="composer-tool" aria-haspopup="listbox" aria-expanded={open} aria-label={`model: ${value || "default"}`} onClick={() => setOpen(!open)}>
+      <button ref={button} type="button" className="composer-tool" aria-haspopup="listbox" aria-expanded={open} aria-label={`model: ${value || "default"}`} title={value || "zeta's default model"} onClick={() => setOpen(!open)}>
         {value || "default model"}
       </button>
       {open ? (
