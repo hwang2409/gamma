@@ -16,7 +16,7 @@ const attempt = (action: () => unknown) => new Promise<unknown>((resolve) => res
 const hasFiles = (event: DragEvent) => [...event.dataTransfer.types].includes("Files");
 
 function hint({ vim, mode, steer, images }: { vim: boolean; mode: Vim["mode"]; steer: boolean; images: boolean }) {
-  const send = steer ? "enter to steer the running turn" : "enter to send";
+  const send = steer ? "enter to steer" : "enter to send";
   if (steer && images) return "images send when the turn ends · stop it or wait";
   if (!vim) return `${send} · shift+enter for a new line`;
   if (mode === "insert") return `${send} · esc for normal mode`;

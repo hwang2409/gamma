@@ -215,3 +215,9 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .inspector-body td { border: 1px solid var(--fulcrum-border); padding: 5px 8px; white-space: pre-wrap; }
 .inspector-body pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 600px) { .inspector { inset: 0; } .artifacts { padding-inline-start: 8px; } }
+/* Narrow composer: fulcrum gives the status its own row; the vim mode then leads the tools row. */
+@container (max-width: 480px) {
+  .dock [data-part="composer-status"] { order: 1; }
+  .dock .vim-mode { order: 2; }
+  .dock .composer-tools { order: 3; }
+}
