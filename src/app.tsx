@@ -4,13 +4,14 @@ import { MermaidFence } from "@fulcrum/mermaid";
 import { Approval, Code, Fallback, FileBlock, HighlightContext, ImageBlock, Message, RunProvider, Timeline, ToolCall, useItemSelector, useRun, useRunStore, useTimeline, type Renderers } from "@fulcrum/react";
 import { createRunStore } from "@fulcrum/core";
 import type { ZetaClient } from "@fulcrum/zeta";
-import { forwardRef, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { forwardRef, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { createConnection, serveCommand, type Connection, type ConnectionState } from "./connection";
 import { createDelivery, stopTurn } from "./delivery";
 import { createRun, sessionPresentation, sessionTitle, transitionRun, type OpenRun, type RunControl, type RunState, type SessionMeta } from "./session";
 import { ThemePicker, useTheme } from "./theme";
 import { GammaComposer, type Submit } from "./composer";
 import { nextRunModel, RunSettings, SettingsMenu, useVimSetting, VimToggle } from "./controls";
+import { settingModel, settingsRequest } from "./settings";
 import { artifactContentUrl, hostBindings, useArtifacts } from "./host-client";
 import type { Artifact } from "./host/types";
 
@@ -73,11 +74,24 @@ function ZetaMessage({ id }: { id: string }) {
   const onOpen = useContext(ImageViewer);
   return <Message id={id} markdown={RichMarkdown} onOpen={onOpen ?? undefined} />;
 }
+// A failed turn's one action: send its prompt again, offered on the error row while it is the last row.
+const RetryTurn = createContext<(() => void) | null>(null);
+function ErrorRow({ id }: { id: string }) {
+  const retry = useContext(RetryTurn);
+  const last = useRun(useCallback((state: { outline: readonly { id: string }[] }) => state.outline.at(-1)?.id === id, [id]));
+  return (
+    <div className="turn-error">
+      <Fallback id={id} />
+      {retry && last ? <button type="button" className="ghost turn-retry" onClick={retry}>retry</button> : null}
+    </div>
+  );
+}
 const renderers: Renderers = {
   message: ({ id }) => <ZetaMessage id={id} />,
   approval: ZetaApproval,
   user: UserRow,
   tool: ToolWithArtifacts,
+  error: ErrorRow,
 };
 
 const useExternal = <T,>(source: { subscribe(listener: () => void): () => void; readonly state: T }) =>
@@ -119,6 +133,7 @@ export function App() {
   const blank = useMemo(() => createRunStore(), [epoch]);
   const store = open?.lease.store ?? blank;
   const [yolo, setYolo] = useState(false);
+  const [retryTurn, setRetryTurn] = useState<(() => void) | null>(null);
   const [undelivered, setUndelivered] = useState<ReadonlySet<string>>(() => new Set());
   const onUndelivered = useCallback((intents: string[]) => {
     if (intents.length) setUndelivered((current) => new Set([...current, ...intents]));
@@ -129,6 +144,7 @@ export function App() {
       if (connection.client) await stopTurn(connection.client).catch(() => {});
     }
     runs.reset();
+    setYolo(false);
     setUndelivered(new Set());
     setEpoch((value) => value + 1);
   }, [connection, runs, store]);
@@ -139,6 +155,7 @@ export function App() {
       <ApprovalModeContext value={{ yolo, setYolo }}>
         <RunProvider store={store} highlight={highlight} onRetry={client && open ? () => client.retrySession(open.id) : undefined}>
           <Undelivered value={undelivered}>
+          <RetryTurn value={retryTurn}>
             <div className="app">
               <header className="topbar">
                 <span className="brand"><span className="brand-mark" aria-hidden="true" /><span className="brand-name">gamma</span></span>
@@ -152,9 +169,10 @@ export function App() {
               </header>
               <main className="main">
                 <Body state={state} view={view} connection={connection} runs={runs} onNewRun={() => void newRun()} />
-                <Dock key={epoch} state={state} view={view} connection={connection} runs={runs} vim={vim} onUndelivered={onUndelivered} />
+                <Dock key={epoch} state={state} view={view} connection={connection} runs={runs} vim={vim} onUndelivered={onUndelivered} onRetryTurn={setRetryTurn} />
               </main>
             </div>
+          </RetryTurn>
           </Undelivered>
         </RunProvider>
       </ApprovalModeContext>
@@ -184,10 +202,8 @@ function RunTitle({ session, blank }: { session: SessionMeta | null; blank: bool
 }
 
 type RunPhase =
-  | { kind: "ready" | "thinking" | "reconnecting" | "connecting" }
-  | { kind: "running"; tool: string }
-  | { kind: "approval" }
-  | { kind: "error"; message: string; retry?: () => void };
+  | { kind: "ready" | "thinking" | "reconnecting" | "connecting" | "opening" | "approval" }
+  | { kind: "running"; tool: string };
 
 /** What the run is doing now, from the store: a pending approval wins over a running tool, which wins over thinking. */
 function useAgentPhase(): { kind: "idle" | "thinking" | "approval" } | { kind: "running"; tool: string } | { kind: "failed"; message: string } {
@@ -221,34 +237,27 @@ function focusApproval() {
   });
 }
 
-/** One line over the composer: exactly one of ready, thinking, running a tool, waiting for approval, reconnecting, error. */
+/**
+ * One line over the composer: what the run is doing now. It never carries a problem. Each problem has one home with
+ * one action: connection and run-open problems in the main panel, a failed turn on its transcript row, a failed send,
+ * steer, or stop in the composer note. While a problem panel shows, the status line is absent.
+ */
 function StatusLine({ phase }: { phase: RunPhase }) {
-  const tone = phase.kind === "error" ? "danger" : phase.kind === "approval" ? "warn" : phase.kind === "ready" ? "ok" : "busy";
+  const tone = phase.kind === "approval" ? "warn" : phase.kind === "ready" ? "ok" : "busy";
+  const text = { ready: "ready", thinking: "thinking…", connecting: "connecting…", reconnecting: "reconnecting…", opening: "opening the run…", approval: "", running: "" }[phase.kind];
   return (
     <div className="status-line" data-state={phase.kind} data-tone={tone} role="status">
       {phase.kind === "approval" ? (
         <button type="button" className="status-link" onClick={focusApproval}>waiting for your approval</button>
-      ) : phase.kind === "error" ? (
-        <>
-          <span className="status-text" title={phase.message}>error · {phase.message}</span>
-          {phase.retry ? <button type="button" className="ghost status-retry" onClick={phase.retry}>retry</button> : null}
-        </>
       ) : (
-        <span className="status-text">{phase.kind === "running" ? `running ${phase.tool}` : phase.kind === "connecting" ? "connecting…" : phase.kind === "reconnecting" ? "reconnecting…" : phase.kind === "thinking" ? "thinking…" : "ready"}</span>
+        <span className="status-text">{phase.kind === "running" ? `running ${phase.tool}` : text}</span>
       )}
     </div>
   );
 }
 
-const connectionError: Partial<Record<ConnectionState["phase"], string>> = {
-  not_running: "zeta serve is not running",
-  auth_failed: "zeta serve refused this page",
-  busy: "zeta serve is in use by another client",
-  incompatible: "unsupported protocol version",
-};
-
-function Dock({ state, view, connection, runs, vim, onUndelivered }: {
-  state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; vim: boolean; onUndelivered(intents: string[]): void;
+function Dock({ state, view, connection, runs, vim, onUndelivered, onRetryTurn }: {
+  state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; vim: boolean; onUndelivered(intents: string[]): void; onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>;
 }) {
   const present = sessionPresentation(view.transition);
   const open = present.open;
@@ -256,7 +265,7 @@ function Dock({ state, view, connection, runs, vim, onUndelivered }: {
   const client = state.phase === "connected" ? connection.client : null;
   const agent = useAgentPhase();
   const running = agent.kind === "thinking" || agent.kind === "approval" || agent.kind === "running";
-  const { setYolo } = useContext(ApprovalModeContext);
+  const { yolo, setYolo } = useContext(ApprovalModeContext);
   // This dock's own first send is starting the run: the composer stays put while zeta creates and opens it.
   const [starting, setStarting] = useState(false);
   const delivery = useMemo(() => createDelivery(undefined, (event) => {
@@ -276,36 +285,45 @@ function Dock({ state, view, connection, runs, vim, onUndelivered }: {
     if (!target) throw new Error("not connected to zeta serve");
     if (!transitionRun(runs.state.transition)) {
       setStarting(true);
-      try { await runs.create(nextRunModel()); } finally { setStarting(false); }
+      try {
+        await runs.create(nextRunModel());
+        // new_session takes no approval mode, so a YOLO picked on the blank run is set before the first turn.
+        if (yolo) {
+          const created = transitionRun(runs.state.transition)!.id;
+          const current = settingModel(await target.request("session_settings", { session_id: created }));
+          await target.request("set_settings", { session_id: created, ...settingsRequest(current, { approval_mode: "allow" }) });
+        }
+      } finally { setStarting(false); }
     }
     const id = transitionRun(runs.state.transition)!.id;
     if (!images.length) return delivery.submit(target, text, steer);
     return target.request("send_images", { session_id: id, text, images: images.map(({ name, mime_type, data }) => ({ name, mime_type, data })) }, { timeoutMs: 30_000 });
-  }, [connection, runs, delivery]);
+  }, [connection, runs, delivery, yolo]);
   const onStop = useCallback(() => (client ? delivery.stop(client) : Promise.reject(new Error("not connected to zeta serve"))), [client, delivery]);
   const lastPrompt = useLastPrompt();
 
+  const failed = agent.kind === "failed" && client && lastPrompt ? lastPrompt : null;
+  useEffect(() => {
+    onRetryTurn(failed && client ? () => () => void delivery.submit(client, failed, false).catch(() => {}) : null);
+    return () => onRetryTurn(null);
+  }, [failed, client, delivery, onRetryTurn]);
+
   const failure = present.openError;
+  // A connection or run-open problem shows in the main panel (see StatusLine), so the dock adds nothing to it.
+  const problem = (state.phase !== "connected" && state.phase !== "connecting" && state.phase !== "dropped") || Boolean(failure && !failure.restored);
   const phase: RunPhase =
     state.phase === "connecting" || state.phase === "dropped" ? { kind: state.phase === "connecting" && !state.lost ? "connecting" : "reconnecting" }
-    : state.phase !== "connected" ? { kind: "error", message: connectionError[state.phase]!, retry: state.phase === "incompatible" ? undefined : () => connection.retryNow() }
-    : failure && !failure.restored ? { kind: "error", message: `could not open this run: ${failure.message}`, retry: () => runs.select(failure.id) }
-    : (present.opening || open?.stale) && !starting ? { kind: "reconnecting" }
+    : (present.opening || open?.stale) && !starting ? { kind: open?.stale ? "reconnecting" : "opening" }
     : agent.kind === "approval" ? { kind: "approval" }
     : agent.kind === "running" ? { kind: "running", tool: agent.tool }
     : agent.kind === "thinking" ? { kind: "thinking" }
-    : agent.kind === "failed" ? { kind: "error", message: agent.message, retry: client && lastPrompt ? () => void delivery.submit(client, lastPrompt, false).catch(() => {}) : undefined }
     : { kind: "ready" };
 
-  const readOnly = !client ? "reconnecting · sending is paused until the server confirms this run"
-    : starting ? null
-    : present.opening || (open && open.stale) ? "opening the run · sending is paused"
-    : failure && !open ? "this run did not open · start a new run or try again"
-    : null;
+  const readOnly = problem ? "" : !client ? "sending is paused until zeta reconnects" : starting ? null : present.opening || open?.stale ? "sending is paused until the run opens" : null;
   return (
     <div className="dock">
-      <StatusLine phase={phase} />
-      {readOnly ? (
+      {problem ? null : <StatusLine phase={phase} />}
+      {readOnly !== null ? (
         <GammaComposer state="read-only" reason={readOnly} vim={vim} onSubmit={onSubmit} />
       ) : (
         <GammaComposer
@@ -314,7 +332,7 @@ function Dock({ state, view, connection, runs, vim, onUndelivered }: {
           autoFocus
           onSubmit={onSubmit}
           onStop={onStop}
-          footer={<RunSettings client={client} sessionId={blank || starting ? null : open?.id ?? null} onYolo={setYolo} />}
+          footer={<RunSettings client={client} sessionId={blank || starting ? null : open?.id ?? null} yolo={yolo} onYolo={setYolo} />}
         />
       )}
     </div>

@@ -132,19 +132,19 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .dock { flex: none; padding: 6px var(--gutter) max(16px, env(safe-area-inset-bottom)); }
 .dock > * { max-width: var(--measure); margin-inline: auto; }
 
-/* Status line: one state word with its square mark; approval and error carry an action. */
+/* Status line: one state word with its square mark; a waiting approval is a link to it. Never a problem. */
 .status-line { --tone: var(--fulcrum-muted); display: flex; align-items: center; gap: 10px; min-height: 28px; font-size: 12px; }
 .status-line[data-tone="ok"] { --tone: var(--fulcrum-ok); }
 .status-line[data-tone="busy"] { --tone: var(--fulcrum-accent); }
 .status-line[data-tone="warn"] { --tone: var(--fulcrum-warn); }
-.status-line[data-tone="danger"] { --tone: var(--fulcrum-danger); }
 .status-line::before { content: ""; flex: none; width: 7px; height: 7px; background: var(--tone); }
 .status-line[data-tone="busy"]::before { animation: pulse 1s infinite alternate; }
 .status-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.status-line[data-tone="danger"] .status-text { font-weight: 700; }
 .status-link { min-height: 28px; padding: 0 8px; border-color: var(--fulcrum-warn); font-size: 12px; font-weight: 700; }
 .status-link::after { content: " ↓"; }
-.status-retry { min-height: 28px; padding: 0 10px; font-size: 12px; }
+/* A failed turn: the error row, then its one action. */
+.turn-error { display: grid; justify-items: start; gap: 6px; }
+.turn-retry { min-height: 30px; padding: 0 10px; font-size: 12px; }
 
 /* The composer: fulcrum's parts, plus gamma's tray, footer tools, and vim mode. */
 .dock [data-part="composer"] { position: relative; }
@@ -168,10 +168,11 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .dock [data-part="composer"] .approval-mode[data-yolo] { --action: var(--fulcrum-danger); color: var(--fulcrum-danger); font-weight: 700; }
 .model-picker { position: relative; }
 .model-picker > button { max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.model-picker [role="listbox"] { position: absolute; z-index: 5; right: 0; bottom: calc(100% + 4px); display: grid; min-width: 100%; padding: 4px 0; border: 1px solid var(--fulcrum-fg); background: var(--fulcrum-bg); }
+.model-picker [role="listbox"] { position: absolute; z-index: 5; right: 0; bottom: calc(100% + 4px); display: grid; width: max-content; min-width: 100%; max-width: calc(100vw - 24px); max-height: min(60dvh, 420px); overflow-y: auto; padding: 4px 0; border: 1px solid var(--fulcrum-fg); background: var(--fulcrum-bg); }
 .dock .model-picker [role="option"] { --action: transparent; min-height: 32px; padding: 0 12px; border: 0; background: transparent; color: var(--fulcrum-fg); font-weight: 400; text-align: left; white-space: nowrap; }
 .dock .model-picker [role="option"][aria-selected="true"] { font-weight: 700; }
 .dock .model-picker [role="option"]:hover, .dock .model-picker [role="option"]:focus-visible { background: var(--fulcrum-surface); }
+.model-empty { max-width: 32ch; margin: 0; padding: 6px 12px; color: var(--fulcrum-muted); font-size: 12px; }
 .settings-error { max-width: 20ch; overflow: hidden; color: var(--fulcrum-danger); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 
 /* A run with no messages: a short note on the transcript's measure. */
@@ -188,7 +189,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 /* Touch widths: 44 px targets and tighter gutters. */
 @media (max-width: 860px), (pointer: coarse) {
   :root { --control: 44px; }
-  .notice .ghost, .status-retry, .status-link { min-height: 44px; }
+  .notice .ghost, .turn-retry, .status-link { min-height: 44px; }
   .scroll [data-part] button { min-height: 44px; }
   .dock [data-part="composer"] .composer-tool, .dock [data-part="composer"] button { min-height: 44px; }
   .dock [data-part="attachment"] .composer-tool { min-width: 44px; min-height: 44px; }
@@ -220,4 +221,5 @@ button:active:not(:disabled) { transform: scale(0.97); }
   .dock [data-part="composer-status"] { order: 1; }
   .dock .vim-mode { order: 2; }
   .dock .composer-tools { order: 3; }
+  .dock .model-picker > button { max-width: 14ch; }
 }

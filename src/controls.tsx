@@ -52,9 +52,9 @@ function ModelPicker({ value, models, onChange }: { value: string; models: strin
       </button>
       {open ? (
         <div role="listbox" aria-label="model">
-          {models.map((model) => (
+          {models.length ? models.map((model) => (
             <button type="button" role="option" aria-selected={model === value} key={model} onClick={() => { onChange(model); close(); }}>{model}</button>
-          ))}
+          )) : <p className="model-empty">zeta lists its models once the run starts; this run uses zeta's default model.</p>}
         </div>
       ) : null}
     </div>
@@ -62,37 +62,38 @@ function ModelPicker({ value, models, onChange }: { value: string; models: strin
 }
 
 /**
- * The run's model and approval mode, from zeta. A blank run has no session to ask yet, so it offers the catalog the
- * last run saw and passes the pick to `new_session`.
+ * The run's model and approval mode, from zeta. A blank run has no session yet: it shows zeta's catalog and the mode
+ * the first send starts the run with (`nextRunModel`, then `set_settings` for YOLO).
  */
-export function RunSettings({ client, sessionId, onYolo }: { client: ZetaClient | null; sessionId: string | null; onYolo(value: boolean): void }) {
-  const supported = (name: string) => client?.features.includes(name) ?? false;
+export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaClient | null; sessionId: string | null; yolo: boolean; onYolo(value: boolean): void }) {
+  // zeta lists these methods under hello's `requests`, which fulcrum's client does not expose, so a request tells:
+  // only "method not found" hides the controls.
+  const [unsupported, setUnsupported] = useState(false);
   const [settings, setSettings] = useState<SessionSettings>({});
   const [models, setModels] = useState<string[]>(() => cachedCatalog().models);
   const [pending, setPending] = useState(() => nextRunModel().model ?? "");
   const [error, setError] = useState("");
   const load = useCallback(async () => {
-    if (!client || !sessionId) return;
+    if (!client) return;
     try {
-      if (client.features.includes("session_settings")) {
-        const next = settingModel(await client.request("session_settings", { session_id: sessionId }));
+      // The catalog needs a session zeta has open; a blank run asks with the open one, if any, else keeps the cache.
+      const target = sessionId ?? ((await client.request("status", {}, { timeoutMs: 15_000 })) as { session?: { session_id?: string } | null }).session?.session_id;
+      if (!target) return;
+      const catalog = await client.request("model_catalog", { session_id: target }, { timeoutMs: 15_000 });
+      localStorage.setItem(CATALOG, JSON.stringify(catalog));
+      setModels(catalogModels(catalog));
+      if (sessionId) {
+        const next = settingModel(await client.request("session_settings", { session_id: sessionId }, { timeoutMs: 15_000 }));
         setSettings(next);
         onYolo(next.approval_mode === "allow");
-      } else onYolo(false);
-      if (client.features.includes("model_catalog")) {
-        const catalog = await client.request("model_catalog", { session_id: sessionId });
-        localStorage.setItem(CATALOG, JSON.stringify(catalog));
-        setModels(catalogModels(catalog));
       }
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "settings unavailable"); }
+    } catch (cause) {
+      if ((cause as { code?: unknown }).code === -32601) setUnsupported(true);
+      else if (sessionId) setError(cause instanceof Error ? cause.message : "settings unavailable");
+    }
   }, [client, sessionId, onYolo]);
   useEffect(() => { setError(""); void load(); }, [load]);
-  useEffect(() => { if (!sessionId) onYolo(false); }, [sessionId, onYolo]);
-  if (!client) return null;
-  if (!sessionId) {
-    if (!supported("model_catalog") || !models.length) return null;
-    return <ModelPicker value={pending} models={models} onChange={(model) => { localStorage.setItem(MODEL, model); setPending(model); }} />;
-  }
+  if (!client || unsupported) return null;
   const change = async (patch: Partial<SessionSettings>) => {
     setError("");
     try {
@@ -101,22 +102,30 @@ export function RunSettings({ client, sessionId, onYolo }: { client: ZetaClient 
       await load();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "could not change settings"); }
   };
-  const yolo = settings.approval_mode === "allow";
+  const pick = (model: string) => {
+    if (sessionId) return void change({ model });
+    localStorage.setItem(MODEL, model);
+    setPending(model);
+  };
+  const toggle = () => {
+    if (!yolo && !confirm("allow tools to run without asking in this run?")) return;
+    if (sessionId) void change({ approval_mode: yolo ? "ask" : "allow" });
+    else onYolo(!yolo);
+  };
   return (
     <>
-      {supported("model_catalog") && models.length ? <ModelPicker value={settings.model ?? ""} models={models} onChange={(model) => void change({ model })} /> : null}
-      {supported("set_settings") ? (
-        <button
-          type="button"
-          className="composer-tool approval-mode"
-          data-yolo={yolo || undefined}
-          aria-pressed={yolo}
-          title={yolo ? "tools run without asking · press to ask again" : "tools ask before they run · press for YOLO"}
-          onClick={() => { if (!yolo && !confirm("allow tools to run automatically in this run?")) return; void change({ approval_mode: yolo ? "ask" : "allow" }); }}
-        >
-          {yolo ? "YOLO" : "Ask"}
-        </button>
-      ) : null}
+      <ModelPicker value={sessionId ? settings.model ?? "" : pending} models={models} onChange={pick} />
+      <button
+        type="button"
+        className="composer-tool approval-mode"
+        data-yolo={yolo || undefined}
+        aria-pressed={yolo}
+        aria-label={yolo ? "approval mode: YOLO, tools run without asking" : "approval mode: Ask, tools ask before they run"}
+        title={yolo ? "tools run without asking · press to ask again" : "tools ask before they run · press for YOLO"}
+        onClick={toggle}
+      >
+        {yolo ? "YOLO" : "Ask"}
+      </button>
       {error ? <span className="settings-error" role="alert" title={error}>{error}</span> : null}
     </>
   );

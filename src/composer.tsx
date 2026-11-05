@@ -174,7 +174,7 @@ export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, foo
     return (
       <div tabIndex={-1} data-part="composer" data-state="read-only" role="group" aria-label="message">
         {text ? <div data-part="composer-field" data-value={text}><textarea rows={1} value={text} readOnly aria-label="message (draft, read-only)" /></div> : null}
-        <p data-part="composer-reason">{reason}</p>
+        {reason ? <p data-part="composer-reason">{reason}</p> : null}
       </div>
     );
 

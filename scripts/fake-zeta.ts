@@ -320,7 +320,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           if (mode === "incompatible") { reply({ error: { code: -32002, message: "version mismatch", data: { requested: "1.2", supported: ["1.0"] } } }); socket.close(); return; }
           if (mode === "slow") await wait(60_000);
           controller = socket;
-          const features = (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (settingsEnabled && ["model_catalog", "session_settings", "set_settings", "send_images"].includes(name)) || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect)) ?? [];
+          const features = (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect)) ?? [];
           const reconnect = features.includes("approval_reconnect");
           if (reconnect) reconnectControllers.add(socket as object);
           reply({ result: { protocol_version: "1.2", server: "fake-zeta", capabilities: { features } } });
@@ -388,6 +388,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         }
         // As in zeta (server/ergonomics.py `active`): these name the active session or fail.
         if (["model_catalog", "session_settings", "set_settings", "send_images"].includes(method)) {
+          // zeta lists these under hello's `requests`; an older zeta does not know them.
+          if (!settingsEnabled) return reply({ error: { code: -32601, message: "method not found" } });
           if (typeof params.session_id !== "string" || !params.session_id) return reply({ error: { code: -32602, message: "session_id must be a nonempty string" } });
           if (params.session_id !== active) return reply({ error: { code: -32003, message: "session is not active" } });
         }
