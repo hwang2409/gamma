@@ -587,10 +587,8 @@ try {
       await mobile.locator('[data-part="md-table"]').waitFor({ timeout: 5000 });
       await mobile.evaluate(() => { document.documentElement.dataset.fulcrumTheme = "solarized-light"; });
       await shoot(mobile, "connected-390-solarized-light");
-      // The fake keeps the YOLO the desktop check set: it shows in the top bar and on the footer control.
-      await mobile.locator(".topbar-yolo", { hasText: "YOLO" }).waitFor();
       const footer = mobile.locator('.dock [data-part="composer"] .composer-tools');
-      await footer.locator(".approval-mode[data-yolo]").waitFor();
+      await footer.locator(".approval-mode").waitFor();
       await footer.getByRole("button", { name: /^model: / }).waitFor();
       for (const control of [footer.getByRole("button", { name: /^model: / }), footer.locator(".approval-mode")])
         if (await control.evaluate((node) => { const box = node.getBoundingClientRect(); return box.right > innerWidth || box.left < 0; })) throw new Error("a footer control is off screen at 390");

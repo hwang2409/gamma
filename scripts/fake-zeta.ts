@@ -339,7 +339,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           if (running || rejectCreate) return reply({ error: { code: -32004, message: "a turn is already running" } });
           const validModels = ["claude-sonnet-5", "claude-opus-4-6", "gpt-5.1-codex"];
           if (typeof params.model !== "undefined" && (!validModels.includes(String(params.model)) || (typeof params.approval_mode !== "undefined" && !["ask", "allow", "deny"].includes(String(params.approval_mode))))) return reply({ error: { code: -32602, message: "invalid model or approval_mode" } });
-          settings = { model: typeof params.model === "string" ? params.model : "claude-opus-4-6", approval_mode: params.approval_mode === "allow" ? "allow" : "ask" };
+          if (typeof params.model === "string" || typeof params.approval_mode === "string") settings = { model: typeof params.model === "string" ? params.model : settings.model, approval_mode: params.approval_mode === "allow" ? "allow" : params.approval_mode === "ask" ? "ask" : settings.approval_mode };
           const created = meta(`s-new-${sessions.length}`, 0, { created_at: at(0), model: settings.model, approval_mode: settings.approval_mode, cwd: "/Users/dev/me/fun/fulcrum", retained_tail: 8, compaction_budget: 262144, override_audit: [], context_files: [], skill_catalog: [], agent_catalog: [], plan_mode: false, project_id: null, tool_allow: null, tool_deny: [] });
           sessions.unshift(created);
           histories[created.session_id] = [];
