@@ -1,0 +1,21 @@
+#!/usr/bin/env bun
+const help = `gamma — web-surface commands
+
+gamma help
+gamma render <file> [--title <text>] [--type <media-type>] [--id <artifact-id>]
+
+render uploads file bytes to the current gamma chat. paths never leave this process.`;
+const fail = (message: string): never => { console.error(`gamma: ${message}`); process.exit(1); };
+if (process.argv[2] === "help" || process.argv.length === 2) { console.log(help); process.exit(0); }
+if (process.argv[2] !== "render") fail(`unknown command "${process.argv[2]}"; run gamma help`);
+const args = process.argv.slice(3); const file = args.shift(); if (!file || file.startsWith("--")) fail("render needs a file; run gamma help");
+let title: string | undefined, type: string | undefined, id: string | undefined;
+for (let i = 0; i < args.length; i += 2) { const value = args[i + 1]; if (!value) fail(`${args[i]} needs a value`); if (args[i] === "--title") title = value; else if (args[i] === "--type") type = value; else if (args[i] === "--id") id = value; else fail(`unknown option "${args[i]}"`); }
+const api = process.env.GAMMA_API_URL, token = process.env.GAMMA_API_TOKEN;
+if (!api || !token) fail("not attached to gamma; run this command inside a gamma session");
+const source = Bun.file(file); if (!await source.exists()) fail(`cannot read ${file}`);
+const form = new FormData(); form.set("file", new File([await source.arrayBuffer()], file.split(/[\\/]/).at(-1)!, { type: type ?? source.type })); if (type) form.set("media_type", type); if (title) form.set("title", title); if (id) form.set("artifact_id", id);
+const response = await fetch(`${api}/render`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form }).catch((error) => fail(`upload failed: ${error.message}`));
+const result = await response.json().catch(() => null) as any;
+if (!response.ok) fail(result?.error?.message ?? `upload failed (${response.status})`);
+console.log(`${result.artifact_id} v${result.version} · ${result.media_type} · ${result.size} bytes`);
