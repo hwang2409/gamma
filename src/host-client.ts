@@ -36,7 +36,7 @@ export function useArtifacts(sessionId: string, store: SessionStore) {
       } catch { /* a reconnect can rotate registration between polls */ }
     };
     syncContext(); void load();
-    const unsubscribe = store.subscribe(syncContext); const timer = setInterval(load, 1_000);
+    const unsubscribe = store.subscribe(syncContext); const timer = setInterval(load, 2_000);
     return () => { disposed = true; clearInterval(timer); unsubscribe(); };
   }, [sessionId, store]);
   return artifacts;

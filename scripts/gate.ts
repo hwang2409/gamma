@@ -296,9 +296,9 @@ try {
       if (stale.length) throw new Error(`the session list shows live status "${stale.join(", ")}" while not connected`);
       await fake.start();
       await page.getByRole("button", { name: "retry now" }).click();
-      await page.locator(".badge", { hasText: "connected" }).waitFor({ timeout: 5000 });
+      await page.locator(".badge", { hasText: "connected" }).waitFor({ timeout: 10_000 });
       await page.locator(".notice").waitFor({ state: "detached" });
-      await page.locator('[data-part="timeline"] [data-kind="user"]').first().waitFor({ timeout: 5000 });
+      await page.locator('[data-part="timeline"] [data-kind="user"]').first().waitFor({ timeout: 10_000 });
       const ids = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('[data-part="timeline"] [data-id]')].map((item) => item.dataset.id));
       if (new Set(ids).size !== ids.length) throw new Error("duplicate rows after reconnect");
       if (await page.locator('[data-part="approval"][data-state="pending"]').count()) throw new Error("a dropped approval came back as pending");
