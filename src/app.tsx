@@ -179,7 +179,6 @@ function RunTitle({ session, blank }: { session: SessionMeta | null; blank: bool
   return (
     <div className="run-title">
       <h1 title={title ?? undefined}>{title ?? (blank ? "new run" : "run")}</h1>
-      {session?.cwd ? <p className="run-meta"><span className="cwd" title={session.cwd}>{session.cwd.replace(/^\/Users\/[^/]+|^\/home\/[^/]+/, "~")}</span></p> : null}
     </div>
   );
 }

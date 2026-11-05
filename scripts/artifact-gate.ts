@@ -33,7 +33,7 @@ try {
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
-    await page.goto(origin);
+    await page.goto(`${origin}/?run=${encodeURIComponent(ACTIVE)}`);
     await page.locator('[data-virtual-id="tool:live-1"]').waitFor({ timeout: 30_000 });
     const registration = await page.evaluate(async (sessionId) => {
       const response = await fetch("/__gamma/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: sessionId }) });
