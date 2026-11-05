@@ -292,7 +292,7 @@ function Dock({ state, view, connection, runs, vim, onUndelivered, onRetryTurn }
       try {
         await runs.create({ ...nextRunModel(), approval_mode: yolo ? "allow" : "ask" });
         // Older zeta accepts model on new_session but not approval_mode; set it before the first turn.
-        if (!(target as ZetaClient & { requests?: string[] }).requests?.includes("new_session_settings")) {
+        if (!target.features.includes("new_session_settings")) {
           const created = transitionRun(runs.state.transition)!.id;
           const current = settingModel(await target.request("session_settings", { session_id: created }));
           await target.request("set_settings", { session_id: created, ...settingsRequest(current, { approval_mode: yolo ? "allow" : "ask" }) });

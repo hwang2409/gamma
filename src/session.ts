@@ -397,7 +397,7 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
       if (!target) throw new Error("not connected to zeta serve");
       const binding = await register(target);
       const { approval_mode, ...sessionChoice } = choice;
-      const params = { ...sessionChoice, ...((target as ZetaClient & { requests?: string[] }).requests?.includes("new_session_settings") && approval_mode ? { approval_mode } : {}), ...(binding ? { host_commands: [binding.command] } : {}) };
+      const params = { ...sessionChoice, ...(target.features.includes("new_session_settings") && approval_mode ? { approval_mode } : {}), ...(binding ? { host_commands: [binding.command] } : {}) };
       const { session } = (await target.request("new_session", params, { timeoutMs: 30_000 })) as { session: SessionMeta };
       if (binding) await bindings!.bind(binding.registration_id, session.session_id);
       if (!live(target)) throw new Error("the connection dropped while the run started");
