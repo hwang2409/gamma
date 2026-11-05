@@ -392,11 +392,13 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
      * Starts the run with zeta's `new_session` (which makes it the server's own) and opens it. `model` and `provider`
      * pick the model the first turn uses. Rejects with zeta's error, so the composer keeps the draft and says why.
      */
-    async create(choice: { model?: string; provider?: string } = {}) {
+    async create(choice: { model?: string; provider?: string; approval_mode?: "ask" | "allow" } = {}) {
       const target = client;
       if (!target) throw new Error("not connected to zeta serve");
       const binding = await register(target);
-      const { session } = (await target.request("new_session", { ...choice, ...(binding ? { host_commands: [binding.command] } : {}) }, { timeoutMs: 30_000 })) as { session: SessionMeta };
+      const { approval_mode, ...sessionChoice } = choice;
+      const params = { ...sessionChoice, ...((target as ZetaClient & { requests?: string[] }).requests?.includes("new_session_settings") && approval_mode ? { approval_mode } : {}), ...(binding ? { host_commands: [binding.command] } : {}) };
+      const { session } = (await target.request("new_session", params, { timeoutMs: 30_000 })) as { session: SessionMeta };
       if (binding) await bindings!.bind(binding.registration_id, session.session_id);
       if (!live(target)) throw new Error("the connection dropped while the run started");
       set({ session });

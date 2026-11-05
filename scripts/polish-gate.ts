@@ -70,14 +70,18 @@ try {
     });
     await check("the blank run's footer has the model picker and Ask, and YOLO picked there reaches the new run", async () => {
       const footer = page.locator('.dock [data-part="composer"] .composer-tools');
-      await footer.getByRole("button", { name: /^model: / }).waitFor({ timeout: 5000 });
+      const model = footer.getByRole("button", { name: /^model: / });
+      await model.waitFor({ timeout: 5000 });
+      await model.click();
+      await footer.getByRole("option", { name: "claude-sonnet-5" }).click();
+      if (await model.getAttribute("aria-label") !== "model: claude-sonnet-5") throw new Error("catalog model was not picked on the blank run");
       await footer.getByRole("button", { name: /^approval mode: Ask/ }).click();
       await page.locator(".topbar-yolo", { hasText: "YOLO" }).waitFor();
       await field(page).fill("polish gate text");
       await field(page).press("Enter");
       await page.waitForURL(/[?&]run=/);
       await userRow(page, "polish gate text").waitFor();
-      if (fake.settings.approval_mode !== "allow") throw new Error(`the new run is in ${fake.settings.approval_mode} mode`);
+      if (fake.settings.model !== "claude-sonnet-5" || fake.settings.approval_mode !== "allow") throw new Error(`the new run is ${fake.settings.model}/${fake.settings.approval_mode}`);
       await footer.locator(".approval-mode[data-yolo]").waitFor();
       await page.reload();
       await userRow(page, "polish gate text").waitFor();

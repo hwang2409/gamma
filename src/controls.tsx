@@ -54,7 +54,7 @@ function ModelPicker({ value, models, onChange }: { value: string; models: strin
         <div role="listbox" aria-label="model">
           {models.length ? models.map((model) => (
             <button type="button" role="option" aria-selected={model === value} key={model} onClick={() => { onChange(model); close(); }}>{model}</button>
-          )) : <p className="model-empty">zeta lists its models once the run starts; this run uses zeta's default model.</p>}
+          )) : <p className="model-empty">no models are available; this run uses zeta's default model.</p>}
         </div>
       ) : null}
     </div>
@@ -76,10 +76,8 @@ export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaC
   const load = useCallback(async () => {
     if (!client) return;
     try {
-      // The catalog needs a session zeta has open; a blank run asks with the open one, if any, else keeps the cache.
-      const target = sessionId ?? ((await client.request("status", {}, { timeoutMs: 15_000 })) as { session?: { session_id?: string } | null }).session?.session_id;
-      if (!target) return;
-      const catalog = await client.request("model_catalog", { session_id: target }, { timeoutMs: 15_000 });
+      // New zeta servers serve the catalog from the connected controller, even before a session exists.
+      const catalog = await client.request("model_catalog", sessionId ? { session_id: sessionId } : {}, { timeoutMs: 15_000 });
       localStorage.setItem(CATALOG, JSON.stringify(catalog));
       setModels(catalogModels(catalog));
       if (sessionId) {

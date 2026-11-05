@@ -209,7 +209,7 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
   };
 }
 
-export async function startFakeZeta({ origins, port = 0, live = true, historyMode = process.env.FAKE_ZETA_HISTORY_MODE === "old" ? "old" : "new", approvalHistoryMode = (process.env.FAKE_ZETA_APPROVAL_HISTORY_MODE as ApprovalHistoryMode | undefined) ?? "not-advertised-with-rows", approvalReconnect = true, approvalReconnectGraceMs = 90_000, serialDelays }: { origins: string[]; port?: number; live?: boolean; historyMode?: HistoryMode; approvalHistoryMode?: ApprovalHistoryMode; approvalReconnect?: boolean; approvalReconnectGraceMs?: number; serialDelays?: Readonly<Record<string, number | readonly number[]>> }) {
+export async function startFakeZeta({ origins, port = 0, live = true, historyMode = process.env.FAKE_ZETA_HISTORY_MODE === "old" ? "old" : "new", approvalHistoryMode = (process.env.FAKE_ZETA_APPROVAL_HISTORY_MODE as ApprovalHistoryMode | undefined) ?? "not-advertised-with-rows", approvalReconnect = true, approvalReconnectGraceMs = 90_000, newSessionSettings = true, serialDelays }: { origins: string[]; port?: number; live?: boolean; historyMode?: HistoryMode; approvalHistoryMode?: ApprovalHistoryMode; approvalReconnect?: boolean; approvalReconnectGraceMs?: number; newSessionSettings?: boolean; serialDelays?: Readonly<Record<string, number | readonly number[]>> }) {
   const home = await mkdtemp(join(tmpdir(), "fulcrum-web-zeta-"));
   await mkdir(join(home, "run"), { recursive: true });
   const discovery = join(home, "run", "serve.ws.json");
@@ -320,10 +320,10 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           if (mode === "incompatible") { reply({ error: { code: -32002, message: "version mismatch", data: { requested: "1.2", supported: ["1.0"] } } }); socket.close(); return; }
           if (mode === "slow") await wait(60_000);
           controller = socket;
-          const features = (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect)) ?? [];
+          const features = (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && newSessionSettings)) ?? [];
           const reconnect = features.includes("approval_reconnect");
           if (reconnect) reconnectControllers.add(socket as object);
-          reply({ result: { protocol_version: "1.2", server: "fake-zeta", capabilities: { features } } });
+          reply({ result: { protocol_version: "1.2", server: "fake-zeta", capabilities: { features, requests: settingsEnabled ? ["model_catalog", "session_settings", "set_settings", "send_images", ...(newSessionSettings ? ["new_session_settings"] : [])] : [] } } });
           if (decide && !approvalAborted) {
             if (!reconnect) expireApproval();
             else {
@@ -337,7 +337,10 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         if (method === "new_session") {
           // zeta's reply (server.py `new_session`): the full metadata of the new session, which becomes the server's own.
           if (running || rejectCreate) return reply({ error: { code: -32004, message: "a turn is already running" } });
-          const created = meta(`s-new-${sessions.length}`, 0, { created_at: at(0), cwd: "/Users/dev/me/fun/fulcrum", retained_tail: 8, compaction_budget: 262144, override_audit: [], context_files: [], skill_catalog: [], agent_catalog: [], plan_mode: false, project_id: null, tool_allow: null, tool_deny: [] });
+          const validModels = ["claude-sonnet-5", "claude-opus-4-6", "gpt-5.1-codex"];
+          if (typeof params.model !== "undefined" && (!validModels.includes(String(params.model)) || (typeof params.approval_mode !== "undefined" && !["ask", "allow", "deny"].includes(String(params.approval_mode))))) return reply({ error: { code: -32602, message: "invalid model or approval_mode" } });
+          settings = { model: typeof params.model === "string" ? params.model : "claude-opus-4-6", approval_mode: params.approval_mode === "allow" ? "allow" : "ask" };
+          const created = meta(`s-new-${sessions.length}`, 0, { created_at: at(0), model: settings.model, approval_mode: settings.approval_mode, cwd: "/Users/dev/me/fun/fulcrum", retained_tail: 8, compaction_budget: 262144, override_audit: [], context_files: [], skill_catalog: [], agent_catalog: [], plan_mode: false, project_id: null, tool_allow: null, tool_deny: [] });
           sessions.unshift(created);
           histories[created.session_id] = [];
           active = created.session_id;
@@ -390,10 +393,10 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         if (["model_catalog", "session_settings", "set_settings", "send_images"].includes(method)) {
           // zeta lists these under hello's `requests`; an older zeta does not know them.
           if (!settingsEnabled) return reply({ error: { code: -32601, message: "method not found" } });
-          if (typeof params.session_id !== "string" || !params.session_id) return reply({ error: { code: -32602, message: "session_id must be a nonempty string" } });
-          if (params.session_id !== active) return reply({ error: { code: -32003, message: "session is not active" } });
+          if (method !== "model_catalog" && (typeof params.session_id !== "string" || !params.session_id)) return reply({ error: { code: -32602, message: "session_id must be a nonempty string" } });
+          if (method !== "model_catalog" && params.session_id !== active) return reply({ error: { code: -32003, message: "session is not active" } });
         }
-        if (method === "model_catalog") return reply({ result: { models: ["claude-opus-4-6", "gpt-5.1-codex"], providers: { "claude-opus-4-6": "claude", "gpt-5.1-codex": "codex" } } });
+        if (method === "model_catalog") return reply({ result: { models: ["claude-sonnet-5", "claude-opus-4-6", "gpt-5.1-codex"], providers: { "claude-sonnet-5": "claude", "claude-opus-4-6": "claude", "gpt-5.1-codex": "codex" } } });
         if (method === "session_settings") return reply({ result: settings });
         if (method === "set_settings") {
           settings = { model: String(params.model), approval_mode: params.approval_mode as "ask" | "allow" | "deny" };
