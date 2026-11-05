@@ -111,7 +111,11 @@ function useCountdown(at: number | null) {
 
 const RUN = "gamma-run";
 /** The run to resume: `?run=` first (a shared link), else the one this browser had open. */
-const initialRun = () => new URLSearchParams(location.search).get("run") ?? localStorage.getItem(RUN);
+const initialRun = () => {
+  const id = new URLSearchParams(location.search).get("run") ?? localStorage.getItem(RUN);
+  if (id) rememberRun(id); // a run reopened from storage is in the url too, so the address can be shared
+  return id;
+};
 const rememberRun = (id: string | null) => {
   const url = new URL(location.href);
   if (id) { url.searchParams.set("run", id); localStorage.setItem(RUN, id); }

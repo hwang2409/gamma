@@ -50,7 +50,8 @@ export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, foo
   const steer = state === "steerable";
   const normal = vimOn && vim.mode === "normal";
 
-  useEffect(() => { if (autoFocus) input.current?.focus({ preventScroll: true }); }, [autoFocus]);
+  // Only an unfocused page gives focus to the field: a run that opens never takes it from another control.
+  useEffect(() => { if (autoFocus && (!document.activeElement || document.activeElement === document.body)) input.current?.focus({ preventScroll: true }); }, [autoFocus]);
   useEffect(() => { if (!vimOn) setVim(startVim({ text: "", cursor: 0 })); }, [vimOn]);
   useEffect(() => () => imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url)), []);
   // A file dropped beside the composer would replace the page with the image; only the composer takes files.
@@ -208,7 +209,7 @@ export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, foo
           ))}
         </ul>
       ) : null}
-      {attachError ? <p className="attach-error" role="status">{attachError}</p> : null}
+      {attachError ? <p className="attach-error" role="alert">{attachError}</p> : null}
       <div data-part="composer-field" data-value={text}>
         <textarea
           ref={input}

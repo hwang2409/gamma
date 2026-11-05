@@ -1,4 +1,5 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { chromium } from "playwright";
@@ -9,9 +10,11 @@ const port = Number(process.env.WEB_GATE_PORT ?? 4187);
 const origin = `http://127.0.0.1:${port}`;
 const shots = process.env.WEB_SHOTS ?? join(process.env.HOME ?? ".", ".zeta/scratch/gamma/polish");
 await mkdir(shots, { recursive: true });
+// A private gamma host, so the gate never touches a running one.
+const gammaHome = await mkdtemp(join(tmpdir(), "gamma-gate-"));
 const fake = await startFakeZeta({ origins: [origin] });
 fake.setSettingsEnabled(true);
-const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: root, env: { ...process.env, ZETA_HOME: fake.home }, stdio: "ignore" });
+const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: root, env: { ...process.env, ZETA_HOME: fake.home, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin }, stdio: "ignore" });
 const rows: Array<[string, string]> = [];
 const check = async (name: string, run: () => Promise<void>) => { try { await run(); rows.push([name, "pass"]); } catch (error) { rows.push([name, `fail: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}`]); } };
 try {
