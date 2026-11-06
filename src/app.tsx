@@ -582,7 +582,7 @@ function ConnectionNotice({ state, connection, compact = false }: { state: Conne
       break;
     case "incompatible":
       title = "unsupported protocol version";
-      body = <p>this zeta does not speak protocol 1.0 to 1.2. update zeta or gamma, then reload.</p>;
+      body = <><p>gamma needs zeta protocol 1.2, but this server offers an older version. update zeta, then retry.</p><button type="button" className="primary" onClick={() => location.reload()}>reload after updating zeta</button></>;
       break;
   }
   if (compact) {

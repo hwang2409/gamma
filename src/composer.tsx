@@ -20,7 +20,7 @@ function hint({ vim, mode, steer, images }: { vim: boolean; mode: Vim["mode"]; s
   if (steer && images) return "images send when the turn ends · stop it or wait";
   if (!vim) return `${send} · shift+enter for a new line`;
   if (mode === "insert") return `${send} · esc for normal mode`;
-  return `${send} · i to type · u to undo${steer ? " · ctrl+c to stop" : ""}`;
+  return `${send} · i type · u undo${steer ? " · ^c stop" : ""}`;
 }
 
 export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, footer, autoFocus, onImageOpen }: {
@@ -237,11 +237,11 @@ export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, foo
             <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10.5 4.5 5.4 9.6a1.5 1.5 0 0 0 2.1 2.1l5.3-5.3a3 3 0 0 0-4.2-4.2L3.2 7.6a4.5 4.5 0 0 0 6.4 6.4l4.4-4.4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="square" /></svg>
           </button>
           <input ref={files} type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden onChange={(event) => { if (event.target.files) void addFiles([...event.target.files]); event.currentTarget.value = ""; }} />
-          {steer && onStop ? (
+          {onStop ? (steer ? (
             <button ref={stopRef} type="button" data-part="composer-stop" data-action="stop" aria-label="stop the running turn" aria-disabled={stopping || undefined} onClick={stop}>
               {stopping ? "stopping" : "stop"}
             </button>
-          ) : null}
+          ) : <span className="composer-stop-slot" aria-hidden="true" />) : null}
           <button type="submit" data-part="composer-submit" data-action={steer ? "steer" : "send"} aria-label={steer ? "steer the running turn" : "send message"} aria-disabled={!canSubmit || undefined}>
             {steer ? "steer" : "send"}
           </button>
