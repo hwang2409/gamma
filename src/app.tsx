@@ -29,12 +29,15 @@ function ZetaApproval({ id }: { id: string }) {
 }
 // The intents of steers a stop dropped: zeta never gave them to the agent, so their rows must not look delivered.
 const Undelivered = createContext<ReadonlySet<string>>(new Set());
+const WaitingDeliveries = createContext<ReadonlySet<string>>(new Set());
 function UserRow({ id }: { id: string }) {
   const intent = useItemSelector(id, (item) => (item?.type === "user" && item.event.type === "user_message" ? item.event.intent : undefined));
   const delivery = useItemSelector(id, (item) => (item?.type === "user" && item.event.type === "user_message" ? item.event.delivery_id : undefined));
   const undelivered = useContext(Undelivered);
-  const lost = undelivered.has(intent ?? delivery ?? "");
-  const waiting = intent !== undefined && !lost;
+  const waitingDeliveries = useContext(WaitingDeliveries);
+  const identity = intent ?? delivery ?? "";
+  const lost = undelivered.has(identity);
+  const waiting = waitingDeliveries.has(identity) && !lost;
   return (
     <>
       <Fallback id={id} />
@@ -148,6 +151,12 @@ export function App() {
   const [newRunConfirm, setNewRunConfirm] = useState(false);
   const newRunButton = useRef<HTMLButtonElement>(null);
   const [undelivered, setUndelivered] = useState<ReadonlySet<string>>(() => new Set());
+  const [waitingDeliveries, setWaitingDeliveries] = useState<ReadonlySet<string>>(() => new Set());
+  const onWaitingDelivery = useCallback((intent: string, waiting: boolean) => setWaitingDeliveries((current) => {
+    const next = new Set(current);
+    if (waiting) next.add(intent); else next.delete(intent);
+    return next;
+  }), []);
   const onUndelivered = useCallback((intents: string[]) => {
     if (intents.length) setUndelivered((current) => new Set([...current, ...intents]));
   }, []);
@@ -177,6 +186,7 @@ export function App() {
         <RunProvider store={store} highlight={highlight} onRetry={client && open ? () => client.retrySession(open.id) : undefined}>
           <Undelivered value={undelivered}>
           <RetryTurn value={retryTurn}>
+            <WaitingDeliveries value={waitingDeliveries}>
             <div className="app">
               <header className="topbar">
                 <span className="brand"><span className="brand-mark" aria-hidden="true" /><span className="brand-name">gamma</span></span>
@@ -190,11 +200,12 @@ export function App() {
               </header>
               <main className="main">
                 <Body state={state} view={view} connection={connection} runs={runs} onNewRun={() => void newRun()} />
-                <Dock key={epoch} state={state} view={view} connection={connection} runs={runs} vim={vim} onUndelivered={onUndelivered} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />
+                <Dock key={epoch} state={state} view={view} connection={connection} runs={runs} vim={vim} onUndelivered={onUndelivered} onWaitingDelivery={onWaitingDelivery} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />
                 {newRunConfirm ? <ConfirmDialog title="stop the running turn?" confirm="stop and start new run" onConfirm={confirmNewRun} onCancel={() => { setNewRunConfirm(false); newRunButton.current?.focus(); }} /> : null}
                 {viewer ? <Inspector ref={(node) => { if (node) node.focus(); }} value={viewer} onClose={closeViewer} /> : null}
               </main>
             </div>
+            </WaitingDeliveries>
           </RetryTurn>
           </Undelivered>
         </RunProvider>
@@ -312,20 +323,38 @@ function DockComposer({ readOnly, running, vim, onSubmit, onStop, onImageOpen, c
   return <GammaComposer state={running ? "steerable" : "idle"} vim={vim} autoFocus onSubmit={onSubmit} onStop={onStop} onImageOpen={onImageOpen} footer={<RunSettings client={client} sessionId={sessionId} yolo={yolo} onYolo={onYolo} />} />;
 }
 
-function useDockDelivery(runs: RunControl, running: boolean, client: ZetaClient | null, onUndelivered: (intents: string[]) => void) {
+function useDockDelivery(runs: RunControl, running: boolean, client: ZetaClient | null, onUndelivered: (intents: string[]) => void, onWaiting: (intent: string, waiting: boolean) => void) {
+  const provisional = useRef(new Map<string, unknown>());
   const delivery = useMemo(() => createDelivery(undefined, (event) => {
     const store = transitionRun(runs.state.transition)?.lease.store;
     const deliveryId = event.type === "user_message" && event.delivery_id;
     if (!store || !deliveryId) return;
-    // zeta echoes before replying. an absent echo means the fallback row is provisional and stays queued.
-    if (store.hasMessageDelivery(deliveryId)) return;
+    // A real echo can arrive before the request reply. Only a missing echo needs a provisional queued row.
+    if (store.hasMessageDelivery(deliveryId)) { onWaiting(deliveryId, false); return; }
     store.dispatch(event);
-  }), [runs]);
+    const item = store.getState().outline.map(({ id }) => store.getItem(id)).find((candidate) => candidate?.type === "user" && candidate.event.type === "user_message" && candidate.event.delivery_id === deliveryId);
+    provisional.current.set(deliveryId, item);
+    onWaiting(deliveryId, true);
+  }), [runs, onWaiting]);
+  useEffect(() => {
+    const store = transitionRun(runs.state.transition)?.lease.store;
+    if (!store) return;
+    return store.subscribe(() => {
+      for (const [deliveryId, fallback] of provisional.current) {
+        const item = store.getState().outline.map(({ id }) => store.getItem(id)).find((candidate) => candidate?.type === "user" && candidate.event.type === "user_message" && candidate.event.delivery_id === deliveryId);
+        if (item !== fallback) { provisional.current.delete(deliveryId); onWaiting(deliveryId, false); }
+      }
+    });
+  }, [runs, onWaiting]);
   const wasRunning = useRef(running);
   useEffect(() => {
-    if (!running && wasRunning.current && client) delivery.turnEnded(client).then(onUndelivered, () => {});
+    if (!running && wasRunning.current && client) {
+      for (const deliveryId of provisional.current.keys()) onWaiting(deliveryId, false);
+      provisional.current.clear();
+      delivery.turnEnded(client).then(onUndelivered, () => {});
+    }
     wasRunning.current = running;
-  }, [running, client, delivery, onUndelivered]);
+  }, [running, client, delivery, onUndelivered, onWaiting]);
   return delivery;
 }
 
@@ -337,8 +366,8 @@ function useDockRetry(agent: ReturnType<typeof useAgentPhase>, client: ZetaClien
   }, [failed, client, delivery, onRetryTurn]);
 }
 
-function Dock({ state, view, connection, runs, vim, onUndelivered, onRetryTurn, onImageOpen }: {
-  state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; vim: boolean; onUndelivered(intents: string[]): void; onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>; onImageOpen(block: any): void;
+function Dock({ state, view, connection, runs, vim, onUndelivered, onWaitingDelivery, onRetryTurn, onImageOpen }: {
+  state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; vim: boolean; onUndelivered(intents: string[]): void; onWaitingDelivery(intent: string, waiting: boolean): void; onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>; onImageOpen(block: any): void;
 }) {
   const present = sessionPresentation(view.transition);
   const open = present.open;
@@ -349,7 +378,7 @@ function Dock({ state, view, connection, runs, vim, onUndelivered, onRetryTurn, 
   const { yolo, setYolo } = useContext(ApprovalModeContext);
   // This dock's own first send is starting the run: the composer stays put while zeta creates and opens it.
   const [starting, setStarting] = useState(false);
-  const delivery = useDockDelivery(runs, running, client, onUndelivered);
+  const delivery = useDockDelivery(runs, running, client, onUndelivered, onWaitingDelivery);
 
   const onSubmit: Submit = useCallback(async (text, images, { steer }) => {
     setStarting(true);
