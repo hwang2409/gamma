@@ -138,6 +138,7 @@ export function App() {
   const runState = useMemo(() => createRunStateStore(), []);
   const scopeSequence = useRef(0);
   const [composerScope, setComposerScope] = useState(() => selected ?? "blank:0");
+  const [dockIdentity, setDockIdentity] = useState(composerScope);
   const composerScopeRef = useRef(composerScope);
   const navigationScope = useRef<string | null>(null);
   const creating = useRef<{ defaultModel: boolean } | null>(null);
@@ -150,6 +151,7 @@ export function App() {
     } else {
       scope = navigationScope.current ?? id ?? `blank:${++scopeSequence.current}`;
       navigationScope.current = null;
+      setDockIdentity(scope);
     }
     composerScopeRef.current = scope;
     setComposerScope(scope);
@@ -245,7 +247,7 @@ export function App() {
               </header>
               <main className="main">
                 <Body state={state} view={view} connection={connection} runs={runs} onNewRun={() => void newRun()} />
-                <Dock key={composerScope} runId={composerScope} runState={runState} onCreating={(value) => { creating.current = value; }} state={state} view={view} connection={connection} runs={runs} vim={vim} onUndelivered={onUndelivered} onWaitingDelivery={onWaitingDelivery} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />
+                <Dock key={dockIdentity} runId={composerScope} runState={runState} onCreating={(value) => { creating.current = value; }} state={state} view={view} connection={connection} runs={runs} vim={vim} onUndelivered={onUndelivered} onWaitingDelivery={onWaitingDelivery} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />
                 {newRunConfirm ? <ConfirmDialog title="stop the running turn?" confirm="stop and start new run" onConfirm={confirmNewRun} onCancel={() => { setNewRunConfirm(false); newRunButton.current?.focus(); }} /> : null}
                 {viewer ? <Inspector value={viewer} onClose={closeViewer} /> : null}
               </main>
@@ -375,6 +377,8 @@ function DockComposer({ readOnly, running, vim, onSubmit, onStop, onImageOpen, c
 }
 
 function useDockDelivery(runs: RunControl, scope: string, running: boolean, client: ZetaClient | null, onUndelivered: (scope: string, intents: string[]) => void, onWaiting: (scope: string, intent: string, waiting: boolean) => void) {
+  const scopeRef = useRef(scope);
+  scopeRef.current = scope;
   const provisional = useRef(new Map<string, unknown>());
   const activeStore = transitionRun(runs.state.transition)?.lease.store;
   const storeRef = useRef(activeStore);
@@ -384,19 +388,19 @@ function useDockDelivery(runs: RunControl, scope: string, running: boolean, clie
     const deliveryId = event.type === "user_message" && event.delivery_id;
     if (!store || !deliveryId) return;
     // A real echo can arrive before the request reply. Only a missing echo needs a provisional queued row.
-    if (store.hasMessageDelivery(deliveryId)) { onWaiting(scope, deliveryId, false); return; }
+    if (store.hasMessageDelivery(deliveryId)) { onWaiting(scopeRef.current, deliveryId, false); return; }
     store.dispatch(event);
     const item = store.getState().outline.map(({ id }) => store.getItem(id)).find((candidate) => candidate?.type === "user" && candidate.event.type === "user_message" && candidate.event.delivery_id === deliveryId);
     provisional.current.set(deliveryId, item);
-    onWaiting(scope, deliveryId, true);
-  }), [scope, onWaiting]);
+    onWaiting(scopeRef.current, deliveryId, true);
+  }), [onWaiting]);
   const store = activeStore;
   useEffect(() => {
     if (!store) return;
     const reconcile = () => {
       for (const [deliveryId, fallback] of provisional.current) {
         const item = store.getState().outline.map(({ id }) => store.getItem(id)).find((candidate) => candidate?.type === "user" && candidate.event.type === "user_message" && candidate.event.delivery_id === deliveryId);
-        if (item !== fallback) { provisional.current.delete(deliveryId); onWaiting(scope, deliveryId, false); }
+        if (item !== fallback) { provisional.current.delete(deliveryId); onWaiting(scopeRef.current, deliveryId, false); }
       }
     };
     reconcile();
@@ -405,9 +409,9 @@ function useDockDelivery(runs: RunControl, scope: string, running: boolean, clie
   const wasRunning = useRef(running);
   useEffect(() => {
     if (!running && wasRunning.current && client) {
-      for (const deliveryId of provisional.current.keys()) onWaiting(scope, deliveryId, false);
+      for (const deliveryId of provisional.current.keys()) onWaiting(scopeRef.current, deliveryId, false);
       provisional.current.clear();
-      delivery.turnEnded(client).then((intents) => onUndelivered(scope, intents), () => {});
+      delivery.turnEnded(client).then((intents) => onUndelivered(scopeRef.current, intents), () => {});
     }
     wasRunning.current = running;
   }, [running, client, delivery, scope, onUndelivered, onWaiting]);
