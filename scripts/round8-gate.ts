@@ -50,9 +50,9 @@ function contrast(a: string, b: string) { const [high, low] = [luminance(parse(a
 async function auditDialog(page: Page, selector: string) {
   const buttons = page.locator(`${selector} button`);
   for (let index = 0; index < await buttons.count(); index++) {
-    const values = await buttons.nth(index).evaluate((node) => { const style = getComputedStyle(node); return { color: style.color, background: style.backgroundColor, border: style.borderColor, width: style.borderWidth }; });
+    const values = await buttons.nth(index).evaluate((node) => { const style = getComputedStyle(node); const surface = getComputedStyle(node.closest('[role="dialog"]')!); return { color: style.color, background: style.backgroundColor, border: style.borderColor, width: style.borderWidth, surface: surface.backgroundColor }; });
     if (contrast(values.color, values.background) < 4.5) throw new Error(`button ${index} text contrast is ${contrast(values.color, values.background).toFixed(2)}`);
-    if (values.width === "0px" || values.border === values.background) throw new Error(`button ${index} has no visible boundary`);
+    if (values.width === "0px" || (values.border === values.background && contrast(values.background, values.surface) < 3)) throw new Error(`button ${index} has no visible boundary`);
   }
 }
 
