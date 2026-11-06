@@ -138,20 +138,34 @@ export function App() {
   const store = open?.lease.store ?? blank;
   const [yolo, setYolo] = useState(false);
   const [retryTurn, setRetryTurn] = useState<(() => void) | null>(null);
+  const [viewer, setViewer] = useState<any>(null);
+  const viewerOpener = useRef<HTMLElement | null>(null);
+  const openViewer = useCallback((block: any) => { viewerOpener.current = document.activeElement as HTMLElement | null; setViewer(block); }, []);
+  const closeViewer = useCallback(() => { setViewer(null); requestAnimationFrame(() => viewerOpener.current?.focus()); }, []);
+  const [newRunConfirm, setNewRunConfirm] = useState(false);
+  const newRunButton = useRef<HTMLButtonElement>(null);
   const [undelivered, setUndelivered] = useState<ReadonlySet<string>>(() => new Set());
   const onUndelivered = useCallback((intents: string[]) => {
     if (intents.length) setUndelivered((current) => new Set([...current, ...intents]));
   }, []);
   const newRun = useCallback(async () => {
     if (store.getState().agent === "running") {
-      if (!confirm("a turn is running. stop it and start a new run?")) return;
-      if (connection.client) await stopTurn(connection.client).catch(() => {});
+      setNewRunConfirm(true);
+      return;
     }
     runs.reset();
     setYolo(false);
     setUndelivered(new Set());
     setEpoch((value) => value + 1);
   }, [connection, runs, store]);
+  const confirmNewRun = useCallback(async () => {
+    setNewRunConfirm(false);
+    if (connection.client) await stopTurn(connection.client).catch(() => {});
+    runs.reset();
+    setYolo(false);
+    setUndelivered(new Set());
+    setEpoch((value) => value + 1);
+  }, [connection, newRun]);
   const client = state.phase === "connected" ? connection.client : null;
 
   return (
@@ -165,7 +179,7 @@ export function App() {
                 <span className="brand"><span className="brand-mark" aria-hidden="true" /><span className="brand-name">gamma</span></span>
                 <RunTitle session={view.session} blank={!sessionPresentation(view.transition).selected} />
                 <YoloIndicator className="topbar-yolo" />
-                <button type="button" className="ghost new-run" onClick={() => void newRun()} disabled={!sessionPresentation(view.transition).selected}>new run</button>
+                <button ref={newRunButton} type="button" className="ghost new-run" onClick={() => void newRun()} disabled={!sessionPresentation(view.transition).selected}>new run</button>
                 <SettingsMenu>
                   <ThemePicker theme={theme} onChange={setTheme} />
                   <VimToggle on={vim} onChange={setVim} />
@@ -173,7 +187,9 @@ export function App() {
               </header>
               <main className="main">
                 <Body state={state} view={view} connection={connection} runs={runs} onNewRun={() => void newRun()} />
-                <Dock key={epoch} state={state} view={view} connection={connection} runs={runs} vim={vim} onUndelivered={onUndelivered} onRetryTurn={setRetryTurn} />
+                <Dock key={epoch} state={state} view={view} connection={connection} runs={runs} vim={vim} onUndelivered={onUndelivered} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />
+                {newRunConfirm ? <ConfirmDialog title="stop the running turn?" confirm="stop and start new run" onConfirm={confirmNewRun} onCancel={() => { setNewRunConfirm(false); newRunButton.current?.focus(); }} /> : null}
+                {viewer ? <Inspector ref={(node) => { if (node) node.focus(); }} value={viewer} onClose={closeViewer} /> : null}
               </main>
             </div>
           </RetryTurn>
@@ -266,8 +282,8 @@ function StatusLine({ phase }: { phase: RunPhase }) {
   );
 }
 
-function Dock({ state, view, connection, runs, vim, onUndelivered, onRetryTurn }: {
-  state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; vim: boolean; onUndelivered(intents: string[]): void; onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>;
+function Dock({ state, view, connection, runs, vim, onUndelivered, onRetryTurn, onImageOpen }: {
+  state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; vim: boolean; onUndelivered(intents: string[]): void; onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>; onImageOpen(block: any): void;
 }) {
   const present = sessionPresentation(view.transition);
   const open = present.open;
@@ -337,7 +353,7 @@ function Dock({ state, view, connection, runs, vim, onUndelivered, onRetryTurn }
     <div className="dock">
       {problem ? null : <StatusLine phase={phase} />}
       {readOnly !== null ? (
-        <GammaComposer state="read-only" reason={readOnly} vim={vim} onSubmit={onSubmit} />
+        <GammaComposer state="read-only" reason={readOnly} vim={vim} onSubmit={onSubmit} onImageOpen={onImageOpen} />
       ) : (
         <GammaComposer
           state={running ? "steerable" : "idle"}
@@ -345,6 +361,7 @@ function Dock({ state, view, connection, runs, vim, onUndelivered, onRetryTurn }
           autoFocus
           onSubmit={onSubmit}
           onStop={onStop}
+          onImageOpen={onImageOpen}
           footer={<RunSettings client={client} sessionId={blank || starting ? null : open?.id ?? null} yolo={yolo} onYolo={setYolo} />}
         />
       )}
@@ -440,6 +457,13 @@ function Run({ client, open, readOnly }: { client: ZetaClient | null; open: Open
       {viewer ? <Inspector ref={viewerDialog} value={viewer} onClose={closeViewer} /> : null}
     </Decisions.Provider>
   );
+}
+
+function ConfirmDialog({ title, confirm, onConfirm, onCancel }: { title: string; confirm: string; onConfirm(): void; onCancel(): void }) {
+  const first = useRef<HTMLButtonElement>(null);
+  const last = useRef<HTMLButtonElement>(null);
+  useEffect(() => { first.current?.focus(); const key = (event: KeyboardEvent) => { if (event.key === "Escape") { event.preventDefault(); onCancel(); } if (event.key === "Tab" && event.shiftKey && document.activeElement === first.current) { event.preventDefault(); last.current?.focus(); } else if (event.key === "Tab" && !event.shiftKey && document.activeElement === last.current) { event.preventDefault(); first.current?.focus(); } }; addEventListener("keydown", key); return () => removeEventListener("keydown", key); }, [onCancel]);
+  return <div className="confirm-backdrop"><div className="confirm-dialog" role="dialog" aria-modal="true" aria-label={title}><h2>{title}</h2><p>the current turn will be stopped before the new run opens.</p><div className="actions"><button ref={first} type="button" className="primary" onClick={onConfirm}>{confirm}</button><button ref={last} type="button" className="ghost" onClick={onCancel}>cancel</button></div></div></div>;
 }
 
 const Inspector = forwardRef<HTMLDivElement, { value: any; onClose(): void }>(function Inspector({ value, onClose }, ref) {

@@ -23,7 +23,7 @@ function hint({ vim, mode, steer, images }: { vim: boolean; mode: Vim["mode"]; s
   return `${send} · i to type · u to undo${steer ? " · ctrl+c to stop" : ""}`;
 }
 
-export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, footer, autoFocus }: {
+export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, footer, autoFocus, onImageOpen }: {
   state: ComposerState;
   reason?: string;
   vim: boolean;
@@ -32,6 +32,7 @@ export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, foo
   /** Controls for the footer row, before attach, stop, and send. */
   footer?: ReactNode;
   autoFocus?: boolean;
+  onImageOpen?(block: { url: string; mediaType: string; alt: string }): void;
 }) {
   const id = useId();
   const [text, setText] = useState("");
@@ -204,7 +205,7 @@ export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, foo
         <ul className="attachments" aria-label="attached images">
           {images.map((image, index) => (
             <li key={image.url} data-part="attachment">
-              <button type="button" className="attachment-preview" aria-label={`open image: ${image.name}`} onClick={() => window.open(image.url, "_blank", "noopener,noreferrer")}><img src={image.url} alt="" /></button>
+              <button type="button" className="attachment-preview" aria-label={`open image: ${image.name}`} onClick={() => onImageOpen?.({ url: image.url, mediaType: image.mime_type, alt: image.name })}><img src={image.url} alt="" /></button>
               <span title={image.name}>{image.name}</span>
               <button type="button" className="composer-tool" aria-label={`remove ${image.name}`} onClick={() => remove(index)}>×</button>
             </li>
