@@ -14,6 +14,20 @@ const errorText = (error: unknown) => (error instanceof Error ? error.message : 
 const unsentDraft = (current: string, sent: string) => (current.startsWith(sent) ? current.slice(sent.length) : current);
 const attempt = (action: () => unknown) => new Promise<unknown>((resolve) => resolve(action()));
 const hasFiles = (event: DragEvent) => [...event.dataTransfer.types].includes("Files");
+function composerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>, options: { steer: boolean; normal: boolean; vimOn: boolean; text: string; vim: Vim; draft(): Draft; apply(step: Step): void; submit(): void; stop(): void }) {
+  if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+  const key = event.key;
+  const plain = !event.metaKey && !event.ctrlKey && !event.altKey;
+  if (event.ctrlKey && !event.metaKey && key.toLowerCase() === "c" && options.steer && (options.normal || !options.text)) { event.preventDefault(); options.stop(); return; }
+  if (key === "Enter" && !event.shiftKey && (plain || options.normal)) { event.preventDefault(); options.submit(); return; }
+  if (!options.vimOn) return;
+  if (key === "Escape") { event.preventDefault(); return options.apply(escape(options.vim, options.draft())); }
+  if (options.vim.mode === "insert") return;
+  if (event.ctrlKey && !event.metaKey && key.toLowerCase() === "r") { event.preventDefault(); return options.apply(normalKey(options.vim, options.draft(), "ctrl+r")); }
+  if (!plain) return;
+  const mapped = key === "Backspace" ? "h" : key === "Delete" ? "x" : key;
+  if (mapped.length === 1) { event.preventDefault(); options.apply(normalKey(options.vim, options.draft(), mapped)); }
+}
 
 function hint({ vim, mode, steer, images }: { vim: boolean; mode: Vim["mode"]; steer: boolean; images: boolean }) {
   const send = steer ? "enter to steer" : "enter to send";
@@ -140,26 +154,7 @@ export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, foo
       .finally(() => { inFlight.current.stop = false; setStopping(false); });
   };
 
-  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    // Never act during IME composition: its Enter and Esc belong to the input method.
-    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-    const key = event.key;
-    const plain = !event.metaKey && !event.ctrlKey && !event.altKey;
-    if (event.ctrlKey && !event.metaKey && key.toLowerCase() === "c" && steer && (normal || !text)) {
-      event.preventDefault();
-      stop();
-      return;
-    }
-    if (key === "Enter" && !event.shiftKey && (plain || normal)) { event.preventDefault(); submit(); return; }
-    if (!vimOn) return;
-    if (key === "Escape") { event.preventDefault(); apply(escape(vim, draft())); return; }
-    if (vim.mode === "insert") return;
-    if (event.ctrlKey && !event.metaKey && key.toLowerCase() === "r") { event.preventDefault(); apply(normalKey(vim, draft(), "ctrl+r")); return; }
-    if (!plain) return;
-    const mapped = key === "Backspace" ? "h" : key === "Delete" ? "x" : key;
-    // Every printable key is a command in NORMAL, so none of them types into the draft.
-    if (mapped.length === 1) { event.preventDefault(); apply(normalKey(vim, draft(), mapped)); }
-  };
+  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => composerKeyDown(event, { steer, normal, vimOn, text, vim, draft, apply, submit, stop });
   const onPaste = (event: ClipboardEvent) => {
     const pasted = [...event.clipboardData.files];
     if (!pasted.length) return;

@@ -372,47 +372,20 @@ function useLastPrompt() {
   }, [store]));
 }
 
+function OpenBody({ state, connection, present, runs }: { state: ConnectionState; connection: Connection; present: ReturnType<typeof sessionPresentation>; runs: RunControl }) {
+  const open = present.open!;
+  const failed = present.openError;
+  const offline = state.phase !== "connected";
+  return <><>{offline && state.phase !== "connecting" && state.phase !== "dropped" ? <ConnectionNotice state={state} connection={connection} compact /> : null}</><>{!open.history.complete ? <p className="note" data-tone="busy" role="status">loading earlier messages… {open.history.messages.toLocaleString("en")} loaded</p> : null}</><>{open.syncing ? <p className="note" data-tone="busy" role="status">live updates paused while this run is busy; it will catch up</p> : null}</><>{failed ? <div className="note" data-tone="danger" role="alert"><span>could not reopen this run: {failed.message}</span> <button type="button" className="ghost" onClick={() => runs.dismissOpenError()}>dismiss</button> <button type="button" className="ghost" onClick={() => runs.select(failed.id)}>try again</button></div> : null}</><Run client={offline ? null : connection.client} open={open} readOnly={Boolean(present.opening || (failed && !failed.restored))} /></>;
+}
 function Body({ state, view, connection, runs, onNewRun }: { state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; onNewRun(): void }) {
   const present = sessionPresentation(view.transition);
   const offline = state.phase !== "connected";
-  if (present.open) {
-    const open = present.open;
-    const failed = present.openError;
-    return (
-      <>
-        {offline && state.phase !== "connecting" && state.phase !== "dropped" ? <ConnectionNotice state={state} connection={connection} compact /> : null}
-        {!open.history.complete ? <p className="note" data-tone="busy" role="status">loading earlier messages… {open.history.messages.toLocaleString("en")} loaded</p> : null}
-        {open.syncing ? <p className="note" data-tone="busy" role="status">live updates paused while this run is busy; it will catch up</p> : null}
-        {failed ? <div className="note" data-tone="danger" role="alert"><span>could not reopen this run: {failed.message}</span> <button type="button" className="ghost" onClick={() => runs.dismissOpenError()}>dismiss</button> <button type="button" className="ghost" onClick={() => runs.select(failed.id)}>try again</button></div> : null}
-        <Run client={offline ? null : connection.client} open={open} readOnly={Boolean(present.opening || (failed && !failed.restored))} />
-      </>
-    );
-  }
+  if (present.open) return <OpenBody state={state} connection={connection} present={present} runs={runs} />;
   if (offline && state.phase !== "connecting" && state.phase !== "dropped") return <div className="scroll"><ConnectionNotice state={state} connection={connection} /></div>;
-  // A run this page just created shows the blank note until it opens, not a loading panel.
   if (present.selected && !present.openError && view.session?.session_id !== present.selected) return <div className="scroll"><Panel title="opening the run" tone="busy"><p>loading history{present.opening?.messages ? ` · ${present.opening.messages.toLocaleString("en")} messages` : ""}</p></Panel></div>;
-  if (present.openError) {
-    const failure = present.openError;
-    return (
-      <div className="scroll">
-        <Panel title={failure.busy ? "zeta is busy with another run" : "could not open this run"} tone={failure.busy ? "warn" : "danger"}>
-          <p className="mono">{failure.busy ? "zeta serve opens a run only when no turn runs. wait for the running turn to end, then try again." : failure.message}</p>
-          <div className="actions">
-            <button type="button" className="primary" onClick={() => runs.select(failure.id)}>try again</button>
-            <button type="button" className="ghost" onClick={onNewRun}>new run</button>
-          </div>
-        </Panel>
-      </div>
-    );
-  }
-  return (
-    <div className="scroll">
-      <div className="empty-run" role="note">
-        <h2>new run</h2>
-        <p>write below to start. zeta creates the run when you send the first message.</p>
-      </div>
-    </div>
-  );
+  if (present.openError) { const failure = present.openError; return <div className="scroll"><Panel title={failure.busy ? "zeta is busy with another run" : "could not open this run"} tone={failure.busy ? "warn" : "danger"}><p className="mono">{failure.busy ? "zeta serve opens a run only when no turn runs. wait for the running turn to end, then try again." : failure.message}</p><div className="actions"><button type="button" className="primary" onClick={() => runs.select(failure.id)}>try again</button><button type="button" className="ghost" onClick={onNewRun}>new run</button></div></Panel></div>; }
+  return <div className="scroll"><div className="empty-run" role="note"><h2>new run</h2><p>write below to start. zeta creates the run when you send the first message.</p></div></div>;
 }
 
 function Run({ client, open, readOnly }: { client: ZetaClient | null; open: OpenRun; readOnly: boolean }) {
