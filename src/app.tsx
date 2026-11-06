@@ -34,7 +34,7 @@ function UserRow({ id }: { id: string }) {
   const delivery = useItemSelector(id, (item) => (item?.type === "user" && item.event.type === "user_message" ? item.event.delivery_id : undefined));
   const undelivered = useContext(Undelivered);
   const lost = undelivered.has(intent ?? delivery ?? "");
-  const waiting = intent !== undefined;
+  const waiting = intent !== undefined && !lost;
   return (
     <>
       <Fallback id={id} />
