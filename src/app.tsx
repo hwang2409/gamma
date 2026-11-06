@@ -461,10 +461,10 @@ function Run({ client, open, readOnly }: { client: ZetaClient | null; open: Open
 }
 
 function ConfirmDialog({ title, confirm, onConfirm, onCancel }: { title: string; confirm: string; onConfirm(): void; onCancel(): void }) {
-  const first = useRef<HTMLButtonElement>(null);
-  const last = useRef<HTMLButtonElement>(null);
-  useEffect(() => { first.current?.focus(); const key = (event: KeyboardEvent) => { if (event.key === "Escape") { event.preventDefault(); onCancel(); } if (event.key === "Tab" && event.shiftKey && document.activeElement === first.current) { event.preventDefault(); last.current?.focus(); } else if (event.key === "Tab" && !event.shiftKey && document.activeElement === last.current) { event.preventDefault(); first.current?.focus(); } }; addEventListener("keydown", key); return () => removeEventListener("keydown", key); }, [onCancel]);
-  return <div className="confirm-backdrop"><div className="confirm-dialog" role="dialog" aria-modal="true" aria-label={title}><h2>{title}</h2><p>the current turn will be stopped before the new run opens.</p><div className="actions"><button ref={first} type="button" className="primary" onClick={onConfirm}>{confirm}</button><button ref={last} type="button" className="ghost" onClick={onCancel}>cancel</button></div></div></div>;
+  const destructive = useRef<HTMLButtonElement>(null);
+  const safe = useRef<HTMLButtonElement>(null);
+  useEffect(() => { safe.current?.focus(); const key = (event: KeyboardEvent) => { if (event.key === "Escape") { event.preventDefault(); onCancel(); } if (event.key === "Tab" && event.shiftKey && document.activeElement === destructive.current) { event.preventDefault(); safe.current?.focus(); } else if (event.key === "Tab" && !event.shiftKey && document.activeElement === safe.current) { event.preventDefault(); destructive.current?.focus(); } }; addEventListener("keydown", key); return () => removeEventListener("keydown", key); }, [onCancel]);
+  return <div className="confirm-backdrop"><div className="confirm-dialog" role="dialog" aria-modal="true" aria-label={title}><h2>{title}</h2><p>the current turn will be stopped before the new run opens.</p><div className="actions"><button ref={destructive} type="button" className="confirm-primary" onClick={onConfirm}>{confirm}</button><button ref={safe} type="button" className="confirm-secondary" onClick={onCancel}>cancel</button></div></div></div>;
 }
 
 const Inspector = forwardRef<HTMLDivElement, { value: any; onClose(): void }>(function Inspector({ value, onClose }, ref) {

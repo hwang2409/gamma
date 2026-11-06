@@ -65,6 +65,14 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .confirm-dialog h2 { margin: 0; font-size: 16px; }
 .confirm-dialog .actions { margin-top: 16px; }
 .confirm-popover .actions { margin-top: 10px; }
+.confirm-popover .confirm-primary, .confirm-dialog .confirm-primary,
+.confirm-popover .confirm-secondary, .confirm-dialog .confirm-secondary { display: inline-flex; align-items: center; justify-content: center; min-height: var(--control); padding: 0 14px; border: 1px solid var(--fulcrum-fg); font-weight: 700; }
+.confirm-popover .confirm-primary, .confirm-dialog .confirm-primary { background: var(--fulcrum-fg); color: var(--fulcrum-bg); }
+.confirm-popover .confirm-secondary, .confirm-dialog .confirm-secondary { background: var(--fulcrum-bg); color: var(--fulcrum-fg); }
+.confirm-popover .confirm-primary:hover, .confirm-dialog .confirm-primary:hover { text-decoration: underline; text-underline-offset: 3px; }
+.confirm-popover .confirm-secondary:hover, .confirm-dialog .confirm-secondary:hover { background: var(--fulcrum-surface); }
+.confirm-popover .confirm-primary:focus-visible, .confirm-popover .confirm-secondary:focus-visible,
+.confirm-dialog .confirm-primary:focus-visible, .confirm-dialog .confirm-secondary:focus-visible { outline: 2px solid var(--fulcrum-accent); outline-offset: 2px; }
 .vim-toggle { justify-content: space-between; gap: 12px; width: 100%; }
 .vim-toggle .vim-state { color: var(--fulcrum-muted); }
 .vim-toggle[aria-pressed="true"] .vim-state { color: var(--fulcrum-fg); font-weight: 700; }
@@ -201,6 +209,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
   .notice .ghost, .turn-retry, .status-link { min-height: 44px; }
   .scroll [data-part] button { min-height: 44px; }
   .dock [data-part="composer"] .composer-tool, .dock [data-part="composer"] button { min-height: 44px; }
+  .dock [data-part="composer"] .confirm-popover button { min-height: 44px; }
   .dock [data-part="attachment"] .composer-tool { min-width: 44px; min-height: 44px; }
   .composer-stop-slot { width: 52px; min-height: 44px; }
   [data-part="attachment"] img { width: 56px; height: 56px; }

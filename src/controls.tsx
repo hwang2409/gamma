@@ -77,6 +77,7 @@ export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaC
   const [error, setError] = useState("");
   const [confirmYolo, setConfirmYolo] = useState(false);
   const confirmRef = useRef<HTMLDivElement>(null);
+  const approvalButton = useRef<HTMLButtonElement>(null);
   const startedSession = useRef<string | null | undefined>(sessionId === null ? undefined : null);
   if (startedSession.current === undefined && sessionId) startedSession.current = sessionId;
   const load = useCallback(async () => {
@@ -99,11 +100,8 @@ export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaC
     }
   }, [client, sessionId, onYolo]);
   useEffect(() => { setError(""); void load(); }, [load]);
-  useEffect(() => {
-    if (!confirmYolo) return;
-    const onKey = (event: globalThis.KeyboardEvent) => { if (event.key === "Escape") { event.preventDefault(); setConfirmYolo(false); } };
-    addEventListener("keydown", onKey); return () => removeEventListener("keydown", onKey);
-  }, [confirmYolo]);
+  const closeConfirm = useCallback(() => { setConfirmYolo(false); approvalButton.current?.focus(); }, []);
+  useDismiss(confirmYolo, confirmRef, closeConfirm);
   if (!client || unsupported) return null;
   const change = async (patch: Partial<SessionSettings>) => {
     setError("");
@@ -119,15 +117,16 @@ export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaC
     setPending(model);
   };
   const toggle = () => {
-    if (!yolo) { setConfirmYolo(true); requestAnimationFrame(() => confirmRef.current?.querySelector<HTMLButtonElement>("button")?.focus()); return; }
+    if (!yolo) { setConfirmYolo(true); requestAnimationFrame(() => confirmRef.current?.querySelector<HTMLButtonElement>("button[data-safe]")?.focus()); return; }
     if (sessionId) void change({ approval_mode: "ask" });
     else onYolo(false);
   };
-  const confirmAllow = () => { setConfirmYolo(false); if (sessionId) void change({ approval_mode: "allow" }); else onYolo(true); };
+  const confirmAllow = () => { closeConfirm(); if (sessionId) void change({ approval_mode: "allow" }); else onYolo(true); };
   return (
     <>
       <ModelPicker value={!sessionId || startedSession.current === sessionId ? pending : settings.model ?? ""} models={models} onChange={pick} />
       <button
+        ref={approvalButton}
         type="button"
         className="composer-tool approval-mode"
         data-yolo={yolo || undefined}
@@ -141,7 +140,7 @@ export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaC
       {error ? <span className="settings-error" role="alert" title={error}>{error}</span> : null}
       {confirmYolo ? <div ref={confirmRef} className="confirm-popover" role="dialog" aria-label="allow tools without asking">
         <p>allow tools to run without asking in this run?</p>
-        <div className="actions"><button type="button" className="primary" onClick={confirmAllow}>allow</button><button type="button" className="ghost" onClick={() => setConfirmYolo(false)}>keep asking</button></div>
+        <div className="actions"><button type="button" className="confirm-primary" onClick={confirmAllow}>allow</button><button type="button" className="confirm-secondary" data-safe onClick={closeConfirm}>keep asking</button></div>
       </div> : null}
     </>
   );
