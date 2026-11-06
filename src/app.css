@@ -69,7 +69,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .confirm-popover .confirm-primary, .confirm-dialog .confirm-primary,
 .confirm-popover .confirm-danger, .confirm-dialog .confirm-danger { display: inline-flex; align-items: center; justify-content: center; min-height: var(--control); padding: 0 14px; border: 1px solid var(--fulcrum-fg); font-weight: 700; }
 .confirm-popover .confirm-primary, .confirm-dialog .confirm-primary { background: var(--fulcrum-fg); color: var(--fulcrum-bg); }
-.confirm-popover .confirm-danger, .confirm-dialog .confirm-danger { border-color: var(--fulcrum-danger); background: var(--fulcrum-bg); color: var(--fulcrum-danger); }
+.confirm-popover .confirm-danger, .confirm-dialog .confirm-danger { border-color: var(--fulcrum-danger); background: var(--fulcrum-bg); color: var(--fulcrum-fg); }
 .confirm-popover .confirm-primary:hover, .confirm-dialog .confirm-primary:hover { text-decoration: underline; text-underline-offset: 3px; }
 .confirm-popover .confirm-danger:hover, .confirm-dialog .confirm-danger:hover { background: var(--fulcrum-surface); }
 .confirm-popover .confirm-primary:focus-visible, .confirm-popover .confirm-danger:focus-visible,
