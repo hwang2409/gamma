@@ -139,7 +139,7 @@ try {
       try {
         await page.setViewportSize({ width: 390, height: 844 });
         const reserve = page.locator('.undelivered[data-empty][data-reserve]');
-        const box = await reserve.boundingBox();
+        const box = await reserve.count() ? await reserve.boundingBox() : null;
         if (box && box.height > 1) throw new Error(`empty delivery note reserves ${box.height}px`);
         await page.screenshot({ path: join(shots, "mobile-no-delivery-gap-390.png") });
       } finally { await close(context); }
