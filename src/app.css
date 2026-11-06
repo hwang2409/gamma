@@ -185,7 +185,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .dock [data-part="composer"] .attach { display: inline-flex; align-items: center; justify-content: center; padding: 0; }
 .dock [data-part="attachment"] .composer-tool { min-width: 34px; min-height: 34px; border-width: 0 0 0 1px; font-size: 16px; }
 .composer-stop-slot, [data-part="composer-stop"] { display: inline-flex; align-items: center; justify-content: center; width: 94px; min-width: 94px; min-height: var(--control); }
-.composer-stop-slot { border: 1px solid var(--fulcrum-border); color: var(--fulcrum-muted); opacity: 0.45; }
+.composer-stop-slot { border: 1px solid var(--fulcrum-border); color: var(--fulcrum-muted); }
 .dock [data-part="composer-stop"] { --action: var(--fulcrum-fg); }
 .dock [data-part="composer"] .approval-mode[data-yolo] { --action: var(--fulcrum-danger); color: var(--fulcrum-danger); font-weight: 700; }
 .model-picker { position: relative; }
