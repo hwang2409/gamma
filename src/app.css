@@ -59,6 +59,8 @@ button:active:not(:disabled) { transform: scale(0.97); }
 /* Settings: a popover under its button with the theme picker and the vim switch. */
 .settings-menu { position: relative; flex: none; }
 .settings-popover { position: absolute; top: calc(100% + 6px); right: 0; z-index: 4; display: grid; gap: 8px; width: min(320px, calc(100vw - 24px)); padding: 12px; border: 1px solid var(--fulcrum-fg); background: var(--fulcrum-bg); }
+.confirm-popover { position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 5; width: min(340px, calc(100vw - 24px)); padding: 12px; border: 1px solid var(--fulcrum-fg); background: var(--fulcrum-bg); }
+.confirm-popover .actions { margin-top: 10px; }
 .vim-toggle { justify-content: space-between; gap: 12px; width: 100%; }
 .vim-toggle .vim-state { color: var(--fulcrum-muted); }
 .vim-toggle[aria-pressed="true"] .vim-state { color: var(--fulcrum-fg); font-weight: 700; }

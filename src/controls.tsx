@@ -75,6 +75,8 @@ export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaC
   const [models, setModels] = useState<string[]>(() => cachedCatalog().models);
   const [pending, setPending] = useState(() => nextRunModel().model ?? "");
   const [error, setError] = useState("");
+  const [confirmYolo, setConfirmYolo] = useState(false);
+  const confirmRef = useRef<HTMLDivElement>(null);
   const load = useCallback(async () => {
     if (!client) return;
     try {
@@ -95,6 +97,11 @@ export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaC
     }
   }, [client, sessionId, onYolo]);
   useEffect(() => { setError(""); void load(); }, [load]);
+  useEffect(() => {
+    if (!confirmYolo) return;
+    const onKey = (event: globalThis.KeyboardEvent) => { if (event.key === "Escape") { event.preventDefault(); setConfirmYolo(false); } };
+    addEventListener("keydown", onKey); return () => removeEventListener("keydown", onKey);
+  }, [confirmYolo]);
   if (!client || unsupported) return null;
   const change = async (patch: Partial<SessionSettings>) => {
     setError("");
@@ -110,10 +117,11 @@ export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaC
     setPending(model);
   };
   const toggle = () => {
-    if (!yolo && !confirm("allow tools to run without asking in this run?")) return;
-    if (sessionId) void change({ approval_mode: yolo ? "ask" : "allow" });
-    else onYolo(!yolo);
+    if (!yolo) { setConfirmYolo(true); requestAnimationFrame(() => confirmRef.current?.querySelector<HTMLButtonElement>("button")?.focus()); return; }
+    if (sessionId) void change({ approval_mode: "ask" });
+    else onYolo(false);
   };
+  const confirmAllow = () => { setConfirmYolo(false); if (sessionId) void change({ approval_mode: "allow" }); else onYolo(true); };
   return (
     <>
       <ModelPicker value={sessionId ? settings.model ?? "" : pending} models={models} onChange={pick} />
@@ -129,6 +137,10 @@ export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaC
         {yolo ? "YOLO" : "Ask"}
       </button>
       {error ? <span className="settings-error" role="alert" title={error}>{error}</span> : null}
+      {confirmYolo ? <div ref={confirmRef} className="confirm-popover" role="dialog" aria-label="allow tools without asking">
+        <p>allow tools to run without asking in this run?</p>
+        <div className="actions"><button type="button" className="primary" onClick={confirmAllow}>allow</button><button type="button" className="ghost" onClick={() => setConfirmYolo(false)}>keep asking</button></div>
+      </div> : null}
     </>
   );
 }
