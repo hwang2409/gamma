@@ -332,10 +332,10 @@ try {
     });
     await check("model, YOLO, reconnect persistence, image queue, and image viewer", async () => {
       const footer = page.locator('.dock [data-part="composer"] .composer-tools');
-      await footer.getByRole("button", { name: "model: claude-opus-4-6" }).click({ timeout: 5000 }).catch(() => { throw new Error("footer model picker did not open"); });
-      await footer.getByRole("option", { name: "gpt-5.1-codex" }).click({ timeout: 5000 }).catch(() => { throw new Error("model option could not be selected"); });
-      await footer.getByRole("button", { name: "model: gpt-5.1-codex" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("model change did not reload from zeta"); });
-      if (fake.settings.model !== "gpt-5.1-codex") throw new Error("model change did not reach zeta");
+      await footer.getByRole("button", { name: "model: gpt-5.1-codex" }).click({ timeout: 5000 }).catch(() => { throw new Error("footer model picker did not open"); });
+      await footer.getByRole("option", { name: "claude-opus-4-6" }).click({ timeout: 5000 }).catch(() => { throw new Error("model option could not be selected"); });
+      await footer.getByRole("button", { name: "model: claude-opus-4-6" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("model change did not reload from zeta"); });
+      if (fake.settings.model !== "claude-opus-4-6") throw new Error("model change did not reach zeta");
 
       await footer.getByRole("button", { name: /^approval mode: Ask/ }).click({ timeout: 5000 }).catch(() => { throw new Error("Ask control could not open YOLO confirmation"); });
       await page.getByRole("button", { name: "allow" }).click();
@@ -527,7 +527,7 @@ try {
       await page.evaluate(() => { localStorage.removeItem("gamma-run"); localStorage.removeItem("gamma-model"); });
       await page.goto(`${origin}/?theme=tokyo-night`);
       await ready(page, 5000);
-      await page.locator(".empty-run", { hasText: "new run" }).waitFor({ timeout: 3000 });
+      await page.locator(".empty-run", { hasText: "start a conversation" }).waitFor({ timeout: 3000 });
       const focused = await page.evaluate(() => document.activeElement?.closest(".dock") !== null && document.activeElement?.tagName === "TEXTAREA");
       if (!focused) throw new Error(`focus is on ${await page.evaluate(() => document.activeElement?.outerHTML.slice(0, 60))}, not the composer`);
       await shoot(page, "empty-1440-tokyo-night");
