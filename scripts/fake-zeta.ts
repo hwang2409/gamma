@@ -242,7 +242,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   let catalogBusy = false;
   let settingsEnabled = true;
   let advertiseNewSessionSettings = newSessionSettings;
-  let settings = { model: "claude-opus-4-6", approval_mode: "ask" as "ask" | "allow" | "deny" };
+  let settings = { model: "gpt-5.1-codex", approval_mode: "ask" as "ask" | "allow" | "deny" };
   const imageSends: Json[] = [];
   const decisions: Json[] = [];
   const requests: Array<{ method: string; received: number; started: number; replied?: number }> = [];

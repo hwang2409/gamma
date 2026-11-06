@@ -1,5 +1,5 @@
 import type { ZetaClient } from "@fulcrum/zeta";
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { catalogModels, catalogProviders, settingModel, settingsRequest, type SessionSettings } from "./settings";
 
 const CATALOG = "gamma-catalog";
@@ -38,13 +38,16 @@ function useDismiss(open: boolean, root: React.RefObject<HTMLElement | null>, cl
   }, [open, root, close]);
 }
 
-function ModelPicker({ value, models, onChange }: { value: string; models: string[]; onChange(value: string): void }) {
+function ModelPicker({ value, models, resolvedDefault, onChange }: { value: string; models: string[]; resolvedDefault?: string; onChange(value: string): void }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
   const root = useRef<HTMLDivElement>(null);
   const button = useRef<HTMLButtonElement>(null);
+  const listId = useId();
+  const typeahead = useRef({ text: "", at: 0 });
   const options = ["", ...models.filter((model) => model !== "")];
-  const label = value ? value : "default (claude-opus-4-6)";
+  const defaultLabel = resolvedDefault ? `default (${resolvedDefault})` : "default";
+  const label = value || defaultLabel;
   const close = useCallback(() => { setOpen(false); button.current?.focus(); }, []);
   useDismiss(open, root, close);
   useEffect(() => { if (open) { setActive(Math.max(0, options.indexOf(value))); root.current?.querySelector<HTMLElement>("[role=listbox]")?.focus(); } }, [open, value]);
@@ -54,11 +57,18 @@ function ModelPicker({ value, models, onChange }: { value: string; models: strin
     else if (event.key === "Home") { event.preventDefault(); setActive(0); }
     else if (event.key === "End") { event.preventDefault(); setActive(options.length - 1); }
     else if (event.key === "Enter") { event.preventDefault(); onChange(options[active] ?? ""); close(); }
+    else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      const now = Date.now();
+      const text = `${now - typeahead.current.at < 700 ? typeahead.current.text : ""}${event.key}`.toLowerCase();
+      typeahead.current = { text, at: now };
+      const found = options.findIndex((option) => (option || defaultLabel).toLowerCase().startsWith(text));
+      if (found >= 0) { event.preventDefault(); setActive(found); }
+    }
   };
   return <div className="model-picker" ref={root}>
     <button ref={button} type="button" className="composer-tool" aria-haspopup="listbox" aria-expanded={open} aria-label={`model: ${label}`} title={label} onClick={() => setOpen(!open)}>{label}</button>
-    {open ? <div role="listbox" aria-label="model" tabIndex={0} onKeyDown={key}>
-      {options.map((model, index) => <button type="button" role="option" aria-selected={model === value} data-active={index === active || undefined} key={model || "default"} onClick={() => { onChange(model); close(); }}>{model || "default (claude-opus-4-6)"}</button>)}
+    {open ? <div role="listbox" aria-label="model" tabIndex={0} aria-activedescendant={`${listId}-${active}`} onKeyDown={key}>
+      {options.map((model, index) => <button id={`${listId}-${index}`} tabIndex={-1} type="button" role="option" aria-selected={model === value} data-active={index === active || undefined} key={model || "default"} onClick={() => { onChange(model); close(); }}>{model || defaultLabel}</button>)}
     </div> : null}
   </div>;
 }
@@ -74,6 +84,7 @@ export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaC
   const [settings, setSettings] = useState<SessionSettings>({});
   const [models, setModels] = useState<string[]>(() => cachedCatalog().models);
   const [pending, setPending] = useState(() => nextRunModel().model ?? "");
+  const [resolvedDefault, setResolvedDefault] = useState<string>();
   const [error, setError] = useState("");
   const [confirmYolo, setConfirmYolo] = useState(false);
   const confirmRef = useRef<HTMLDivElement>(null);
@@ -95,10 +106,11 @@ export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaC
       try {
         const next = settingModel(await client.request("session_settings", { session_id: sessionId }, { timeoutMs: 15_000 }));
         setSettings(next);
+        if (startedSession.current === sessionId && !pending) setResolvedDefault(next.model);
         onYolo(next.approval_mode === "allow");
       } catch (cause) { setError(cause instanceof Error ? cause.message : "settings unavailable"); }
     }
-  }, [client, sessionId, onYolo]);
+  }, [client, sessionId, onYolo, pending]);
   useEffect(() => { setError(""); void load(); }, [load]);
   const closeConfirm = useCallback(() => { setConfirmYolo(false); approvalButton.current?.focus(); }, []);
   useDismiss(confirmYolo, confirmRef, closeConfirm);
@@ -112,7 +124,12 @@ export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaC
     } catch (cause) { setError(cause instanceof Error ? cause.message : "could not change settings"); }
   };
   const pick = (model: string) => {
-    if (sessionId) { setPending(model); return void change({ model }); }
+    if (sessionId) {
+      const selected = model || resolvedDefault || settings.model;
+      if (!selected) return;
+      setPending(model);
+      return void change({ model: selected });
+    }
     localStorage.setItem(MODEL, model);
     setPending(model);
   };
@@ -124,7 +141,7 @@ export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaC
   const confirmAllow = () => { closeConfirm(); if (sessionId) void change({ approval_mode: "allow" }); else onYolo(true); };
   return (
     <>
-      <ModelPicker value={!sessionId || startedSession.current === sessionId ? pending : settings.model ?? ""} models={models} onChange={pick} />
+      <ModelPicker value={!sessionId || startedSession.current === sessionId ? pending : settings.model ?? ""} models={models} resolvedDefault={sessionId && startedSession.current === sessionId ? resolvedDefault : undefined} onChange={pick} />
       <button
         ref={approvalButton}
         type="button"

@@ -77,7 +77,7 @@ try {
         await page.getByRole("button", { name: /^approval mode: Ask/ }).waitFor();
         await send(page, "fail this turn after the default-model first message");
         await waitUntil(() => fake.sent.length === 1, `fake zeta received ${fake.sent.length} messages, expected 1`);
-        if (fake.settings.model !== "claude-opus-4-6" || fake.settings.approval_mode !== "ask") throw new Error(`created with ${fake.settings.model}/${fake.settings.approval_mode}`);
+        if (fake.settings.model !== "gpt-5.1-codex" || fake.settings.approval_mode !== "ask") throw new Error(`created with ${fake.settings.model}/${fake.settings.approval_mode}`);
       } finally { await closePage(context); }
     });
 
@@ -100,10 +100,10 @@ try {
         await send(page, "fail this turn after checking the resolved default");
         await waitUntil(() => fake.sent.length === 1, `fake zeta received ${fake.sent.length} messages, expected 1`);
         await Bun.sleep(500);
-        const picker = page.getByRole("button", { name: "model: default (claude-opus-4-6)" });
+        const picker = page.getByRole("button", { name: "model: default (gpt-5.1-codex)" });
         await picker.waitFor({ timeout: 10_000 }).catch(async () => { throw new Error(`the picker shows ${await page.locator('button[aria-label^="model:"]').getAttribute("aria-label")}, not the resolved default`); });
         await picker.click();
-        const option = page.getByRole("option", { name: "default (claude-opus-4-6)" });
+        const option = page.getByRole("option", { name: "default (gpt-5.1-codex)" });
         await option.waitFor();
         if (await option.getAttribute("aria-selected") !== "true") throw new Error("the resolved default option is not selected");
       } finally { await closePage(context); }

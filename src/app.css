@@ -188,6 +188,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .model-picker [role="listbox"] { position: absolute; z-index: 5; right: 0; bottom: calc(100% + 4px); display: grid; width: max-content; min-width: 100%; max-width: calc(100vw - 24px); max-height: min(60dvh, 420px); overflow-y: auto; padding: 4px 0; border: 1px solid var(--fulcrum-fg); background: var(--fulcrum-bg); }
 .dock .model-picker [role="option"] { --action: transparent; min-height: 32px; padding: 0 12px; border: 0; background: transparent; color: var(--fulcrum-fg); font-weight: 400; text-align: left; white-space: nowrap; }
 .dock .model-picker [role="option"][aria-selected="true"] { font-weight: 700; }
+.dock .model-picker [role="option"][data-active] { border-left: var(--rail) solid var(--fulcrum-accent); background: var(--fulcrum-surface); }
 .dock .model-picker [role="option"]:hover, .dock .model-picker [role="option"]:focus-visible { background: var(--fulcrum-surface); }
 .model-empty { max-width: 32ch; margin: 0; padding: 6px 12px; color: var(--fulcrum-muted); font-size: 12px; }
 .settings-error { max-width: 20ch; overflow: hidden; color: var(--fulcrum-danger); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
@@ -246,4 +247,5 @@ button:active:not(:disabled) { transform: scale(0.97); }
   .topbar-yolo { display: none; }
   .run-title h1 { max-width: 10ch; }
   .dock .model-picker > button { max-width: 14ch; }
+  .model-picker [role="listbox"] { right: auto; left: 0; }
 }
