@@ -144,6 +144,8 @@ function useSubmission(state: ComposerState, onSubmit: Submit, onStop: (() => Pr
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string>();
   const inFlight = useRef({ submit: false, stop: false });
+  const runIdRef = useRef(runId);
+  runIdRef.current = runId;
   const steer = state === "steerable";
   const sending = pending;
   const canSubmit = (draft.text.trim() !== "" || attachments.images.length > 0) && !sending && !(steer && attachments.images.length > 0);
@@ -156,8 +158,8 @@ function useSubmission(state: ComposerState, onSubmit: Submit, onStop: (() => Pr
     store.beginDelivery(runId, { id: deliveryId, method: sentImages.length ? "send_images" : steer ? "steer" : "send", text: sent, images: sentImages });
     setError(undefined);
     attempt(() => onSubmit(sent, sentImages, { steer, deliveryId })).then(
-      () => store.settleDelivery(runId, deliveryId, "accepted"),
-      (failure: unknown) => { store.settleDelivery(runId, deliveryId, "rejected"); setError(`could not ${steer ? "steer" : "send"}: ${errorText(failure)}`); },
+      () => store.settleDelivery(runIdRef.current, deliveryId, "accepted"),
+      (failure: unknown) => { store.settleDelivery(runIdRef.current, deliveryId, "rejected"); setError(`could not ${steer ? "steer" : "send"}: ${errorText(failure)}`); },
     ).finally(() => { inFlight.current.submit = false; });
   };
   const stop = () => {
