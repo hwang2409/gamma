@@ -488,6 +488,6 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
 if (import.meta.main) {
   const origin = process.env.WEB_ORIGIN ?? "http://localhost:5180";
   const fake = await startFakeZeta({ origins: [origin, origin.replace("localhost", "127.0.0.1")], port: Number(process.env.FAKE_ZETA_PORT ?? 0) });
-  console.log(`fake zeta serve on 127.0.0.1:${fake.port} for ${origin}\nstart the app with:\n  ZETA_HOME=${fake.home} bun run --cwd apps/web dev\nctrl-c stops it and deletes ${fake.home}`);
+  console.log(`fake zeta serve on 127.0.0.1:${fake.port} for ${origin}\nstart the app with:\n  ZETA_HOME=${fake.home} bun run dev\nctrl-c stops it and deletes ${fake.home}`);
   process.once("SIGINT", () => void fake.close().then(() => process.exit(0)));
 }

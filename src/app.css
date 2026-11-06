@@ -122,7 +122,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .queued-delivery { margin: 4px 0 0; padding-left: 14px; color: var(--fulcrum-muted); font-size: 12px; font-weight: 700; }
 
 /* Notices and empty states. */
-.panel { width: min(64ch, calc(100% - 48px)); margin: max(32px, 12dvh) auto 32px; padding: 20px 24px; border: 1px solid var(--fulcrum-border); border-left: var(--rail) solid var(--fulcrum-muted); }
+.panel { width: min(var(--measure), calc(100% - 48px)); margin: max(32px, 12dvh) auto 32px; padding: 20px 24px; border: 1px solid var(--fulcrum-border); border-left: var(--rail) solid var(--fulcrum-muted); }
 .panel[data-tone="danger"] { border-left-color: var(--fulcrum-danger); }
 .panel[data-tone="warn"] { border-left-color: var(--fulcrum-warn); }
 .panel[data-tone="busy"] { border-left-color: var(--fulcrum-accent); }

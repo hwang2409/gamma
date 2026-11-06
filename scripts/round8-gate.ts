@@ -115,6 +115,9 @@ try {
           await send(page, "long turn for new run dialog"); await page.getByRole("button", { name: "new run" }).click(); await auditDialog(page, ".confirm-dialog");
           if (await page.evaluate(() => document.activeElement?.textContent) !== "cancel") throw new Error("new-run dialog focuses the destructive action");
           await page.screenshot({ path: join(shots, `b2-new-run-${theme}-${width}.png`) });
+          await page.getByRole("button", { name: "cancel" }).click();
+          await page.getByRole("button", { name: "stop the running turn" }).click();
+          await Bun.sleep(300);
         } finally { await close(context); }
       }
     });
