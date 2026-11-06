@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { addImage, readImage, type QueuedImage } from "./image-queue";
 import { escape, normalKey, startVim, type Draft, type Step, type Vim } from "./vim";
 
@@ -36,7 +36,7 @@ function AttachmentsStrip({ images, onOpen, onRemove }: { images: readonly Queue
   </li>)}</ul> : null;
 }
 
-function SubmitStopSlot({ steer, stopping, onStop, stopRef }: { steer: boolean; stopping: boolean; onStop?: () => void; stopRef?: (button: HTMLButtonElement | null) => void }) {
+function SubmitStopSlot({ steer, stopping, onStop, stopRef }: { steer: boolean; stopping: boolean; onStop?: () => void; stopRef?: (button: HTMLButtonElement | null) => void | (() => void) }) {
   if (!onStop) return null;
   return steer ? <button ref={stopRef} type="button" data-part="composer-stop" data-action="stop" aria-label="stop the running turn" aria-disabled={stopping || undefined} onClick={onStop}>{stopping ? "stopping" : "stop"}</button> : <span className="composer-stop-slot" aria-hidden="true" />;
 }
@@ -72,46 +72,13 @@ function ComposerBody({ id, state, steer, vimOn, vim, text, images, attachError,
   );
 }
 
-export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, footer, autoFocus, onImageOpen }: {
-  state: ComposerState;
-  reason?: string;
-  vim: boolean;
-  onSubmit: Submit;
-  onStop?(): Promise<unknown>;
-  /** Controls for the footer row, before attach, stop, and send. */
-  footer?: ReactNode;
-  autoFocus?: boolean;
-  onImageOpen?(block: { url: string; mediaType: string; alt: string }): void;
-}) {
-  const id = useId();
-  const [text, setText] = useState("");
-  const [images, setImages] = useState<readonly QueuedImage[]>([]);
-  const imagesRef = useRef<readonly QueuedImage[]>([]);
-  const [attachError, setAttachError] = useState("");
-  const [dragging, setDragging] = useState(false);
-  const [sending, setSending] = useState(false);
-  const [stopping, setStopping] = useState(false);
-  const [error, setError] = useState<string>();
-  const [vim, setVim] = useState<Vim>(() => startVim({ text: "", cursor: 0 }));
-  const inFlight = useRef({ submit: false, stop: false });
+function useComposerDraft(vimOn: boolean) {
   const input = useRef<HTMLTextAreaElement>(null);
-  const files = useRef<HTMLInputElement>(null);
   const cursor = useRef<number | null>(null);
-  const steer = state === "steerable";
+  const [text, setText] = useState("");
+  const [vim, setVim] = useState<Vim>(() => startVim({ text: "", cursor: 0 }));
   const normal = vimOn && vim.mode === "normal";
-
-  // Only an unfocused page gives focus to the field: a run that opens never takes it from another control.
-  useEffect(() => { if (autoFocus && (!document.activeElement || document.activeElement === document.body)) input.current?.focus({ preventScroll: true }); }, [autoFocus]);
   useEffect(() => { if (!vimOn) setVim(startVim({ text: "", cursor: 0 })); }, [vimOn]);
-  useEffect(() => () => imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url)), []);
-  // A file dropped beside the composer would replace the page with the image; only the composer takes files.
-  useEffect(() => {
-    const block = (event: globalThis.DragEvent) => { if (event.dataTransfer?.types.includes("Files")) event.preventDefault(); };
-    addEventListener("dragover", block);
-    addEventListener("drop", block);
-    return () => { removeEventListener("dragover", block); removeEventListener("drop", block); };
-  }, []);
-  // NORMAL draws its cursor as a one-character selection, the way a block cursor reads in a terminal.
   useLayoutEffect(() => {
     const field = input.current;
     if (!field || cursor.current === null) return;
@@ -120,8 +87,26 @@ export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, foo
     const block = normal && at < field.value.length && field.value[at] !== "\n" ? 1 : 0;
     field.setSelectionRange(at, at + block);
   });
+  const apply = ({ vim: next, draft }: Step) => { setVim(next); setText(draft.text); cursor.current = draft.cursor; };
+  const reset = (next: string) => { setText(next); setVim(startVim({ text: next, cursor: next.length })); };
+  const current = (): Draft => ({ text, cursor: input.current?.selectionStart ?? text.length });
+  return { input, text, setText, vim, normal, apply, reset, current };
+}
 
+function useAttachments(input: RefObject<HTMLTextAreaElement | null>) {
+  const files = useRef<HTMLInputElement>(null);
+  const imagesRef = useRef<readonly QueuedImage[]>([]);
+  const [images, setImages] = useState<readonly QueuedImage[]>([]);
+  const [attachError, setAttachError] = useState("");
+  const [dragging, setDragging] = useState(false);
   const setQueue = (next: readonly QueuedImage[]) => { imagesRef.current = next; setImages(next); };
+  useEffect(() => () => imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url)), []);
+  useEffect(() => {
+    const block = (event: globalThis.DragEvent) => { if (event.dataTransfer?.types.includes("Files")) event.preventDefault(); };
+    addEventListener("dragover", block);
+    addEventListener("drop", block);
+    return () => { removeEventListener("dragover", block); removeEventListener("drop", block); };
+  }, []);
   const addFiles = useCallback(async (list: Iterable<File>) => {
     let queue = imagesRef.current;
     let failure = "";
@@ -135,48 +120,45 @@ export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, foo
     const image = imagesRef.current[index];
     if (!image) return;
     URL.revokeObjectURL(image.url);
-    const next = imagesRef.current.filter((_, item) => item !== index);
-    setQueue(next);
+    setQueue(imagesRef.current.filter((_, item) => item !== index));
     setAttachError("");
-    // Focus stays in the tray: the next remove button, else the field.
     requestAnimationFrame(() => {
       const buttons = input.current?.form?.querySelectorAll<HTMLButtonElement>("[data-part='attachment'] button");
       (buttons?.[Math.min(index, (buttons?.length ?? 1) - 1)] ?? input.current)?.focus();
     });
   };
-
-  // The stop button goes when the turn ends; if it had focus, focus moves to the field, not to the page.
-  const stopRef = useCallback((button: HTMLButtonElement | null) => {
-    if (!button) return;
-    return () => { if (document.activeElement === button) input.current?.focus({ preventScroll: true }); };
-  }, []);
-
-  const apply = ({ vim: next, draft }: Step) => {
-    setVim(next);
-    setText(draft.text);
-    cursor.current = draft.cursor;
+  const discard = (sent: readonly QueuedImage[]) => {
+    sent.forEach((image) => URL.revokeObjectURL(image.url));
+    setQueue(imagesRef.current.filter((image) => !sent.includes(image)));
   };
-  const draft = (): Draft => ({ text, cursor: input.current?.selectionStart ?? text.length });
+  const onPaste = (event: ClipboardEvent) => {
+    const pasted = [...event.clipboardData.files];
+    if (!pasted.length) return;
+    event.preventDefault();
+    void addFiles(pasted);
+  };
+  return { files, images, current: imagesRef, attachError, dragging, setDragging, addFiles, remove, discard, onPaste };
+}
 
-  const canSubmit = (text.trim() !== "" || images.length > 0) && !sending && !(steer && images.length > 0);
+function useSubmission(state: ComposerState, onSubmit: Submit, onStop: (() => Promise<unknown>) | undefined, draft: ReturnType<typeof useComposerDraft>, attachments: ReturnType<typeof useAttachments>) {
+  const [sending, setSending] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [error, setError] = useState<string>();
+  const inFlight = useRef({ submit: false, stop: false });
+  const steer = state === "steerable";
+  const canSubmit = (draft.text.trim() !== "" || attachments.images.length > 0) && !sending && !(steer && attachments.images.length > 0);
   const submit = () => {
     if (inFlight.current.submit || !canSubmit || state === "read-only") return;
     inFlight.current.submit = true;
-    const sent = text;
-    const sentImages = imagesRef.current;
+    const sent = draft.text;
+    const sentImages = attachments.current.current;
     setSending(true);
     setError(undefined);
-    attempt(() => onSubmit(sent, sentImages, { steer }))
-      .then(
-        () => {
-          const rest = unsentDraft(input.current?.value ?? sent, sent);
-          setText(rest);
-          sentImages.forEach((image) => URL.revokeObjectURL(image.url));
-          setQueue(imagesRef.current.filter((image) => !sentImages.includes(image)));
-          setVim(startVim({ text: rest, cursor: rest.length }));
-        },
-        (failure: unknown) => setError(`could not ${steer ? "steer" : "send"}: ${errorText(failure)}`),
-      )
+    attempt(() => onSubmit(sent, sentImages, { steer })).then(() => {
+      const rest = unsentDraft(draft.input.current?.value ?? sent, sent);
+      attachments.discard(sentImages);
+      draft.reset(rest);
+    }, (failure: unknown) => setError(`could not ${steer ? "steer" : "send"}: ${errorText(failure)}`))
       .finally(() => { inFlight.current.submit = false; setSending(false); });
   };
   const stop = () => {
@@ -184,34 +166,41 @@ export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, foo
     inFlight.current.stop = true;
     setStopping(true);
     setError(undefined);
-    attempt(onStop)
-      .catch((failure: unknown) => setError(`could not stop: ${errorText(failure)}`))
+    attempt(onStop).catch((failure: unknown) => setError(`could not stop: ${errorText(failure)}`))
       .finally(() => { inFlight.current.stop = false; setStopping(false); });
   };
+  return { steer, canSubmit, sending, stopping, error, submit, stop };
+}
 
-  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => composerKeyDown(event, { steer, normal, vimOn, text, vim, draft, apply, submit, stop });
-  const onPaste = (event: ClipboardEvent) => {
-    const pasted = [...event.clipboardData.files];
-    if (!pasted.length) return;
-    event.preventDefault();
-    void addFiles(pasted);
-  };
-  const onFormSubmit = (event: FormEvent) => {
-    event.preventDefault();
-    input.current?.focus({ preventScroll: true });
-    submit();
-  };
+export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, footer, autoFocus, onImageOpen }: {
+  state: ComposerState;
+  reason?: string;
+  vim: boolean;
+  onSubmit: Submit;
+  onStop?(): Promise<unknown>;
+  /** Controls for the footer row, before attach, stop, and send. */
+  footer?: ReactNode;
+  autoFocus?: boolean;
+  onImageOpen?(block: { url: string; mediaType: string; alt: string }): void;
+}) {
+  const id = useId();
+  const draft = useComposerDraft(vimOn);
+  const attachments = useAttachments(draft.input);
+  const submission = useSubmission(state, onSubmit, onStop, draft, attachments);
+  useEffect(() => { if (autoFocus && (!document.activeElement || document.activeElement === document.body)) draft.input.current?.focus({ preventScroll: true }); }, [autoFocus]);
+  const stopRef = useCallback((button: HTMLButtonElement | null) => {
+    if (!button) return;
+    return () => { if (document.activeElement === button) draft.input.current?.focus({ preventScroll: true }); };
+  }, []);
+  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => composerKeyDown(event, { steer: submission.steer, normal: draft.normal, vimOn, text: draft.text, vim: draft.vim, draft: draft.current, apply: draft.apply, submit: submission.submit, stop: submission.stop });
+  const onFormSubmit = (event: FormEvent) => { event.preventDefault(); draft.input.current?.focus({ preventScroll: true }); submission.submit(); };
 
-  // Read-only with nothing to keep or say (a problem panel already explains): no empty box.
-  if (state === "read-only" && !text && !reason) return null;
-  if (state === "read-only")
-    return (
-      <div tabIndex={-1} data-part="composer" data-state="read-only" role="group" aria-label="message">
-        {text ? <div data-part="composer-field" data-value={text}><textarea rows={1} value={text} readOnly aria-label="message (draft, read-only)" /></div> : null}
-        {reason ? <p data-part="composer-reason">{reason}</p> : null}
-      </div>
-    );
+  if (state === "read-only" && !draft.text && !reason) return null;
+  if (state === "read-only") return <div tabIndex={-1} data-part="composer" data-state="read-only" role="group" aria-label="message">
+    {draft.text ? <div data-part="composer-field" data-value={draft.text}><textarea rows={1} value={draft.text} readOnly aria-label="message (draft, read-only)" /></div> : null}
+    {reason ? <p data-part="composer-reason">{reason}</p> : null}
+  </div>;
 
-  const message = error ?? (stopping ? "stopping" : sending ? (steer ? "steering" : "sending") : "");
-  return <ComposerBody id={id} state={state} steer={steer} vimOn={vimOn} vim={vim} text={text} images={images} attachError={attachError} dragging={dragging} sending={sending} stopping={stopping} error={error} message={message} canSubmit={canSubmit} footer={footer} input={input} files={files} onKeyDown={onKeyDown} onPaste={onPaste} onSubmit={onFormSubmit} onImageOpen={onImageOpen} onRemove={remove} onStop={onStop ? stop : undefined} onStopRef={stopRef} onFiles={addFiles} setDragging={setDragging} onChange={setText} />;
+  const message = submission.error ?? (submission.stopping ? "stopping" : submission.sending ? (submission.steer ? "steering" : "sending") : "");
+  return <ComposerBody id={id} state={state} steer={submission.steer} vimOn={vimOn} vim={draft.vim} text={draft.text} images={attachments.images} attachError={attachments.attachError} dragging={attachments.dragging} sending={submission.sending} stopping={submission.stopping} error={submission.error} message={message} canSubmit={submission.canSubmit} footer={footer} input={draft.input} files={attachments.files} onKeyDown={onKeyDown} onPaste={attachments.onPaste} onSubmit={onFormSubmit} onImageOpen={onImageOpen} onRemove={attachments.remove} onStop={onStop ? submission.stop : undefined} onStopRef={stopRef} onFiles={attachments.addFiles} setDragging={attachments.setDragging} onChange={draft.setText} />;
 }
