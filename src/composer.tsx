@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ClipboardEvent, type Dispatch, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject, type SetStateAction } from "react";
 import { addImage, readImage, type QueuedImage } from "./image-queue";
 import { escape, normalKey, startVim, type Draft, type Step, type Vim } from "./vim";
 
@@ -20,6 +20,7 @@ function composerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>, options: { s
   const plain = !event.metaKey && !event.ctrlKey && !event.altKey;
   if (event.ctrlKey && !event.metaKey && key.toLowerCase() === "c" && options.steer && (options.normal || !options.text)) { event.preventDefault(); options.stop(); return; }
   if (key === "Enter" && !event.shiftKey && (plain || options.normal)) { event.preventDefault(); options.submit(); return; }
+  if (key === "Escape" && options.steer && !options.vimOn) { event.preventDefault(); options.stop(); return; }
   if (!options.vimOn) return;
   if (key === "Escape") { event.preventDefault(); return options.apply(escape(options.vim, options.draft())); }
   if (options.vim.mode === "insert") return;
@@ -44,12 +45,19 @@ function SubmitStopSlot({ steer, stopping, onStop, stopRef }: { steer: boolean; 
 function hint({ vim, mode, steer, images }: { vim: boolean; mode: Vim["mode"]; steer: boolean; images: boolean }) {
   const send = steer ? "enter to steer" : "enter to send";
   if (steer && images) return "images send when the turn ends · stop it or wait";
-  if (!vim) return `${send} · shift+enter for a new line`;
+  if (!vim) return `${send} · esc to stop · shift+enter for a new line`;
   if (mode === "insert") return `${send} · esc for normal mode`;
   return `${send} · i type · u undo${steer ? " · ^c stop" : ""}`;
 }
 
-function ComposerBody({ id, state, steer, vimOn, vim, text, images, attachError, dragging, sending, stopping, error, message, canSubmit, footer, input, files, onKeyDown, onPaste, onSubmit, onImageOpen, onRemove, onStop, onStopRef, onFiles, setDragging, onChange }: any) {
+type ComposerBodyProps = {
+  field: { id: string; state: ComposerState; vimOn: boolean; vim: Vim; text: string; input: RefObject<HTMLTextAreaElement | null>; onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void; onChange(value: string): void };
+  attachments: { images: readonly QueuedImage[]; error: string; dragging: boolean; files: RefObject<HTMLInputElement | null>; onPaste(event: ClipboardEvent): void; onImageOpen?(block: { url: string; mediaType: string; alt: string }): void; onRemove(index: number): void; onFiles(files: Iterable<File>): Promise<void>; setDragging: Dispatch<SetStateAction<boolean>> };
+  submission: { steer: boolean; sending: boolean; stopping: boolean; error?: string; message: string; canSubmit: boolean; onSubmit(event: FormEvent): void; onStop?: () => void; onStopRef?: (button: HTMLButtonElement | null) => void | (() => void) };
+  footer?: ReactNode;
+};
+
+function ComposerBody({ field: { id, state, vimOn, vim, text, input, onKeyDown, onChange }, attachments: { images, error: attachError, dragging, files, onPaste, onImageOpen, onRemove, onFiles, setDragging }, submission: { steer, sending, stopping, error, message, canSubmit, onSubmit, onStop, onStopRef }, footer }: ComposerBodyProps) {
   return (
     <form data-part="composer" data-state={state} data-error={error ? "submit" : undefined} data-pending={sending ? "submit" : stopping ? "stop" : undefined} data-drop={dragging ? "active" : undefined} data-vim={vimOn ? vim.mode : undefined} aria-label="message" aria-busy={sending || stopping || undefined} onSubmit={onSubmit} onPaste={onPaste}
       onDragEnter={(event) => { if (hasFiles(event)) { event.preventDefault(); setDragging(true); } }}
@@ -109,12 +117,14 @@ function useAttachments(input: RefObject<HTMLTextAreaElement | null>) {
   }, []);
   const addFiles = useCallback(async (list: Iterable<File>) => {
     let queue = imagesRef.current;
-    let failure = "";
+    const failures: string[] = [];
     for (const file of list) {
-      try { queue = addImage(queue, await readImage(file)); } catch (cause) { failure = errorText(cause); }
+      let image: QueuedImage | undefined;
+      try { image = await readImage(file); queue = addImage(queue, image); }
+      catch (cause) { if (image) URL.revokeObjectURL(image.url); failures.push(`${file.name}: ${errorText(cause)}`); }
     }
     setQueue(queue);
-    setAttachError(failure);
+    setAttachError([...new Set(failures)].join(" · "));
   }, []);
   const remove = (index: number) => {
     const image = imagesRef.current[index];
@@ -130,6 +140,7 @@ function useAttachments(input: RefObject<HTMLTextAreaElement | null>) {
   const discard = (sent: readonly QueuedImage[]) => {
     sent.forEach((image) => URL.revokeObjectURL(image.url));
     setQueue(imagesRef.current.filter((image) => !sent.includes(image)));
+    setAttachError("");
   };
   const onPaste = (event: ClipboardEvent) => {
     const pasted = [...event.clipboardData.files];
@@ -202,5 +213,10 @@ export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, foo
   </div>;
 
   const message = submission.error ?? (submission.stopping ? "stopping" : submission.sending ? (submission.steer ? "steering" : "sending") : "");
-  return <ComposerBody id={id} state={state} steer={submission.steer} vimOn={vimOn} vim={draft.vim} text={draft.text} images={attachments.images} attachError={attachments.attachError} dragging={attachments.dragging} sending={submission.sending} stopping={submission.stopping} error={submission.error} message={message} canSubmit={submission.canSubmit} footer={footer} input={draft.input} files={attachments.files} onKeyDown={onKeyDown} onPaste={attachments.onPaste} onSubmit={onFormSubmit} onImageOpen={onImageOpen} onRemove={attachments.remove} onStop={onStop ? submission.stop : undefined} onStopRef={stopRef} onFiles={attachments.addFiles} setDragging={attachments.setDragging} onChange={draft.setText} />;
+  return <ComposerBody
+    field={{ id, state, vimOn, vim: draft.vim, text: draft.text, input: draft.input, onKeyDown, onChange: draft.setText }}
+    attachments={{ images: attachments.images, error: attachments.attachError, dragging: attachments.dragging, files: attachments.files, onPaste: attachments.onPaste, onImageOpen, onRemove: attachments.remove, onFiles: attachments.addFiles, setDragging: attachments.setDragging }}
+    submission={{ steer: submission.steer, sending: submission.sending, stopping: submission.stopping, error: submission.error, message, canSubmit: submission.canSubmit, onSubmit: onFormSubmit, onStop: onStop ? submission.stop : undefined, onStopRef: stopRef }}
+    footer={footer}
+  />;
 }

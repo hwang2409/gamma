@@ -4,7 +4,7 @@ import { MermaidFence } from "@fulcrum/mermaid";
 import { Approval, Code, Fallback, FileBlock, HighlightContext, ImageBlock, Message, RunProvider, Timeline, ToolCall, useItemSelector, useRun, useRunStore, useTimeline, type Renderers } from "@fulcrum/react";
 import { createRunStore } from "@fulcrum/core";
 import type { ZetaClient } from "@fulcrum/zeta";
-import { forwardRef, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type Dispatch, type ReactNode, type SetStateAction } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { createConnection, serveCommand, type Connection, type ConnectionState } from "./connection";
 import { createDelivery, stopTurn } from "./delivery";
 import { createRun, sessionPresentation, sessionTitle, transitionRun, type OpenRun, type RunControl, type RunState, type SessionMeta } from "./session";
@@ -122,19 +122,27 @@ const initialRun = () => {
   if (id) rememberRun(id); // a run reopened from storage is in the url too, so the address can be shared
   return id;
 };
-const rememberRun = (id: string | null) => {
+const rememberRun = (id: string | null, push = false) => {
   const url = new URL(location.href);
   if (id) { url.searchParams.set("run", id); localStorage.setItem(RUN, id); }
   else { url.searchParams.delete("run"); localStorage.removeItem(RUN); }
-  history.replaceState(null, "", url);
+  history[push ? "pushState" : "replaceState"](null, "", url);
 };
 
 export function App() {
   const [theme, setTheme] = useTheme();
   const [vim, setVim] = useVimSetting();
   const connection = useMemo(() => createConnection({ origin: location.origin }), []);
-  const runs = useMemo(() => createRun(connection, { selected: initialRun(), onSelect: rememberRun, bindings: hostBindings }), [connection]);
-  useEffect(() => () => { runs.dispose(); connection.stop(); }, [connection, runs]);
+  const pushSelection = useRef(false);
+  const runs = useMemo(() => createRun(connection, { selected: initialRun(), onSelect: (id) => { rememberRun(id, pushSelection.current); pushSelection.current = false; }, bindings: hostBindings }), [connection]);
+  useEffect(() => {
+    const pop = () => {
+      const id = new URLSearchParams(location.search).get("run");
+      if (id) runs.select(id); else runs.reset();
+    };
+    addEventListener("popstate", pop);
+    return () => { removeEventListener("popstate", pop); runs.dispose(); connection.stop(); };
+  }, [connection, runs]);
   const state = useExternal(connection);
   const view = useExternal(runs);
   const open = sessionPresentation(view.transition).open;
@@ -165,14 +173,17 @@ export function App() {
       setNewRunConfirm(true);
       return;
     }
+    pushSelection.current = true;
     runs.reset();
     setYolo(false);
     setUndelivered(new Set());
     setEpoch((value) => value + 1);
-  }, [connection, runs, store]);
+    requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('.dock textarea[aria-label="message"]')?.focus());
+  }, [runs, store]);
   const confirmNewRun = useCallback(async () => {
     setNewRunConfirm(false);
     if (connection.client) await stopTurn(connection.client).catch(() => {});
+    pushSelection.current = true;
     runs.reset();
     setYolo(false);
     setUndelivered(new Set());
@@ -202,7 +213,7 @@ export function App() {
                 <Body state={state} view={view} connection={connection} runs={runs} onNewRun={() => void newRun()} />
                 <Dock key={epoch} state={state} view={view} connection={connection} runs={runs} vim={vim} onUndelivered={onUndelivered} onWaitingDelivery={onWaitingDelivery} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />
                 {newRunConfirm ? <ConfirmDialog title="stop the running turn?" confirm="stop and start new run" onConfirm={confirmNewRun} onCancel={() => { setNewRunConfirm(false); newRunButton.current?.focus(); }} /> : null}
-                {viewer ? <Inspector ref={(node) => { if (node) node.focus(); }} value={viewer} onClose={closeViewer} /> : null}
+                {viewer ? <Inspector value={viewer} onClose={closeViewer} /> : null}
               </main>
             </div>
             </WaitingDeliveries>
@@ -273,7 +284,8 @@ function focusApproval() {
   requestAnimationFrame(() => {
     const row = find();
     row?.scrollIntoView({ block: "center" });
-    row?.querySelector<HTMLButtonElement>('button[data-action="approve"]:not(:disabled), button:not(:disabled)')?.focus({ preventScroll: true });
+    const decision = row?.querySelector<HTMLButtonElement>('button[data-action="approve"]:not(:disabled)') ?? row?.querySelector<HTMLButtonElement>('button:not(:disabled)');
+    decision?.focus({ preventScroll: true });
   });
 }
 
@@ -301,7 +313,11 @@ async function submitRun({ text, images, steer, connection, runs, delivery, yolo
   if (!target) throw new Error("not connected to zeta serve");
   if (!transitionRun(runs.state.transition)) {
     const choice = nextRunModel();
-    await runs.create(choice.model && target.features.includes("new_session_settings") ? { ...choice, approval_mode: yolo ? "allow" : "ask" } : choice);
+    try { await runs.create(choice.model && target.features.includes("new_session_settings") ? { ...choice, approval_mode: yolo ? "allow" : "ask" } : choice); }
+    catch (cause) {
+      if ((cause as { code?: unknown }).code === -32004) throw new Error("zeta could not start a new run because another turn is active");
+      throw cause;
+    }
     if (!choice.model || !target.features.includes("new_session_settings")) await applyFirstTurnSettings(target, transitionRun(runs.state.transition)!.id, choice, yolo);
   }
   const id = transitionRun(runs.state.transition)!.id;
@@ -420,18 +436,16 @@ function Body({ state, view, connection, runs, onNewRun }: { state: ConnectionSt
   if (offline && state.phase !== "connecting" && state.phase !== "dropped") return <div className="scroll"><ConnectionNotice state={state} connection={connection} /></div>;
   if (present.selected && !present.openError && view.session?.session_id !== present.selected) return <div className="scroll"><Panel title="opening the run" tone="busy"><p>loading history{present.opening?.messages ? ` · ${present.opening.messages.toLocaleString("en")} messages` : ""}</p></Panel></div>;
   if (present.openError) { const failure = present.openError; return <div className="scroll"><Panel title={failure.busy ? "zeta is busy with another run" : "could not open this run"} tone={failure.busy ? "warn" : "danger"}><p className="mono">{failure.busy ? "zeta serve opens a run only when no turn runs. wait for the running turn to end, then try again." : failure.message}</p><div className="actions"><button type="button" className="primary" onClick={() => runs.select(failure.id)}>try again</button><button type="button" className="ghost" onClick={onNewRun}>new run</button></div></Panel></div>; }
-  return <div className="scroll"><div className="empty-run" role="note"><h2>new run</h2><p>write below to start. zeta creates the run when you send the first message.</p></div></div>;
+  return <div className="scroll"><div className="empty-run" role="note"><h2>start a conversation</h2><p>write below to start. zeta creates the run when you send the first message.</p></div></div>;
 }
 
 function Run({ client, open, readOnly }: { client: ZetaClient | null; open: OpenRun; readOnly: boolean }) {
   const scroll = useRef<HTMLDivElement>(null);
   const artifacts = useArtifacts(open.id, open.lease.store);
   const [viewer, setViewer] = useState<any>(null);
-  const viewerDialog = useRef<HTMLDivElement>(null);
   const viewerOpener = useRef<HTMLElement | null>(null);
   const openViewer = useCallback((block: any) => { viewerOpener.current = document.activeElement as HTMLElement | null; setViewer(block); }, []);
   const closeViewer = useCallback(() => { setViewer(null); requestAnimationFrame(() => viewerOpener.current?.focus()); }, []);
-  useEffect(() => { if (!viewer) return; viewerDialog.current?.focus(); const onKey = (event: globalThis.KeyboardEvent) => { if (event.key === "Escape") closeViewer(); }; addEventListener("keydown", onKey); return () => removeEventListener("keydown", onKey); }, [viewer, closeViewer]);
   const decisions = useMemo(() => {
     if (!client || open.stale || readOnly) return { disabledReason: readOnly ? "opening the run — decisions are paused" : "reconnecting — decisions are disabled until the server confirms this run" };
     const decide = (method: "approve" | "deny"): Decide => async (request_id) => {
@@ -455,7 +469,7 @@ function Run({ client, open, readOnly }: { client: ZetaClient | null; open: Open
           </div>
         </Artifacts.Provider>
       </ImageViewer.Provider>
-      {viewer ? <Inspector ref={viewerDialog} value={viewer} onClose={closeViewer} /> : null}
+      {viewer ? <Inspector value={viewer} onClose={closeViewer} /> : null}
     </Decisions.Provider>
   );
 }
@@ -467,7 +481,8 @@ function ConfirmDialog({ title, confirm, onConfirm, onCancel }: { title: string;
   return <div className="confirm-backdrop"><div className="confirm-dialog" role="dialog" aria-modal="true" aria-label={title}><h2>{title}</h2><p>the current turn will be stopped before the new run opens.</p><div className="actions"><button ref={destructive} type="button" className="confirm-primary" onClick={onConfirm}>{confirm}</button><button ref={safe} type="button" className="confirm-secondary" onClick={onCancel}>cancel</button></div></div></div>;
 }
 
-const Inspector = forwardRef<HTMLDivElement, { value: any; onClose(): void }>(function Inspector({ value, onClose }, ref) {
+function Inspector({ value, onClose }: { value: any; onClose(): void }) {
+  const dialog = useRef<HTMLDivElement>(null);
   const artifact = value.artifact as Artifact | undefined;
   const url = artifact ? artifactContentUrl(artifact) : value.src ?? value.url;
   const type = artifact?.media_type ?? value.mediaType ?? "image/*";
@@ -485,8 +500,21 @@ const Inspector = forwardRef<HTMLDivElement, { value: any; onClose(): void }>(fu
     return () => { live = false; };
   }, [artifact, type, url]);
   useEffect(() => () => { if (htmlUrl) URL.revokeObjectURL(htmlUrl); }, [htmlUrl]);
+  useEffect(() => {
+    dialog.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    const key = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); onClose(); return; }
+      if (event.key !== "Tab" || !dialog.current) return;
+      const controls = [...dialog.current.querySelectorAll<HTMLElement>('a[href], button:not(:disabled)')];
+      const first = controls[0]; const last = controls.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    };
+    addEventListener("keydown", key);
+    return () => removeEventListener("keydown", key);
+  }, [onClose]);
   const rows = type === "text/csv" && text !== null ? text.split(/\r?\n/).slice(0, 200).filter(Boolean).map((line) => line.split(",").slice(0, 50)) : null;
-  return <div ref={ref} className="inspector" role="dialog" aria-modal="true" aria-label="file inspector" tabIndex={-1}>
+  return <div className="inspector-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div ref={dialog} className="inspector" role="dialog" aria-modal="true" aria-label="file inspector">
     <div className="inspector-bar"><strong>{artifact?.title ?? artifact?.filename ?? value.alt ?? "file"}</strong><a href={url} download={artifact?.filename ?? artifact?.title ?? "artifact"}>download</a><button type="button" onClick={onClose}>close</button></div>
     <div className="inspector-body">
       {type.startsWith("image/") ? <img src={url} alt={artifact?.title ?? value.alt ?? "image"} />
@@ -496,8 +524,8 @@ const Inspector = forwardRef<HTMLDivElement, { value: any; onClose(): void }>(fu
       : rows ? <table><tbody>{rows.map((row, index) => <tr key={index}>{row.map((cell, column) => <td key={column}>{cell.slice(0, 1000)}</td>)}</tr>)}</tbody></table>
       : text !== null ? <pre>{text.slice(0, 1_000_000)}</pre> : <span>loading…</span>}
     </div>
-  </div>;
-});
+  </div></div>;
+}
 
 /** A run with no rows yet says what to do instead of showing a blank transcript. */
 function EmptyRun() {

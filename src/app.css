@@ -112,7 +112,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 /* The run. No vertical padding: the virtual Timeline measures from the scroll box's top edge. */
 .scroll { flex: 1; min-height: 0; overflow: auto; padding: 0 var(--gutter); }
 .scroll:focus-visible { outline: none; }
-.scroll > [data-part="timeline"] { max-width: var(--measure); margin: 0 auto; }
+.scroll > [data-part="timeline"] { max-width: var(--measure); margin: 0 auto; padding-top: 12px; }
 /* The shipped control has no hit area of its own. */
 .scroll [data-part="jump-to-latest"] { display: flex; align-items: center; min-height: var(--control); padding: 0 14px; border: 0; }
 
@@ -134,10 +134,10 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 16px; }
 .wait { color: var(--fulcrum-muted); font-size: 12px; }
 .command { display: flex; align-items: stretch; margin-top: 12px; border: 1px solid var(--fulcrum-border); background: var(--fulcrum-surface); }
-.command code { flex: 1; min-width: 0; padding: 8px 12px; color: var(--fulcrum-fg); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.command code { flex: 1; min-width: 0; padding: 8px 12px; overflow-x: auto; color: var(--fulcrum-fg); font-size: 13px; white-space: pre; }
 .command code::before { content: "$ "; color: var(--fulcrum-muted); }
 .command .ghost { border-width: 0 0 0 1px; }
-.notice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 8px var(--gutter); border-bottom: 1px solid var(--fulcrum-border); border-left: var(--rail) solid var(--fulcrum-danger); font-size: 13px; }
+.notice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; width: min(var(--measure), calc(100% - 2 * var(--gutter))); margin-inline: auto; padding: 8px var(--gutter); border-bottom: 1px solid var(--fulcrum-border); border-left: var(--rail) solid var(--fulcrum-danger); font-size: 13px; }
 .notice[data-tone="warn"] { border-left-color: var(--fulcrum-warn); }
 .notice[data-tone="busy"] { border-left-color: var(--fulcrum-accent); }
 .notice .ghost { min-height: 30px; }
@@ -158,7 +158,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .status-link { min-height: 28px; padding: 0 8px; border-color: var(--fulcrum-warn); font-size: 12px; font-weight: 700; }
 .status-link::after { content: " ↓"; }
 /* A failed turn: the error row, then its one action. */
-.turn-error { display: grid; justify-items: start; gap: 6px; }
+.turn-error { display: grid; justify-items: start; gap: 6px; padding: 8px; border-left: var(--rail) solid var(--fulcrum-danger); }
 .turn-retry { min-height: 30px; padding: 0 10px; font-size: 12px; }
 
 /* The composer: fulcrum's parts, plus gamma's tray, footer tools, and vim mode. */
@@ -181,10 +181,10 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .dock [data-part="composer"] .composer-tool:hover { border-color: var(--fulcrum-fg); }
 .dock [data-part="composer"] .attach { display: inline-flex; align-items: center; justify-content: center; padding: 0; }
 .dock [data-part="attachment"] .composer-tool { min-width: 34px; min-height: 34px; border-width: 0 0 0 1px; font-size: 16px; }
-.composer-stop-slot { display: inline-block; width: 48px; min-height: var(--control); }
+.composer-stop-slot, [data-part="composer-stop"] { display: inline-block; width: 94px; min-width: 94px; min-height: var(--control); }
 .dock [data-part="composer"] .approval-mode[data-yolo] { --action: var(--fulcrum-danger); color: var(--fulcrum-danger); font-weight: 700; }
 .model-picker { position: relative; }
-.model-picker > button { max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-picker > button { max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-picker [role="listbox"] { position: absolute; z-index: 5; right: 0; bottom: calc(100% + 4px); display: grid; width: max-content; min-width: 100%; max-width: calc(100vw - 24px); max-height: min(60dvh, 420px); overflow-y: auto; padding: 4px 0; border: 1px solid var(--fulcrum-fg); background: var(--fulcrum-bg); }
 .dock .model-picker [role="option"] { --action: transparent; min-height: 32px; padding: 0 12px; border: 0; background: transparent; color: var(--fulcrum-fg); font-weight: 400; text-align: left; white-space: nowrap; }
 .dock .model-picker [role="option"][aria-selected="true"] { font-weight: 700; }
@@ -212,7 +212,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
   .dock [data-part="composer"] .composer-tool, .dock [data-part="composer"] button { min-height: 44px; }
   .dock [data-part="composer"] .confirm-popover button { min-height: 44px; }
   .dock [data-part="attachment"] .composer-tool { min-width: 44px; min-height: 44px; }
-  .composer-stop-slot { width: 52px; min-height: 44px; }
+  .composer-stop-slot, [data-part="composer-stop"] { width: 94px; min-width: 94px; min-height: 44px; }
   [data-part="attachment"] img { width: 56px; height: 56px; }
   .dock .model-picker [role="option"] { min-height: 44px; }
 }
@@ -226,16 +226,18 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .artifacts { display: grid; gap: 8px; margin-block-start: 8px; padding-inline-start: 18px; border-inline-start: 2px solid var(--fulcrum-border); }
 .artifact-markdown { padding: 12px; border: 1px solid var(--fulcrum-border); background: var(--fulcrum-surface); }
 .artifact-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--fulcrum-muted); font: 12px var(--fulcrum-font); margin-block-end: 8px; }
-.inspector { position: fixed; z-index: 50; inset: 24px; display: grid; grid-template-rows: auto 1fr; background: var(--fulcrum-bg); border: 1px solid var(--fulcrum-border); }
+.inspector-backdrop { position: fixed; z-index: 50; inset: 0; padding: 24px; background: color-mix(in srgb, var(--fulcrum-bg) 78%, transparent); }
+.inspector { display: grid; width: 100%; height: 100%; grid-template-rows: auto 1fr; background: var(--fulcrum-bg); border: 1px solid var(--fulcrum-fg); }
 .inspector-bar { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-block-end: 1px solid var(--fulcrum-border); }
 .inspector-bar strong { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.inspector-bar a { color: var(--fulcrum-accent); }
+.inspector-bar a, .inspector-bar button { display: inline-flex; align-items: center; min-height: var(--control); padding: 0 12px; border: 1px solid var(--fulcrum-border); color: var(--fulcrum-fg); text-decoration: none; }
+.inspector-bar a:hover, .inspector-bar button:hover { border-color: var(--fulcrum-fg); }
 .inspector-body { min-height: 0; overflow: auto; padding: 16px; }
 .inspector-body > img, .inspector-body > iframe { display: block; width: 100%; height: 100%; object-fit: contain; border: 0; background: white; }
 .inspector-body table { border-collapse: collapse; font: 13px var(--fulcrum-font); }
 .inspector-body td { border: 1px solid var(--fulcrum-border); padding: 5px 8px; white-space: pre-wrap; }
 .inspector-body pre { white-space: pre-wrap; overflow-wrap: anywhere; }
-@media (max-width: 600px) { .inspector { inset: 0; } .artifacts { padding-inline-start: 8px; } }
+@media (max-width: 600px) { .inspector-backdrop { padding: 0; } .artifacts { padding-inline-start: 8px; } }
 /* Narrow composer: the vim mode leads the hint on the first row; the tools fill the second row, model first. */
 @container (max-width: 480px) {
   .dock .vim-mode { order: 1; }
@@ -245,7 +247,10 @@ button:active:not(:disabled) { transform: scale(0.97); }
   .dock .composer-tools > .model-picker { display: flex; flex: 0 1 auto; min-width: 0; }
   .dock [data-part="composer"] .model-picker > .composer-tool { flex: 0 1 auto; min-width: 0; max-width: none; }
   .topbar-yolo { display: none; }
-  .run-title h1 { max-width: 10ch; }
-  .dock .model-picker > button { max-width: 14ch; }
+  .brand-name { display: none; }
+  .run-title h1 { max-width: none; }
+  .dock .model-picker > button { max-width: 18ch; }
+  .attachments { flex-wrap: nowrap; overflow-x: auto; }
+  [data-part="attachment"] { flex: 0 0 150px; }
   .model-picker [role="listbox"] { right: auto; left: 0; }
 }
