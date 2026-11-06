@@ -337,8 +337,8 @@ try {
       await footer.getByRole("button", { name: "model: gpt-5.1-codex" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("model change did not reload from zeta"); });
       if (fake.settings.model !== "gpt-5.1-codex") throw new Error("model change did not reach zeta");
 
-      page.once("dialog", (dialog) => dialog.accept());
-      await footer.getByRole("button", { name: /^approval mode: Ask/ }).click({ timeout: 5000 }).catch(() => { throw new Error("Ask control could not enable YOLO"); });
+      await footer.getByRole("button", { name: /^approval mode: Ask/ }).click({ timeout: 5000 }).catch(() => { throw new Error("Ask control could not open YOLO confirmation"); });
+      await page.getByRole("button", { name: "allow" }).click();
       await page.locator(".topbar-yolo", { hasText: "YOLO" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("top bar YOLO indicator did not appear"); });
       await footer.locator(".approval-mode[data-yolo]", { hasText: "YOLO" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("footer YOLO control did not turn on"); });
       if (fake.settings.approval_mode !== "allow") throw new Error("YOLO mode did not reach zeta");

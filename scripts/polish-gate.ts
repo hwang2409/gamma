@@ -76,6 +76,7 @@ try {
       await footer.getByRole("option", { name: "claude-sonnet-5" }).click();
       if (await model.getAttribute("aria-label") !== "model: claude-sonnet-5") throw new Error("catalog model was not picked on the blank run");
       await footer.getByRole("button", { name: /^approval mode: Ask/ }).click();
+      await page.getByRole("button", { name: "allow" }).click();
       await page.locator(".topbar-yolo", { hasText: "YOLO" }).waitFor();
       await field(page).fill("polish gate text");
       await field(page).press("Enter");
