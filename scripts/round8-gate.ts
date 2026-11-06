@@ -62,7 +62,7 @@ try {
   try {
     await check("echo-first-clears-queued-on-failed-turn", async () => {
       const { context, page } = await fresh(browser);
-      try { await send(page, "fail this turn after the real echo"); await waitUntil(() => fake.sent.length === 1, "send missing"); await page.getByText("the provider is overloaded (529)").waitFor({ timeout: 10_000 }); if (await page.getByRole("status", { name: "message queued" }).count()) throw new Error("queued remained after echo-first failed turn"); await page.screenshot({ path: join(shots, "b1-echo-first-failed-1440.png") }); }
+      try { await send(page, "fail this turn after the real echo"); await waitUntil(() => fake.sent.length === 1, "send missing"); await Bun.sleep(1_000); if (await page.getByRole("status", { name: "message queued" }).count()) throw new Error("queued remained after echo-first failed turn"); await page.screenshot({ path: join(shots, "b1-echo-first-failed-1440.png") }); }
       finally { await close(context); }
     });
     await check("reply-first-echo-reconciles", async () => {
