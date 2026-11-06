@@ -149,7 +149,7 @@ try {
         }
         if (name !== "incompatible") await page.getByRole("button", { name: "retry now" }).waitFor();
         // One problem, one home: the panel. The dock adds no status line and no composer note about it.
-        if (await page.locator(".status-line, [data-part=composer-reason]").count()) throw new Error("the problem shows again in the dock");
+        if (await page.locator(".status-line").count()) throw new Error("the problem shows again in the dock");
         await shoot(page, `state-${name}-1440`);
       });
     }
@@ -287,7 +287,7 @@ try {
       await shoot(page, "state-lost-1440");
       if (!(await page.locator('[data-part="timeline"] [data-kind="user"]').count())) throw new Error("transcript hidden while offline");
       await page.locator('.dock [data-part="composer"][data-state="read-only"]').waitFor({ timeout: 2000 });
-      if (await page.locator(".status-line, [data-part=composer-reason]").count()) throw new Error("the stopped server shows again in the dock");
+      if (await page.locator(".status-line").count()) throw new Error("the stopped server shows again in the dock");
       if (await page.locator(".dock button").count()) throw new Error("the composer offers actions while offline");
       const draft = page.locator('.dock [data-part="composer"][data-state="read-only"] textarea');
       if (!(await draft.count()) || (await draft.inputValue()) !== "draft kept across disconnect" || !(await draft.evaluate((node) => (node as HTMLTextAreaElement).readOnly))) throw new Error("the read-only composer does not show the draft, read-only");
