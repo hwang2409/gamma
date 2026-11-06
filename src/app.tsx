@@ -282,6 +282,19 @@ function StatusLine({ phase }: { phase: RunPhase }) {
   );
 }
 
+async function submitRun({ text, images, steer, connection, runs, delivery, yolo }: { text: string; images: readonly import("./image-queue").QueuedImage[]; steer: boolean; connection: Connection; runs: RunControl; delivery: ReturnType<typeof createDelivery>; yolo: boolean }) {
+  const target = connection.client;
+  if (!target) throw new Error("not connected to zeta serve");
+  if (!transitionRun(runs.state.transition)) {
+    const choice = nextRunModel();
+    await runs.create(choice.model && target.features.includes("new_session_settings") ? { ...choice, approval_mode: yolo ? "allow" : "ask" } : choice);
+    if (!choice.model || !target.features.includes("new_session_settings")) await applyFirstTurnSettings(target, transitionRun(runs.state.transition)!.id, choice, yolo);
+  }
+  const id = transitionRun(runs.state.transition)!.id;
+  if (!images.length) return delivery.submit(target, text, steer);
+  return target.request("send_images", { session_id: id, text, images: images.map(({ name, mime_type, data }) => ({ name, mime_type, data })) }, { timeoutMs: 30_000 });
+}
+
 function Dock({ state, view, connection, runs, vim, onUndelivered, onRetryTurn, onImageOpen }: {
   state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; vim: boolean; onUndelivered(intents: string[]): void; onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>; onImageOpen(block: any): void;
 }) {
@@ -307,26 +320,9 @@ function Dock({ state, view, connection, runs, vim, onUndelivered, onRetryTurn, 
   }, [running, client, delivery, onUndelivered]);
 
   const onSubmit: Submit = useCallback(async (text, images, { steer }) => {
-    const target = connection.client;
-    if (!target) throw new Error("not connected to zeta serve");
-    if (!transitionRun(runs.state.transition)) {
-      setStarting(true);
-      try {
-        const choice = nextRunModel();
-        // zeta requires model and approval_mode together. A default-model run is created first,
-        // then receives approval mode with the resolved current model before its first turn.
-        await runs.create(choice.model && target.features.includes("new_session_settings")
-          ? { ...choice, approval_mode: yolo ? "allow" : "ask" }
-          : choice);
-        if (!choice.model || !target.features.includes("new_session_settings")) {
-          const created = transitionRun(runs.state.transition)!.id;
-          await applyFirstTurnSettings(target, created, choice, yolo);
-        }
-      } finally { setStarting(false); }
-    }
-    const id = transitionRun(runs.state.transition)!.id;
-    if (!images.length) return delivery.submit(target, text, steer);
-    return target.request("send_images", { session_id: id, text, images: images.map(({ name, mime_type, data }) => ({ name, mime_type, data })) }, { timeoutMs: 30_000 });
+    setStarting(true);
+    try { return await submitRun({ text, images, steer, connection, runs, delivery, yolo }); }
+    finally { setStarting(false); }
   }, [connection, runs, delivery, yolo]);
   const onStop = useCallback(() => (client ? delivery.stop(client) : Promise.reject(new Error("not connected to zeta serve"))), [client, delivery]);
   const lastPrompt = useLastPrompt();
