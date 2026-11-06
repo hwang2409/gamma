@@ -87,7 +87,7 @@ export const FEATURES = ["list_sessions_paging", "approval_history", "approval_r
 export function createConnection({
   origin,
   discover = discoverZeta,
-  connect = (discovery) => connectZeta({ url: discovery.url, token: discovery.token, features: FEATURES }),
+  connect = (discovery) => connectZeta({ url: discovery.url, token: discovery.controller_token, role: "controller", features: FEATURES }),
   now = Date.now,
   setTimer = (callback, ms) => setTimeout(callback, ms),
   clearTimer = (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),

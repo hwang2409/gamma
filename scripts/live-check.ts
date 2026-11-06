@@ -35,7 +35,6 @@ const probe = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, 
 const wsPort = probe.port;
 probe.stop(true);
 
-// stderr carries the connect url with the token, so it is discarded, never printed.
 const server: ChildProcess = spawn(zeta, ["serve", "--ws", String(wsPort), "--ws-origin", origin, "--cwd", cwd, "--no-auto-memory"], {
   cwd, env: { ...process.env, ZETA_HOME: home, ZETA_ANTHROPIC_OAUTH_COMPAT: "1" }, stdio: "ignore", detached: true,
 });

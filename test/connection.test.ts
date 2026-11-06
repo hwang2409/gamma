@@ -3,7 +3,7 @@ import { ZetaError, type ZetaClient, type ZetaDiscovery } from "@fulcrum/zeta";
 import { backoff, createConnection, initialConnection, reduceConnection, serveCommand, type ConnectionState } from "../src/connection";
 
 const ORIGIN = "http://localhost:5180";
-const found: ZetaDiscovery = { url: "ws://127.0.0.1:8765/", token: "secret", origins: [ORIGIN] };
+const found: ZetaDiscovery = { url: "ws://127.0.0.1:8765/", controller_token: "controller-secret", observer_token: "observer-secret", origins: [ORIGIN] };
 
 test("backoff doubles from 0.5 s and stops at 10 s", () => {
   expect([1, 2, 3, 4, 5, 6, 9].map(backoff)).toEqual([500, 1000, 2000, 4000, 8000, 10_000, 10_000]);
