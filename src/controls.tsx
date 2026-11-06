@@ -114,6 +114,7 @@ export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaC
   useEffect(() => { setError(""); void load(); }, [load]);
   const closeConfirm = useCallback(() => { setConfirmYolo(false); approvalButton.current?.focus(); }, []);
   useDismiss(confirmYolo, confirmRef, closeConfirm);
+  useEffect(() => { if (confirmYolo) confirmRef.current?.querySelector<HTMLButtonElement>("button[data-safe]")?.focus(); }, [confirmYolo]);
   if (!client || unsupported) return null;
   const change = async (patch: Partial<SessionSettings>) => {
     setError("");
@@ -134,7 +135,7 @@ export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaC
     setPending(model);
   };
   const toggle = () => {
-    if (!yolo) { setConfirmYolo(true); requestAnimationFrame(() => confirmRef.current?.querySelector<HTMLButtonElement>("button[data-safe]")?.focus()); return; }
+    if (!yolo) { setConfirmYolo(true); return; }
     if (sessionId) void change({ approval_mode: "ask" });
     else onYolo(false);
   };
