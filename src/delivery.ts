@@ -65,17 +65,15 @@ export function createDelivery(newId: () => string = () => `web-${crypto.randomU
     if (result.accepted === true && message.id && reconcile)
       reconcile({ type: "user_message", text: message.text, mode: used, intent: message.intent, delivery_id: message.id });
   };
-  const fresh = (client: ZetaClient, text: string): Message => {
-    const intent = newId();
-    return { text, intent, id: client.features.includes("delivery_id") ? intent : null };
-  };
+  const fresh = (client: ZetaClient, text: string, deliveryId = newId()): Message =>
+    ({ text, intent: deliveryId, id: client.features.includes("delivery_id") ? deliveryId : null });
   const dropped = async (client: ZetaClient, id: string) => {
     const { status, outcome } = (await client.request("delivery_status", { delivery_id: id }, { timeoutMs: 15_000 })) as { status?: string; outcome?: string };
     return status === "dropped" || (status === "evicted" && outcome === "dropped");
   };
   return {
-    async submit(client: ZetaClient, text: string, steer: boolean) {
-      const message = unsettled?.text === text ? unsettled : fresh(client, text);
+    async submit(client: ZetaClient, text: string, steer: boolean, deliveryId?: string) {
+      const message = unsettled?.text === text ? unsettled : fresh(client, text, deliveryId);
       unsettled = message;
       const delivered = await deliver(client, steer ? "steer" : "send", message);
       unsettled = null;

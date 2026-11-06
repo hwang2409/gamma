@@ -113,17 +113,17 @@ try {
       } finally { await fake.start(); await close(context); }
     });
 
-    await check("mobile-delivery-note-reserves-height", async () => {
+    await check("mobile-delivery-note-has-no-empty-reservation", async () => {
       const { context, page } = await fresh(browser);
       try {
         await page.locator('.dock textarea[aria-label="message"]').fill("delivery note reservation");
         await page.getByRole("button", { name: "send message" }).click();
         await page.locator('[data-kind="user"]', { hasText: "delivery note reservation" }).waitFor({ timeout: 10_000 });
-        const reserve = page.locator('.undelivered[data-empty][data-reserve]').last();
-        if (!await reserve.count()) throw new Error("delivery row has no reserved note");
-        const height = await reserve.evaluate((node) => node.getBoundingClientRect().height);
-        if (height < 30) throw new Error(`delivery note reserved only ${height}px`);
-        await page.screenshot({ path: join(shots, "major-delivery-note-reserved-390.png") });
+        const empty = page.locator('.undelivered[data-empty][data-reserve]').last();
+        if (!await empty.count()) throw new Error("delivery row has no note anchor");
+        const height = await empty.evaluate((node) => node.getBoundingClientRect().height);
+        if (height > 1) throw new Error(`empty delivery note reserves ${height}px`);
+        await page.screenshot({ path: join(shots, "minor-delivery-note-no-gap-390.png") });
       } finally { await close(context); }
     });
 

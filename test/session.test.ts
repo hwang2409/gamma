@@ -89,7 +89,7 @@ test("on connect with no run selected it stays blank and never opens the server'
   expect(fake.calls.map(([method]) => method)).toEqual(["hello"]);
 });
 
-test("a failed replacement restores the old active session and its readiness", async () => {
+test("a failed replacement keeps browser selection while retaining the old active session", async () => {
   const resumed: string[] = [];
   const selected: string[] = [];
   const fake = await server(handlers("b", { resume: (params) => { resumed.push(params.session_id as string); if (params.session_id === "a") { return { session: meta("a", "x") }; } return { session: meta("b", "x") }; }, session_history: (params) => { if (params.session_id === "a") throw { code: -32602, message: "session log is invalid at line 12" }; return { messages: [], next_offset: null }; } }));
@@ -100,7 +100,7 @@ test("a failed replacement restores the old active session and its readiness", a
   expect(resumed).toEqual(["a", "b"]);
   expect(present(view).open?.id).toBe("b");
   expect(present(view).selected).toBe("b");
-  expect(selected).toEqual(["a", "b"]);
+  expect(selected).toEqual(["a"]);
   expect(present(view).openError?.message).toBe("session log is invalid at line 12");
 });
 

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ClipboardEvent, type Dispatch, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject, type SetStateAction } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type ClipboardEvent, type Dispatch, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject, type SetStateAction } from "react";
 import { addImage, readImage, type QueuedImage } from "./image-queue";
+import type { RunStateStore } from "./run-state";
 import { escape, normalKey, startVim, type Draft, type Step, type Vim } from "./vim";
 
 // gamma's composer. It keeps @fulcrum/react's composer parts (data-part names, so the shipped styles apply) and adds what
@@ -7,32 +8,9 @@ import { escape, normalKey, startVim, type Draft, type Step, type Vim } from "./
 // for these, then this file shrinks to the vim keymap.
 
 export type ComposerState = "idle" | "steerable" | "read-only";
-export type Submit = (text: string, images: readonly QueuedImage[], intent: { steer: boolean }) => Promise<unknown>;
-export type ComposerDraft = { text: string; images: readonly QueuedImage[] };
-
-/** Keeps unsent work for recent runs and owns every attachment URL until it is sent, removed, or evicted. */
-export function createComposerDrafts(limit = 8) {
-  const drafts = new Map<string, ComposerDraft>();
-  const revoke = (draft: ComposerDraft) => draft.images.forEach((image) => URL.revokeObjectURL(image.url));
-  return {
-    get(key: string): ComposerDraft { return drafts.get(key) ?? { text: "", images: [] }; },
-    set(key: string, draft: ComposerDraft) {
-      drafts.delete(key);
-      drafts.set(key, draft);
-      while (drafts.size > limit) {
-        const oldest = drafts.keys().next().value as string;
-        revoke(drafts.get(oldest)!);
-        drafts.delete(oldest);
-      }
-    },
-    dispose() { drafts.forEach(revoke); drafts.clear(); },
-  };
-}
-export type ComposerDrafts = ReturnType<typeof createComposerDrafts>;
+export type Submit = (text: string, images: readonly QueuedImage[], intent: { steer: boolean; deliveryId: string }) => Promise<unknown>;
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error)) || "unknown error";
-/** Only the sent text leaves the draft: what the user typed while it was in flight stays (fulcrum's rule). */
-const unsentDraft = (current: string, sent: string) => (current.startsWith(sent) ? current.slice(sent.length) : current);
 const attempt = (action: () => unknown) => new Promise<unknown>((resolve) => resolve(action()));
 const hasFiles = (event: DragEvent) => [...event.dataTransfer.types].includes("Files");
 function composerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>, options: { steer: boolean; normal: boolean; vimOn: boolean; text: string; vim: Vim; draft(): Draft; apply(step: Step): void; submit(): void; stop(): void }) {
@@ -67,7 +45,7 @@ function hint({ vim, mode, steer, images }: { vim: boolean; mode: Vim["mode"]; s
   const send = steer ? "enter to steer" : "enter to send";
   if (steer && images) return "images send when the turn ends · stop it or wait";
   if (!vim) return `${send} · esc to stop · shift+enter for a new line`;
-  if (mode === "insert") return `${send} · esc for normal mode, then ^c to stop`;
+  if (mode === "insert") return `${send} · esc normal · ^c to stop`;
   return `${send} · i type · u undo${steer ? " · ^c stop" : ""}`;
 }
 
@@ -101,12 +79,10 @@ function ComposerBody({ field: { id, state, vimOn, vim, text, input, onKeyDown, 
   );
 }
 
-function useComposerDraft(vimOn: boolean, initial: string, onChange: (text: string) => void) {
+function useComposerDraft(vimOn: boolean, text: string, onChange: (text: string) => void) {
   const input = useRef<HTMLTextAreaElement>(null);
   const cursor = useRef<number | null>(null);
-  const [text, setTextState] = useState(initial);
-  const setText = (next: string) => { setTextState(next); onChange(next); };
-  const [vim, setVim] = useState<Vim>(() => startVim({ text: initial, cursor: initial.length }));
+  const [vim, setVim] = useState<Vim>(() => startVim({ text, cursor: text.length }));
   const normal = vimOn && vim.mode === "normal";
   useEffect(() => { if (!vimOn) setVim(startVim({ text: "", cursor: 0 })); }, [vimOn]);
   useLayoutEffect(() => {
@@ -117,19 +93,18 @@ function useComposerDraft(vimOn: boolean, initial: string, onChange: (text: stri
     const block = normal && at < field.value.length && field.value[at] !== "\n" ? 1 : 0;
     field.setSelectionRange(at, at + block);
   });
-  const apply = ({ vim: next, draft }: Step) => { setVim(next); setText(draft.text); cursor.current = draft.cursor; };
-  const reset = (next: string) => { setText(next); setVim(startVim({ text: next, cursor: next.length })); };
+  const apply = ({ vim: next, draft }: Step) => { setVim(next); onChange(draft.text); cursor.current = draft.cursor; };
   const current = (): Draft => ({ text, cursor: input.current?.selectionStart ?? text.length });
-  return { input, text, setText, vim, normal, apply, reset, current };
+  return { input, text, setText: onChange, vim, normal, apply, current };
 }
 
-function useAttachments(input: RefObject<HTMLTextAreaElement | null>, initial: readonly QueuedImage[], onChange: (images: readonly QueuedImage[]) => void) {
+function useAttachments(input: RefObject<HTMLTextAreaElement | null>, images: readonly QueuedImage[], onChange: (images: readonly QueuedImage[]) => void, onRemove: (index: number) => void) {
   const files = useRef<HTMLInputElement>(null);
-  const imagesRef = useRef<readonly QueuedImage[]>(initial);
-  const [images, setImages] = useState<readonly QueuedImage[]>(initial);
+  const imagesRef = useRef(images);
+  imagesRef.current = images;
   const [attachError, setAttachError] = useState("");
   const [dragging, setDragging] = useState(false);
-  const setQueue = (next: readonly QueuedImage[]) => { imagesRef.current = next; setImages(next); onChange(next); };
+  const setQueue = (next: readonly QueuedImage[]) => onChange(next);
   useEffect(() => {
     const block = (event: globalThis.DragEvent) => { if (event.dataTransfer?.types.includes("Files")) event.preventDefault(); };
     addEventListener("dragover", block);
@@ -148,20 +123,13 @@ function useAttachments(input: RefObject<HTMLTextAreaElement | null>, initial: r
     setAttachError([...new Set(failures)].join(" · "));
   }, []);
   const remove = (index: number) => {
-    const image = imagesRef.current[index];
-    if (!image) return;
-    URL.revokeObjectURL(image.url);
-    setQueue(imagesRef.current.filter((_, item) => item !== index));
+    if (!imagesRef.current[index]) return;
+    onRemove(index);
     setAttachError("");
     requestAnimationFrame(() => {
       const buttons = input.current?.form?.querySelectorAll<HTMLButtonElement>("[data-part='attachment'] button");
       (buttons?.[Math.min(index, (buttons?.length ?? 1) - 1)] ?? input.current)?.focus();
     });
-  };
-  const discard = (sent: readonly QueuedImage[]) => {
-    sent.forEach((image) => URL.revokeObjectURL(image.url));
-    setQueue(imagesRef.current.filter((image) => !sent.includes(image)));
-    setAttachError("");
   };
   const onPaste = (event: ClipboardEvent) => {
     const pasted = [...event.clipboardData.files];
@@ -169,29 +137,28 @@ function useAttachments(input: RefObject<HTMLTextAreaElement | null>, initial: r
     event.preventDefault();
     void addFiles(pasted);
   };
-  return { files, images, current: imagesRef, attachError, dragging, setDragging, addFiles, remove, discard, onPaste };
+  return { files, images, current: imagesRef, attachError, dragging, setDragging, addFiles, remove, onPaste };
 }
 
-function useSubmission(state: ComposerState, onSubmit: Submit, onStop: (() => Promise<unknown>) | undefined, draft: ReturnType<typeof useComposerDraft>, attachments: ReturnType<typeof useAttachments>) {
-  const [sending, setSending] = useState(false);
+function useSubmission(state: ComposerState, onSubmit: Submit, onStop: (() => Promise<unknown>) | undefined, draft: ReturnType<typeof useComposerDraft>, attachments: ReturnType<typeof useAttachments>, store: RunStateStore, runId: string, pending: boolean) {
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string>();
   const inFlight = useRef({ submit: false, stop: false });
   const steer = state === "steerable";
+  const sending = pending;
   const canSubmit = (draft.text.trim() !== "" || attachments.images.length > 0) && !sending && !(steer && attachments.images.length > 0);
   const submit = () => {
     if (inFlight.current.submit || !canSubmit || state === "read-only") return;
     inFlight.current.submit = true;
     const sent = draft.text;
     const sentImages = attachments.current.current;
-    setSending(true);
+    const deliveryId = `web-${crypto.randomUUID()}`;
+    store.beginDelivery(runId, { id: deliveryId, method: sentImages.length ? "send_images" : steer ? "steer" : "send", text: sent, images: sentImages });
     setError(undefined);
-    attempt(() => onSubmit(sent, sentImages, { steer })).then(() => {
-      const rest = unsentDraft(draft.input.current?.value ?? sent, sent);
-      attachments.discard(sentImages);
-      draft.reset(rest);
-    }, (failure: unknown) => setError(`could not ${steer ? "steer" : "send"}: ${errorText(failure)}`))
-      .finally(() => { inFlight.current.submit = false; setSending(false); });
+    attempt(() => onSubmit(sent, sentImages, { steer, deliveryId })).then(
+      () => store.settleDelivery(runId, deliveryId, "accepted"),
+      (failure: unknown) => { store.settleDelivery(runId, deliveryId, "rejected"); setError(`could not ${steer ? "steer" : "send"}: ${errorText(failure)}`); },
+    ).finally(() => { inFlight.current.submit = false; });
   };
   const stop = () => {
     if (inFlight.current.stop || !onStop) return;
@@ -204,7 +171,7 @@ function useSubmission(state: ComposerState, onSubmit: Submit, onStop: (() => Pr
   return { steer, canSubmit, sending, stopping, error, submit, stop };
 }
 
-export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, footer, autoFocus, onImageOpen, drafts, draftKey }: {
+export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, footer, autoFocus, onImageOpen, store, runId }: {
   state: ComposerState;
   reason?: string;
   vim: boolean;
@@ -214,18 +181,18 @@ export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, foo
   footer?: ReactNode;
   autoFocus?: boolean;
   onImageOpen?(block: { url: string; mediaType: string; alt: string }): void;
-  drafts: ComposerDrafts;
-  draftKey: string;
+  store: RunStateStore;
+  runId: string;
 }) {
   const id = useId();
-  const initial = useRef(drafts.get(draftKey));
-  const text = useRef(initial.current.text);
-  const images = useRef(initial.current.images);
-  const saveText = useCallback((next: string) => { text.current = next; drafts.set(draftKey, { text: next, images: images.current }); }, [drafts, draftKey]);
-  const saveImages = useCallback((next: readonly QueuedImage[]) => { images.current = next; drafts.set(draftKey, { text: text.current, images: next }); }, [drafts, draftKey]);
-  const draft = useComposerDraft(vimOn, initial.current.text, saveText);
-  const attachments = useAttachments(draft.input, initial.current.images, saveImages);
-  const submission = useSubmission(state, onSubmit, onStop, draft, attachments);
+  const record = useSyncExternalStore(store.subscribe, () => store.get(runId));
+  const saveText = useCallback((text: string) => store.edit(runId, { text }), [store, runId]);
+  const saveImages = useCallback((attachments: readonly QueuedImage[]) => store.edit(runId, { attachments }), [store, runId]);
+  const removeImage = useCallback((index: number) => store.removeAttachment(runId, index), [store, runId]);
+  const draft = useComposerDraft(vimOn, record.text, saveText);
+  const attachments = useAttachments(draft.input, record.attachments, saveImages, removeImage);
+  const pending = [...record.deliveries.values()].some((delivery) => delivery.status === "pending");
+  const submission = useSubmission(state, onSubmit, onStop, draft, attachments, store, runId, pending);
   useEffect(() => { if (autoFocus && (!document.activeElement || document.activeElement === document.body)) draft.input.current?.focus({ preventScroll: true }); }, [autoFocus]);
   const stopRef = useCallback((button: HTMLButtonElement | null) => {
     if (!button) return;

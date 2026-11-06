@@ -1,5 +1,6 @@
 import type { ZetaClient } from "@fulcrum/zeta";
-import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import type { RunStateStore } from "./run-state";
 import { catalogModels, catalogProviders, settingModel, settingsRequest, type SessionSettings } from "./settings";
 
 const CATALOG = "gamma-catalog";
@@ -19,9 +20,9 @@ export function nextRunModel(): { model?: string; provider?: string } {
   return { model, ...(catalog.providers[model] ? { provider: catalog.providers[model] } : {}) };
 }
 
-/** Vim keys in the composer: on unless turned off, kept in localStorage. */
+/** Vim keys in the composer: opt-in and kept in localStorage. */
 export function useVimSetting() {
-  const [on, setOn] = useState(() => localStorage.getItem(VIM) !== "off");
+  const [on, setOn] = useState(() => localStorage.getItem(VIM) === "on");
   const set = useCallback((value: boolean) => { localStorage.setItem(VIM, value ? "on" : "off"); setOn(value); }, []);
   return [on, set] as const;
 }
@@ -38,14 +39,14 @@ function useDismiss(open: boolean, root: React.RefObject<HTMLElement | null>, cl
   }, [open, root, close]);
 }
 
-function ModelPicker({ value, models, resolvedDefault, onChange }: { value: string; models: string[]; resolvedDefault?: string; onChange(value: string): void }) {
+function ModelPicker({ value, models, resolvedDefault, allowDefault, onChange }: { value: string; models: string[]; resolvedDefault?: string; allowDefault: boolean; onChange(value: string): void }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
   const root = useRef<HTMLDivElement>(null);
   const button = useRef<HTMLButtonElement>(null);
   const listId = useId();
   const typeahead = useRef({ text: "", at: 0 });
-  const options = ["", ...models.filter((model) => model !== "")];
+  const options = [...(allowDefault ? [""] : []), ...models.filter((model) => model !== "")];
   const defaultLabel = resolvedDefault ? `default (${resolvedDefault})` : "default";
   const label = value || defaultLabel;
   const close = useCallback(() => { setOpen(false); button.current?.focus(); }, []);
@@ -77,13 +78,13 @@ function ModelPicker({ value, models, resolvedDefault, onChange }: { value: stri
  * The run's model and approval mode, from zeta. A blank run has no session yet: it shows zeta's catalog and the mode
  * the first send starts the run with (`nextRunModel`, then `set_settings` for YOLO).
  */
-export function RunSettings({ client, sessionId, createdWithDefault, yolo, onYolo }: { client: ZetaClient | null; sessionId: string | null; createdWithDefault: boolean; yolo: boolean; onYolo(value: boolean): void }) {
+export function RunSettings({ client, sessionId, createdWithDefault, yolo, onYolo, store, runId }: { client: ZetaClient | null; sessionId: string | null; createdWithDefault: boolean; yolo: boolean; onYolo(value: boolean): void; store: RunStateStore; runId: string }) {
   const [unsupported, setUnsupported] = useState(false);
   const [settings, setSettings] = useState<SessionSettings>({});
   const [models, setModels] = useState<string[]>(() => cachedCatalog().models);
-  const [preference, setPreference] = useState(() => nextRunModel().model ?? "");
-  const [selected, setSelected] = useState("");
-  const [resolvedDefault, setResolvedDefault] = useState<string>();
+  const record = useSyncExternalStore(store.subscribe, () => store.get(runId));
+  const selected = record.model.choice === "explicit" ? record.model.model : "";
+  const resolvedDefault = record.model.resolvedDefault;
   const [error, setError] = useState("");
   const [confirmYolo, setConfirmYolo] = useState(false);
   const confirmRef = useRef<HTMLDivElement>(null);
@@ -92,8 +93,6 @@ export function RunSettings({ client, sessionId, createdWithDefault, yolo, onYol
     if (!client) return;
     let live = true;
     setError("");
-    setResolvedDefault(undefined);
-    setSelected("");
     void client.request("model_catalog", sessionId ? { session_id: sessionId } : {}, { timeoutMs: 15_000 }).then((catalog) => {
       if (!live) return;
       localStorage.setItem(CATALOG, JSON.stringify(catalog));
@@ -106,12 +105,11 @@ export function RunSettings({ client, sessionId, createdWithDefault, yolo, onYol
       if (!live) return;
       const next = settingModel(value);
       setSettings(next);
-      setResolvedDefault(next.model);
-      setSelected(createdWithDefault ? "" : next.model ?? "");
+      if (next.model) store.resolveDefault(runId, next.model, createdWithDefault);
       onYolo(next.approval_mode === "allow");
     }, (cause: unknown) => { if (live) setError(cause instanceof Error ? cause.message : "settings unavailable"); });
     return () => { live = false; };
-  }, [client, sessionId, createdWithDefault, onYolo]);
+  }, [client, sessionId, createdWithDefault, onYolo, store, runId]);
   const closeConfirm = useCallback(() => { setConfirmYolo(false); approvalButton.current?.focus(); }, []);
   useDismiss(confirmYolo, confirmRef, closeConfirm);
   useEffect(() => { if (confirmYolo) confirmRef.current?.querySelector<HTMLButtonElement>("button[data-safe]")?.focus(); }, [confirmYolo]);
@@ -128,12 +126,12 @@ export function RunSettings({ client, sessionId, createdWithDefault, yolo, onYol
   const pick = (model: string) => {
     if (!sessionId) {
       if (model) localStorage.setItem(MODEL, model); else localStorage.removeItem(MODEL);
-      setPreference(model);
+      store.setModel(runId, model ? { choice: "explicit", model } : { choice: "default" });
       return;
     }
     const target = model || resolvedDefault;
     if (!target) return;
-    setSelected(model);
+    store.setModel(runId, model ? { choice: "explicit", model, resolvedDefault } : { choice: "default", resolvedDefault });
     void change({ model: target });
   };
   const toggle = () => {
@@ -144,7 +142,7 @@ export function RunSettings({ client, sessionId, createdWithDefault, yolo, onYol
   const confirmAllow = () => { closeConfirm(); if (sessionId) void change({ approval_mode: "allow" }); else onYolo(true); };
   return (
     <>
-      <ModelPicker value={sessionId ? selected : preference} models={models} resolvedDefault={sessionId ? resolvedDefault : undefined} onChange={pick} />
+      <ModelPicker value={selected} models={models} resolvedDefault={sessionId ? resolvedDefault : undefined} allowDefault={!sessionId || Boolean(resolvedDefault)} onChange={pick} />
       <button
         ref={approvalButton}
         type="button"

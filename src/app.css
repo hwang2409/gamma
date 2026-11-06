@@ -187,6 +187,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .composer-stop-slot, [data-part="composer-stop"] { display: inline-flex; align-items: center; justify-content: center; width: 94px; min-width: 94px; min-height: var(--control); }
 .composer-stop-slot { border: 1px solid var(--fulcrum-border); color: var(--fulcrum-muted); }
 .dock [data-part="composer-stop"] { --action: var(--fulcrum-fg); color: var(--fulcrum-fg); }
+.dock [data-part="composer"] .approval-mode { width: 54px; }
 .dock [data-part="composer"] .approval-mode[data-yolo] { --action: var(--fulcrum-danger); color: var(--fulcrum-danger); font-weight: 700; }
 .model-picker { position: relative; }
 .model-picker > button { width: 32ch; max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -241,14 +242,13 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .inspector-bar a, .inspector-bar button { display: inline-flex; align-items: center; min-height: var(--control); padding: 0 12px; border: 1px solid var(--fulcrum-border); color: var(--fulcrum-fg); text-decoration: none; }
 .inspector-bar a:hover, .inspector-bar button:hover { border-color: var(--fulcrum-fg); }
 .inspector-body { min-height: 0; overflow: auto; padding: 16px; }
-.inspector-body > img, .inspector-body > iframe { display: block; width: 100%; height: 100%; object-fit: contain; border: 0; background: white; }
+.inspector-body > img, .inspector-body > iframe { display: block; width: 100%; height: 100%; object-fit: contain; border: 0; background: var(--fulcrum-surface); }
 .inspector-body table { border-collapse: collapse; font: 13px var(--fulcrum-font); }
 .inspector-body td { border: 1px solid var(--fulcrum-border); padding: 5px 8px; white-space: pre-wrap; }
 .inspector-body pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 600px) {
   .inspector-backdrop { padding: 0; }
   .artifacts { padding-inline-start: 8px; }
-  .undelivered[data-empty][data-reserve] { display: block; min-height: 3.2em; visibility: hidden; }
   .undelivered:not([data-empty]) { min-height: 3.2em; }
   .new-run-label { display: none; }
   .new-run-short { display: inline; font-size: 18px; }

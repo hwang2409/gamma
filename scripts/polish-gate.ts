@@ -140,7 +140,12 @@ try {
       if ((await page.locator(".turn-retry").count()) !== 1) throw new Error("more than one retry is offered");
       if (fake.sent.filter((entry) => entry.text === "fail this turn").length !== 2) throw new Error("retry did not send the prompt again");
     });
-    await check("vim insert, normal delete/change/undo, and normal enter", async () => {
+    await check("vim is opt-in, then insert, normal delete/change/undo, and normal enter", async () => {
+      if (await page.locator(".vim-mode").count()) throw new Error("vim is enabled before the user opts in");
+      await page.screenshot({ path: join(shots, "vim-default-off-1440.png") });
+      await page.getByRole("button", { name: "settings" }).click();
+      await page.getByRole("button", { name: /vim keys/ }).click();
+      await page.keyboard.press("Escape");
       await page.getByRole("button", { name: "new run" }).click();
       const input = field(page);
       await input.click(); await page.keyboard.type("one two"); await input.press("Escape"); await input.press("d"); await input.press("d");
@@ -190,6 +195,9 @@ try {
         await view.getByRole("button", { name: "remove red.png" }).click();
       });
       await check(`${width}: vim NORMAL mode`, async () => {
+        await view.getByRole("button", { name: "settings" }).click();
+        await view.getByRole("button", { name: /vim keys/ }).click();
+        await view.keyboard.press("Escape");
         await field(view).fill("fix the flaky reconnect test");
         await field(view).focus();
         await field(view).press("Escape");

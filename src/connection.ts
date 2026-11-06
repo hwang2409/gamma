@@ -1,4 +1,4 @@
-import { connectZeta, discoverZeta, ZetaError, type ZetaClient, type ZetaDiscovery } from "@fulcrum/zeta";
+import { createClient, discoverZeta, webSocketTransport, ZetaError, type ZetaClient, type ZetaDiscovery } from "@fulcrum/zeta";
 
 /**
  * Connection states. Every waiting state carries `attempt` (failures in a row) and `retryAt` (epoch ms of the next
@@ -56,10 +56,11 @@ export type ConnectionDeps = {
   /** The page origin the server's `--ws-origin` allowlist must contain. */
   origin: string;
   discover?: () => Promise<ZetaDiscovery | null>;
-  connect?: (discovery: ZetaDiscovery) => Promise<ZetaClient>;
+  connect?: (discovery: ZetaDiscovery, opened?: (close: () => void) => void) => Promise<ZetaClient>;
   now?: () => number;
   setTimer?: (callback: () => void, ms: number) => unknown;
   clearTimer?: (timer: unknown) => void;
+  helloTimeoutMs?: number;
 };
 
 export type Connection = {
@@ -76,6 +77,23 @@ export type Connection = {
 
 export const FEATURES = ["list_sessions_paging", "approval_history", "approval_reconnect", "delivery_id", "user_message_event", "user_message_delivery_id", "session_replay_seq", "session_host_commands", "new_session_settings"];
 
+async function connectController(discovery: ZetaDiscovery, opened?: (close: () => void) => void) {
+  const url = new URL(discovery.url);
+  for (const key of [...url.searchParams.keys()]) if (key.toLowerCase() === "token") url.searchParams.delete(key);
+  let transport;
+  try { transport = await webSocketTransport(url.toString(), ["zeta.v1", `zeta.bearer.${discovery.controller_token}`]); }
+  catch { throw new ZetaError("connect_failed"); }
+  opened?.(() => transport.close());
+  const client = createClient(transport, undefined, (handshaken, code) => new ZetaError(handshaken ? "closed" : "connect_failed", code));
+  try { await client.hello(FEATURES, "controller"); }
+  catch (error) {
+    transport.close();
+    const code = (error as { code?: unknown }).code;
+    throw new ZetaError(code === -32001 ? "busy" : code === -32002 ? "version_mismatch" : "connect_failed", typeof code === "number" ? code : undefined);
+  }
+  return client;
+}
+
 /**
  * Finds the server through the dev-server handoff, connects, and reconnects with backoff after any failure or drop.
  * A fresh client per connection means a fresh store per session, so a reconnect rebuilds history instead of
@@ -84,10 +102,11 @@ export const FEATURES = ["list_sessions_paging", "approval_history", "approval_r
 export function createConnection({
   origin,
   discover = discoverZeta,
-  connect = (discovery) => connectZeta({ url: discovery.url, token: discovery.controller_token, role: "controller", features: FEATURES }),
+  connect = connectController,
   now = Date.now,
   setTimer = (callback, ms) => setTimeout(callback, ms),
   clearTimer = (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+  helloTimeoutMs = 15_000,
 }: ConnectionDeps): Connection {
   let state = initialConnection;
   let client: ZetaClient | null = null;
@@ -126,11 +145,12 @@ export function createConnection({
       return send({ type: "auth_failed", reason: "origin", origins: discovery.origins, now: now() });
     let next: ZetaClient;
     let timedOut = false;
+    let closePending = () => {};
     let connectTimeout: ReturnType<typeof setTimeout> | undefined;
     try {
       next = await Promise.race([
-        connect(discovery).then((value) => { if (timedOut) value.close(); return value; }),
-        new Promise<never>((_, reject) => { connectTimeout = setTimeout(() => { timedOut = true; reject(new Error("hello timeout")); }, 15_000); }),
+        connect(discovery, (close) => { closePending = close; }).then((value) => { if (timedOut) value.close(); return value; }),
+        new Promise<never>((_, reject) => { connectTimeout = setTimeout(() => { timedOut = true; closePending(); reject(new Error("hello timeout")); }, helloTimeoutMs); }),
       ]);
       clearTimeout(connectTimeout);
     } catch (error) {

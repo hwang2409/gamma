@@ -337,7 +337,6 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
         } catch { /* keep the retained run read-only with an explicit reopen action */ }
       }
       if (mine !== openGeneration || !live(target)) return;
-      if (restored && previousId) onSelect?.(previousId);
       transition({ type: "failed", id, error: { id, message: message(error), busy: isBusyError(error), ...(restored ? { restored: true } : {}) } });
     }
   };

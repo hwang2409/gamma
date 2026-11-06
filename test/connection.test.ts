@@ -114,6 +114,20 @@ test("a drop reconnects with a new client, and retryNow skips the wait", async (
   expect(connection.state.phase).toBe("connected");
 });
 
+test("hello timeout closes its open socket before retrying", async () => {
+  let closed = false;
+  const connection = createConnection({
+    origin: ORIGIN,
+    discover: async () => found,
+    connect: (_discovery, opened) => { opened?.(() => { closed = true; }); return new Promise(() => {}); },
+    helloTimeoutMs: 1,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  expect(closed).toBe(true);
+  expect(connection.state.phase).toBe("unresponsive");
+  connection.stop();
+});
+
 test("stop closes the client and ignores attempts still in flight", async () => {
   let resolve!: (value: ZetaDiscovery | null) => void;
   const { connection, settle } = harness([() => new Promise((done) => { resolve = done; })], [async () => fakeClient()]);
