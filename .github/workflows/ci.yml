@@ -16,7 +16,7 @@ jobs:
       - run: bun run fulcrum:pack
         working-directory: gamma
       # Fresh tarballs have fresh archive metadata, so their lockfile integrity changes even at the same source revision.
-      - run: bun install --force
+      - run: rm bun.lock && bun install --force
         working-directory: gamma
       - run: bun x playwright install --with-deps chromium
         working-directory: gamma
