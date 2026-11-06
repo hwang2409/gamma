@@ -77,6 +77,8 @@ export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaC
   const [error, setError] = useState("");
   const [confirmYolo, setConfirmYolo] = useState(false);
   const confirmRef = useRef<HTMLDivElement>(null);
+  const startedSession = useRef<string | null | undefined>(sessionId === null ? undefined : null);
+  if (startedSession.current === undefined && sessionId) startedSession.current = sessionId;
   const load = useCallback(async () => {
     if (!client) return;
     try {
@@ -112,7 +114,7 @@ export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaC
     } catch (cause) { setError(cause instanceof Error ? cause.message : "could not change settings"); }
   };
   const pick = (model: string) => {
-    if (sessionId) return void change({ model });
+    if (sessionId) { setPending(model); return void change({ model }); }
     localStorage.setItem(MODEL, model);
     setPending(model);
   };
@@ -124,7 +126,7 @@ export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaC
   const confirmAllow = () => { setConfirmYolo(false); if (sessionId) void change({ approval_mode: "allow" }); else onYolo(true); };
   return (
     <>
-      <ModelPicker value={sessionId ? settings.model ?? "" : pending} models={models} onChange={pick} />
+      <ModelPicker value={!sessionId || startedSession.current === sessionId ? pending : settings.model ?? ""} models={models} onChange={pick} />
       <button
         type="button"
         className="composer-tool approval-mode"
