@@ -29,12 +29,47 @@ function composerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>, options: { s
   if (mapped.length === 1) { event.preventDefault(); options.apply(normalKey(options.vim, options.draft(), mapped)); }
 }
 
+function AttachmentsStrip({ images, onOpen, onRemove }: { images: readonly QueuedImage[]; onOpen?(block: { url: string; mediaType: string; alt: string }): void; onRemove(index: number): void }) {
+  return images.length ? <ul className="attachments" aria-label="attached images">{images.map((image, index) => <li key={image.url} data-part="attachment">
+    <button type="button" className="attachment-preview" aria-label={`open image: ${image.name}`} onClick={() => onOpen?.({ url: image.url, mediaType: image.mime_type, alt: image.name })}><img src={image.url} alt="" /></button>
+    <span title={image.name}>{image.name}</span><button type="button" className="composer-tool" aria-label={`remove ${image.name}`} onClick={() => onRemove(index)}>×</button>
+  </li>)}</ul> : null;
+}
+
+function SubmitStopSlot({ steer, stopping, onStop, stopRef }: { steer: boolean; stopping: boolean; onStop?: () => void; stopRef?: (button: HTMLButtonElement | null) => void }) {
+  if (!onStop) return null;
+  return steer ? <button ref={stopRef} type="button" data-part="composer-stop" data-action="stop" aria-label="stop the running turn" aria-disabled={stopping || undefined} onClick={onStop}>{stopping ? "stopping" : "stop"}</button> : <span className="composer-stop-slot" aria-hidden="true" />;
+}
+
 function hint({ vim, mode, steer, images }: { vim: boolean; mode: Vim["mode"]; steer: boolean; images: boolean }) {
   const send = steer ? "enter to steer" : "enter to send";
   if (steer && images) return "images send when the turn ends · stop it or wait";
   if (!vim) return `${send} · shift+enter for a new line`;
   if (mode === "insert") return `${send} · esc for normal mode`;
   return `${send} · i type · u undo${steer ? " · ^c stop" : ""}`;
+}
+
+function ComposerBody({ id, state, steer, vimOn, vim, text, images, attachError, dragging, sending, stopping, error, message, canSubmit, footer, input, files, onKeyDown, onPaste, onSubmit, onImageOpen, onRemove, onStop, onStopRef, onFiles, setDragging, onChange }: any) {
+  return (
+    <form data-part="composer" data-state={state} data-error={error ? "submit" : undefined} data-pending={sending ? "submit" : stopping ? "stop" : undefined} data-drop={dragging ? "active" : undefined} data-vim={vimOn ? vim.mode : undefined} aria-label="message" aria-busy={sending || stopping || undefined} onSubmit={onSubmit} onPaste={onPaste}
+      onDragEnter={(event) => { if (hasFiles(event)) { event.preventDefault(); setDragging(true); } }}
+      onDragOver={(event) => { if (hasFiles(event)) { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; } }}
+      onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }}
+      onDrop={(event) => { event.preventDefault(); setDragging(false); void onFiles(event.dataTransfer.files); }}>
+      {dragging ? <div className="drop-hint" aria-hidden="true">drop images to attach</div> : null}
+      <AttachmentsStrip images={images} onOpen={onImageOpen} onRemove={onRemove} />
+      {attachError ? <p className="attach-error" role="alert">{attachError}</p> : null}
+      <div data-part="composer-field" data-value={text}><textarea ref={input} rows={1} value={text} placeholder={steer ? "steer the running turn" : "message zeta"} aria-label="message" aria-describedby={`${id}-hint ${id}-message`} onChange={(event) => onChange(event.target.value)} onKeyDown={onKeyDown} /></div>
+      <div data-part="composer-bar">
+        {vimOn ? <span className="vim-mode" data-mode={vim.mode} aria-live="polite">{vim.mode === "insert" ? "INSERT" : "NORMAL"}</span> : null}
+        <p data-part="composer-status" data-tone={error ? "danger" : message ? "busy" : undefined} title={error}><span data-part="composer-hint" id={`${id}-hint`} hidden={Boolean(message)}>{hint({ vim: vimOn, mode: vim.mode, steer, images: images.length > 0 })}</span><span data-part="composer-message" id={`${id}-message`} role="status">{message}</span></p>
+        <div className="composer-tools">{footer}<button type="button" className="composer-tool attach" aria-label="attach images" title="attach images (or paste, or drop)" onClick={() => files.current?.click()}><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10.5 4.5 5.4 9.6a1.5 1.5 0 0 0 2.1 2.1l5.3-5.3a3 3 0 0 0-4.2-4.2L3.2 7.6a4.5 4.5 0 0 0 6.4 6.4l4.4-4.4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="square" /></svg></button>
+          <input ref={files} type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden onChange={(event) => { if (event.target.files) void onFiles([...event.target.files]); event.currentTarget.value = ""; }} />
+          <SubmitStopSlot steer={steer} stopping={stopping} onStop={onStop} stopRef={onStopRef} /><button type="submit" data-part="composer-submit" data-action={steer ? "steer" : "send"} aria-label={steer ? "steer the running turn" : "send message"} aria-disabled={!canSubmit || undefined}>{steer ? "steer" : "send"}</button>
+        </div>
+      </div>
+    </form>
+  );
 }
 
 export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, footer, autoFocus, onImageOpen }: {
@@ -178,70 +213,5 @@ export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, foo
     );
 
   const message = error ?? (stopping ? "stopping" : sending ? (steer ? "steering" : "sending") : "");
-  return (
-    <form
-      data-part="composer"
-      data-state={state}
-      data-error={error ? "submit" : undefined}
-      data-pending={sending ? "submit" : stopping ? "stop" : undefined}
-      data-drop={dragging ? "active" : undefined}
-      data-vim={vimOn ? vim.mode : undefined}
-      aria-label="message"
-      aria-busy={sending || stopping || undefined}
-      onSubmit={onFormSubmit}
-      onPaste={onPaste}
-      onDragEnter={(event) => { if (hasFiles(event)) { event.preventDefault(); setDragging(true); } }}
-      onDragOver={(event) => { if (hasFiles(event)) { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; } }}
-      onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }}
-      onDrop={(event) => { event.preventDefault(); setDragging(false); void addFiles(event.dataTransfer.files); }}
-    >
-      {dragging ? <div className="drop-hint" aria-hidden="true">drop images to attach</div> : null}
-      {images.length ? (
-        <ul className="attachments" aria-label="attached images">
-          {images.map((image, index) => (
-            <li key={image.url} data-part="attachment">
-              <button type="button" className="attachment-preview" aria-label={`open image: ${image.name}`} onClick={() => onImageOpen?.({ url: image.url, mediaType: image.mime_type, alt: image.name })}><img src={image.url} alt="" /></button>
-              <span title={image.name}>{image.name}</span>
-              <button type="button" className="composer-tool" aria-label={`remove ${image.name}`} onClick={() => remove(index)}>×</button>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-      {attachError ? <p className="attach-error" role="alert">{attachError}</p> : null}
-      <div data-part="composer-field" data-value={text}>
-        <textarea
-          ref={input}
-          rows={1}
-          value={text}
-          placeholder={steer ? "steer the running turn" : "message zeta"}
-          aria-label="message"
-          aria-describedby={`${id}-hint ${id}-message`}
-          onChange={(event) => setText(event.target.value)}
-          onKeyDown={onKeyDown}
-        />
-      </div>
-      <div data-part="composer-bar">
-        {vimOn ? <span className="vim-mode" data-mode={vim.mode} aria-live="polite">{vim.mode === "insert" ? "INSERT" : "NORMAL"}</span> : null}
-        <p data-part="composer-status" data-tone={error ? "danger" : message ? "busy" : undefined} title={error}>
-          <span data-part="composer-hint" id={`${id}-hint`} hidden={Boolean(message)}>{hint({ vim: vimOn, mode: vim.mode, steer, images: images.length > 0 })}</span>
-          <span data-part="composer-message" id={`${id}-message`} role="status">{message}</span>
-        </p>
-        <div className="composer-tools">
-          {footer}
-          <button type="button" className="composer-tool attach" aria-label="attach images" title="attach images (or paste, or drop)" onClick={() => files.current?.click()}>
-            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10.5 4.5 5.4 9.6a1.5 1.5 0 0 0 2.1 2.1l5.3-5.3a3 3 0 0 0-4.2-4.2L3.2 7.6a4.5 4.5 0 0 0 6.4 6.4l4.4-4.4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="square" /></svg>
-          </button>
-          <input ref={files} type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden onChange={(event) => { if (event.target.files) void addFiles([...event.target.files]); event.currentTarget.value = ""; }} />
-          {onStop ? (steer ? (
-            <button ref={stopRef} type="button" data-part="composer-stop" data-action="stop" aria-label="stop the running turn" aria-disabled={stopping || undefined} onClick={stop}>
-              {stopping ? "stopping" : "stop"}
-            </button>
-          ) : <span className="composer-stop-slot" aria-hidden="true" />) : null}
-          <button type="submit" data-part="composer-submit" data-action={steer ? "steer" : "send"} aria-label={steer ? "steer the running turn" : "send message"} aria-disabled={!canSubmit || undefined}>
-            {steer ? "steer" : "send"}
-          </button>
-        </div>
-      </div>
-    </form>
-  );
+  return <ComposerBody id={id} state={state} steer={steer} vimOn={vimOn} vim={vim} text={text} images={images} attachError={attachError} dragging={dragging} sending={sending} stopping={stopping} error={error} message={message} canSubmit={canSubmit} footer={footer} input={input} files={files} onKeyDown={onKeyDown} onPaste={onPaste} onSubmit={onFormSubmit} onImageOpen={onImageOpen} onRemove={remove} onStop={onStop ? stop : undefined} onStopRef={stopRef} onFiles={addFiles} setDragging={setDragging} onChange={setText} />;
 }

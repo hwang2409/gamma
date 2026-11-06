@@ -161,10 +161,11 @@ test("stop is a session abort", async () => {
   expect(calls).toEqual([["abort", {}]]);
 });
 
-test("accepted delivery without an echo reconciles one synthetic user event", async () => {
+test("fake zeta without an echo leaves one queued synthetic user event", async () => {
   const { client } = await server(() => ok, ["delivery_id", "user_message_event", "user_message_delivery_id"], false);
   const events: unknown[] = [];
   const delivery = createDelivery(ids(), (event) => events.push(event));
   await delivery.submit(client, "hello", false);
   expect(events).toEqual([{ type: "user_message", text: "hello", mode: "send", intent: "id-1", delivery_id: "id-1" }]);
+  expect(new Set(events.map((event) => event.intent)).size).toBe(1);
 });

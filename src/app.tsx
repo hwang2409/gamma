@@ -29,13 +29,17 @@ function ZetaApproval({ id }: { id: string }) {
 }
 // The intents of steers a stop dropped: zeta never gave them to the agent, so their rows must not look delivered.
 const Undelivered = createContext<ReadonlySet<string>>(new Set());
+const Queued = createContext<ReadonlySet<string>>(new Set());
 function UserRow({ id }: { id: string }) {
   const intent = useItemSelector(id, (item) => (item?.type === "user" && item.event.type === "user_message" ? item.event.intent : undefined));
   const undelivered = useContext(Undelivered);
+  const queued = useContext(Queued);
   const lost = intent !== undefined && undelivered.has(intent);
+  const waiting = intent !== undefined && queued.has(intent);
   return (
     <>
       <Fallback id={id} />
+      {waiting ? <p className="undelivered" role="status" aria-label="message queued">queued</p> : null}
       {lost ? <p className="undelivered" role="note">not delivered · the stop ended the turn before zeta took this steer</p> : null}
     </>
   );
@@ -309,12 +313,16 @@ function DockComposer({ readOnly, running, vim, onSubmit, onStop, onImageOpen, c
   return <GammaComposer state={running ? "steerable" : "idle"} vim={vim} autoFocus onSubmit={onSubmit} onStop={onStop} onImageOpen={onImageOpen} footer={<RunSettings client={client} sessionId={sessionId} yolo={yolo} onYolo={onYolo} />} />;
 }
 
-function useDockDelivery(runs: RunControl, running: boolean, client: ZetaClient | null, onUndelivered: (intents: string[]) => void) {
+function useDockDelivery(runs: RunControl, running: boolean, client: ZetaClient | null, onUndelivered: (intents: string[]) => void, onQueued: (intent: string) => void) {
   const delivery = useMemo(() => createDelivery(undefined, (event) => {
     const store = transitionRun(runs.state.transition)?.lease.store;
     const deliveryId = event.type === "user_message" && event.delivery_id;
-    if (store && deliveryId && !store.hasMessageDelivery(deliveryId)) store.dispatch(event);
-  }), [runs]);
+    if (!store || !deliveryId) return;
+    // zeta echoes before replying. an absent echo means the fallback row is provisional and stays queued.
+    if (store.hasMessageDelivery(deliveryId)) return;
+    onQueued(event.intent!);
+    store.dispatch(event);
+  }), [runs, onQueued]);
   const wasRunning = useRef(running);
   useEffect(() => {
     if (!running && wasRunning.current && client) delivery.turnEnded(client).then(onUndelivered, () => {});
@@ -343,7 +351,9 @@ function Dock({ state, view, connection, runs, vim, onUndelivered, onRetryTurn, 
   const { yolo, setYolo } = useContext(ApprovalModeContext);
   // This dock's own first send is starting the run: the composer stays put while zeta creates and opens it.
   const [starting, setStarting] = useState(false);
-  const delivery = useDockDelivery(runs, running, client, onUndelivered);
+  const [queued, setQueued] = useState<ReadonlySet<string>>(() => new Set());
+  const onQueued = useCallback((intent: string) => setQueued((current) => new Set(current).add(intent)), []);
+  const delivery = useDockDelivery(runs, running, client, onUndelivered, onQueued);
 
   const onSubmit: Submit = useCallback(async (text, images, { steer }) => {
     setStarting(true);
@@ -359,7 +369,7 @@ function Dock({ state, view, connection, runs, vim, onUndelivered, onRetryTurn, 
   const problem = (state.phase !== "connected" && state.phase !== "connecting" && state.phase !== "dropped") || Boolean(failure && !failure.restored);
   const phase = dockPhase(state, present, open, agent, starting);
   const readOnly = problem ? "" : !client ? "sending is paused until zeta reconnects" : starting ? null : present.opening || open?.stale ? "sending is paused until the run opens" : null;
-  return <div className="dock"><>{problem ? null : <StatusLine phase={phase} />}</><DockComposer readOnly={readOnly} running={running} vim={vim} onSubmit={onSubmit} onStop={onStop} onImageOpen={onImageOpen} client={client} sessionId={blank || starting ? null : open?.id ?? null} yolo={yolo} onYolo={setYolo} /></div>;
+  return <Queued.Provider value={queued}><div className="dock"><>{problem ? null : <StatusLine phase={phase} />}</><DockComposer readOnly={readOnly} running={running} vim={vim} onSubmit={onSubmit} onStop={onStop} onImageOpen={onImageOpen} client={client} sessionId={blank || starting ? null : open?.id ?? null} yolo={yolo} onYolo={setYolo} /></div></Queued.Provider>;
 }
 
 /** The last prompt the user sent, so a failed turn can be retried with it. */
