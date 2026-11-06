@@ -11,15 +11,14 @@ export type ConnectionState =
   | { phase: "auth_failed"; reason: "origin" | "rejected"; origins: string[]; attempt: number; retryAt: number; lost: boolean }
   | { phase: "busy"; attempt: number; retryAt: number; lost: boolean }
   | { phase: "dropped"; attempt: number; retryAt: number; lost: true }
-  | { phase: "incompatible"; lost: boolean };
+  | { phase: "unresponsive" | "incompatible"; attempt: number; retryAt: number; lost: boolean };
 
 export type ConnectionEvent =
   | { type: "attempt" }
   | { type: "connected" }
   | { type: "not_running"; now: number }
   | { type: "auth_failed"; reason: "origin" | "rejected"; origins: string[]; now: number }
-  | { type: "busy"; now: number }
-  | { type: "incompatible" }
+  | { type: "busy" | "unresponsive" | "incompatible"; now: number }
   | { type: "closed"; now: number };
 
 /** The command that starts a server this page may connect to. The origin is exact: localhost and 127.0.0.1 differ. */
@@ -34,7 +33,6 @@ const attemptOf = (state: ConnectionState) => ("attempt" in state ? state.attemp
 const lostOf = (state: ConnectionState) => state.phase === "connected" || ("lost" in state && state.lost);
 
 export function reduceConnection(state: ConnectionState, event: ConnectionEvent): ConnectionState {
-  if (state.phase === "incompatible") return state; // a protocol mismatch needs a new build, not a retry
   const lost = lostOf(state);
   switch (event.type) {
     case "attempt":
@@ -43,8 +41,7 @@ export function reduceConnection(state: ConnectionState, event: ConnectionEvent)
       return { phase: "connected" };
     case "closed":
       return state.phase === "connected" ? { phase: "dropped", attempt: 1, retryAt: event.now + backoff(1), lost: true } : state;
-    case "incompatible":
-      return { phase: "incompatible", lost };
+
     default: {
       if (state.phase !== "connecting") return state; // failures only finish an attempt in flight
       const attempt = state.attempt + 1;
@@ -111,7 +108,7 @@ export function createConnection({
     timer = setTimer(() => { timer = null; void attempt(); }, Math.max(0, ms));
   };
   const attempt = async () => {
-    if (stopped || state.phase === "connected" || state.phase === "incompatible") return;
+    if (stopped || state.phase === "connected") return;
     const mine = ++generation;
     send({ type: "attempt" });
     const current = () => mine === generation && !stopped;
@@ -128,13 +125,21 @@ export function createConnection({
     if (discovery.origins.length && !discovery.origins.includes(origin))
       return send({ type: "auth_failed", reason: "origin", origins: discovery.origins, now: now() });
     let next: ZetaClient;
+    let timedOut = false;
+    let connectTimeout: ReturnType<typeof setTimeout> | undefined;
     try {
-      next = await connect(discovery);
+      next = await Promise.race([
+        connect(discovery).then((value) => { if (timedOut) value.close(); return value; }),
+        new Promise<never>((_, reject) => { connectTimeout = setTimeout(() => { timedOut = true; reject(new Error("hello timeout")); }, 15_000); }),
+      ]);
+      clearTimeout(connectTimeout);
     } catch (error) {
+      clearTimeout(connectTimeout);
       if (!current()) return;
+      if (timedOut) return send({ type: "unresponsive", now: now() });
       const kind = error instanceof ZetaError ? error.kind : "connect_failed";
       if (kind === "busy") return send({ type: "busy", now: now() });
-      if (kind === "version_mismatch") return send({ type: "incompatible" });
+      if (kind === "version_mismatch") return send({ type: "incompatible", now: now() });
       // The process runs and the origin is allowed, so a refused upgrade means the token was refused.
       return send({ type: "auth_failed", reason: "rejected", origins: discovery.origins, now: now() });
     }

@@ -5,12 +5,12 @@
   "scripts": {
     "fulcrum:pack": "bun scripts/fulcrum.ts",
     "predev": "bun run fulcrum:pack",
-    "dev": "vite --port 5190",
+    "dev": "vite --port ${GAMMA_PORT:-5190}",
     "prebuild": "bun run fulcrum:pack",
     "build": "tsc -p . && vite build",
     "typecheck": "tsc -p .",
     "test": "bun test",
-    "gate": "bun scripts/gate.ts && bun scripts/polish-gate.ts && bun scripts/artifact-gate.ts && bun scripts/round7-gate.ts && bun scripts/round8-gate.ts"
+    "gate": "bun scripts/gate.ts && bun scripts/polish-gate.ts && bun scripts/artifact-gate.ts && bun scripts/round7-gate.ts && bun scripts/round8-gate.ts && bun scripts/round9-gate.ts"
   },
   "dependencies": {
     "@fulcrum/core": "file:./vendor/fulcrum/fulcrum-core.tgz",

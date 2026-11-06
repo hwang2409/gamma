@@ -41,10 +41,12 @@ await rm(vendor, { recursive: true, force: true });
 await mkdir(vendor, { recursive: true });
 for (const name of packages) {
   const filename = `fulcrum-${name}.tgz`;
-  run(["bun", "pm", "pack", "--filename", resolve(vendor, filename)], resolve(fulcrum, "packages", name));
+  const archive = resolve(vendor, filename);
+  run(["bun", "pm", "pack", "--filename", archive], resolve(fulcrum, "packages", name));
+  const installed = resolve(root, "node_modules", "@fulcrum", name);
+  await rm(installed, { recursive: true, force: true });
+  await mkdir(installed, { recursive: true });
+  run(["tar", "-xzf", archive, "--strip-components=1", "-C", installed], root);
   console.log(`packed @fulcrum/${name} as ${basename(filename)}`);
 }
 await writeFile(resolve(vendor, ".source"), `${source}\n`);
-// Bun cannot refresh integrity for regenerated file tarballs in place, so replace the lock atomically through install.
-await rm(resolve(root, "bun.lock"), { force: true });
-run(["bun", "install", "--ignore-scripts"], root);

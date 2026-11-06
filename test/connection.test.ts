@@ -18,7 +18,7 @@ test("a failure only ends an attempt in flight and counts up", () => {
   expect(state).toEqual({ phase: "busy", attempt: 2, retryAt: 2000, lost: false });
 });
 
-test("a drop after a connection is marked lost until it reconnects, and a mismatch is final", () => {
+test("a drop stays marked lost, and a protocol mismatch retries after an update", () => {
   let state = reduceConnection(initialConnection, { type: "connected" });
   state = reduceConnection(state, { type: "closed", now: 100 });
   expect(state).toEqual({ phase: "dropped", attempt: 1, retryAt: 600, lost: true });
@@ -26,8 +26,9 @@ test("a drop after a connection is marked lost until it reconnects, and a mismat
   expect(state).toMatchObject({ phase: "not_running", attempt: 2, lost: true });
   state = reduceConnection(reduceConnection(state, { type: "attempt" }), { type: "connected" });
   expect(state).toEqual({ phase: "connected" });
-  const final = reduceConnection(initialConnection, { type: "incompatible" });
-  expect(reduceConnection(final, { type: "attempt" })).toBe(final);
+  const mismatch = reduceConnection(initialConnection, { type: "incompatible", now: 1_000 });
+  expect(mismatch).toEqual({ phase: "incompatible", attempt: 1, retryAt: 1_500, lost: false });
+  expect(reduceConnection(mismatch, { type: "attempt" })).toEqual({ phase: "connecting", attempt: 1, lost: false });
 });
 
 type Fake = ZetaClient & { drop(): void; closed: boolean };
@@ -82,7 +83,7 @@ test("an origin missing from the allowlist is named before any socket opens", as
   expect(opened).toBe(false);
 });
 
-test("refused upgrade is auth_failed, busy is busy, version mismatch stops retrying", async () => {
+test("refused upgrade is auth_failed, busy is busy, version mismatch waits before retrying", async () => {
   const refused = harness([async () => found], [() => Promise.reject(new ZetaError("connect_failed"))]);
   await refused.settle();
   expect(refused.connection.state).toMatchObject({ phase: "auth_failed", reason: "rejected" });
@@ -92,7 +93,7 @@ test("refused upgrade is auth_failed, busy is busy, version mismatch stops retry
   const old = harness([async () => found], [() => Promise.reject(new ZetaError("version_mismatch"))]);
   await old.settle();
   expect(old.connection.state.phase).toBe("incompatible");
-  expect(old.timers).toHaveLength(0);
+  expect(old.timers).toHaveLength(1);
 });
 
 test("a drop reconnects with a new client, and retryNow skips the wait", async () => {

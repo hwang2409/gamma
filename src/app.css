@@ -54,25 +54,26 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .run-meta { display: flex; min-width: 0; color: var(--fulcrum-muted); font-size: 12px; }
 .run-meta .cwd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topbar .ghost { padding: 0 12px; font-size: 12px; }
+.new-run-short { display: none; }
 .yolo-indicator { flex: none; padding: 3px 8px; border: 1px solid var(--fulcrum-danger); color: var(--fulcrum-danger); font-size: 12px; font-weight: 700; white-space: nowrap; }
 
 /* Settings: a popover under its button with the theme picker and the vim switch. */
 .settings-menu { position: relative; flex: none; }
 .settings-popover { position: absolute; top: calc(100% + 6px); right: 0; z-index: 4; display: grid; gap: 8px; width: min(320px, calc(100vw - 24px)); padding: 12px; border: 1px solid var(--fulcrum-fg); background: var(--fulcrum-bg); }
-.confirm-popover { position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 5; width: min(340px, calc(100vw - 24px)); padding: 12px; border: 1px solid var(--fulcrum-fg); background: var(--fulcrum-bg); }
+.confirm-popover { position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 5; width: min(340px, calc(100vw - 24px)); padding: 12px; border: 1px solid var(--fulcrum-fg); background: var(--fulcrum-bg); box-shadow: 8px 8px 0 var(--fulcrum-border); }
 .confirm-backdrop { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 16px; background: color-mix(in srgb, var(--fulcrum-bg) 78%, transparent); }
 .confirm-dialog { width: min(420px, 100%); padding: 18px; border: 1px solid var(--fulcrum-fg); background: var(--fulcrum-bg); box-shadow: 8px 8px 0 var(--fulcrum-border); }
 .confirm-dialog h2 { margin: 0; font-size: 16px; }
 .confirm-dialog .actions { margin-top: 16px; }
 .confirm-popover .actions { margin-top: 10px; }
 .confirm-popover .confirm-primary, .confirm-dialog .confirm-primary,
-.confirm-popover .confirm-secondary, .confirm-dialog .confirm-secondary { display: inline-flex; align-items: center; justify-content: center; min-height: var(--control); padding: 0 14px; border: 1px solid var(--fulcrum-fg); font-weight: 700; }
+.confirm-popover .confirm-danger, .confirm-dialog .confirm-danger { display: inline-flex; align-items: center; justify-content: center; min-height: var(--control); padding: 0 14px; border: 1px solid var(--fulcrum-fg); font-weight: 700; }
 .confirm-popover .confirm-primary, .confirm-dialog .confirm-primary { background: var(--fulcrum-fg); color: var(--fulcrum-bg); }
-.confirm-popover .confirm-secondary, .confirm-dialog .confirm-secondary { background: var(--fulcrum-bg); color: var(--fulcrum-fg); }
+.confirm-popover .confirm-danger, .confirm-dialog .confirm-danger { border-color: var(--fulcrum-danger); background: var(--fulcrum-bg); color: var(--fulcrum-danger); }
 .confirm-popover .confirm-primary:hover, .confirm-dialog .confirm-primary:hover { text-decoration: underline; text-underline-offset: 3px; }
-.confirm-popover .confirm-secondary:hover, .confirm-dialog .confirm-secondary:hover { background: var(--fulcrum-surface); }
-.confirm-popover .confirm-primary:focus-visible, .confirm-popover .confirm-secondary:focus-visible,
-.confirm-dialog .confirm-primary:focus-visible, .confirm-dialog .confirm-secondary:focus-visible { outline: 2px solid var(--fulcrum-accent); outline-offset: 2px; }
+.confirm-popover .confirm-danger:hover, .confirm-dialog .confirm-danger:hover { background: var(--fulcrum-surface); }
+.confirm-popover .confirm-primary:focus-visible, .confirm-popover .confirm-danger:focus-visible,
+.confirm-dialog .confirm-primary:focus-visible, .confirm-dialog .confirm-danger:focus-visible { outline: 2px solid var(--fulcrum-accent); outline-offset: 2px; }
 .vim-toggle { justify-content: space-between; gap: 12px; width: 100%; }
 .vim-toggle .vim-state { color: var(--fulcrum-muted); }
 .vim-toggle[aria-pressed="true"] .vim-state { color: var(--fulcrum-fg); font-weight: 700; }
@@ -112,13 +113,14 @@ button:active:not(:disabled) { transform: scale(0.97); }
 /* The run. No vertical padding: the virtual Timeline measures from the scroll box's top edge. */
 .scroll { flex: 1; min-height: 0; overflow: auto; padding: 0 var(--gutter); }
 .scroll:focus-visible { outline: none; }
-.scroll > [data-part="timeline"] { max-width: var(--measure); margin: 0 auto; padding-top: 12px; }
+.scroll > [data-part="timeline"] { max-width: var(--measure); margin: 0 auto; padding-top: 20px; }
 /* The shipped control has no hit area of its own. */
 .scroll [data-part="jump-to-latest"] { display: flex; align-items: center; min-height: var(--control); padding: 0 14px; border: 0; }
 
 /* A steer that a stop dropped: the row stays, struck through, with a danger rail and a note that says why. */
-.scroll [data-kind="user"]:has(+ .undelivered) { border-left-color: var(--fulcrum-danger); color: var(--fulcrum-muted); text-decoration: line-through; text-decoration-color: var(--fulcrum-danger); }
+.scroll [data-kind="user"]:has(+ .undelivered:not([data-empty])) { border-left-color: var(--fulcrum-danger); color: var(--fulcrum-muted); text-decoration: line-through; text-decoration-color: var(--fulcrum-danger); }
 .undelivered { margin: 4px 0 0; padding-left: 14px; color: var(--fulcrum-danger); font-size: 12px; font-weight: 700; }
+.undelivered[data-empty] { display: none; }
 .queued-delivery { margin: 4px 0 0; padding-left: 14px; color: var(--fulcrum-muted); font-size: 12px; font-weight: 700; }
 
 /* Notices and empty states. */
@@ -141,7 +143,8 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .notice[data-tone="warn"] { border-left-color: var(--fulcrum-warn); }
 .notice[data-tone="busy"] { border-left-color: var(--fulcrum-accent); }
 .notice .ghost { min-height: 30px; }
-.notice .command { flex-basis: 100%; margin: 0; }
+.notice .command { flex-basis: 100%; min-width: 0; margin: 0; }
+.notice .command .ghost { flex: none; }
 
 /* The dock: the status line, then the composer, on the transcript's measure. */
 .dock { flex: none; padding: 6px var(--gutter) max(16px, env(safe-area-inset-bottom)); }
@@ -158,7 +161,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .status-link { min-height: 28px; padding: 0 8px; border-color: var(--fulcrum-warn); font-size: 12px; font-weight: 700; }
 .status-link::after { content: " ↓"; }
 /* A failed turn: the error row, then its one action. */
-.turn-error { display: grid; justify-items: start; gap: 6px; padding: 8px; border-left: var(--rail) solid var(--fulcrum-danger); }
+.turn-error { display: grid; justify-items: start; gap: 6px; padding: 8px; border: 1px solid var(--fulcrum-danger); border-left-width: var(--rail); }
 .turn-retry { min-height: 30px; padding: 0 10px; font-size: 12px; }
 
 /* The composer: fulcrum's parts, plus gamma's tray, footer tools, and vim mode. */
@@ -181,17 +184,21 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .dock [data-part="composer"] .composer-tool:hover { border-color: var(--fulcrum-fg); }
 .dock [data-part="composer"] .attach { display: inline-flex; align-items: center; justify-content: center; padding: 0; }
 .dock [data-part="attachment"] .composer-tool { min-width: 34px; min-height: 34px; border-width: 0 0 0 1px; font-size: 16px; }
-.composer-stop-slot, [data-part="composer-stop"] { display: inline-block; width: 94px; min-width: 94px; min-height: var(--control); }
+.composer-stop-slot, [data-part="composer-stop"] { display: inline-flex; align-items: center; justify-content: center; width: 94px; min-width: 94px; min-height: var(--control); }
+.composer-stop-slot { border: 1px solid var(--fulcrum-border); color: var(--fulcrum-muted); opacity: 0.45; }
+.dock [data-part="composer-stop"] { --action: var(--fulcrum-fg); }
 .dock [data-part="composer"] .approval-mode[data-yolo] { --action: var(--fulcrum-danger); color: var(--fulcrum-danger); font-weight: 700; }
 .model-picker { position: relative; }
-.model-picker > button { max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-picker > button { width: 32ch; max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-picker [role="listbox"] { position: absolute; z-index: 5; right: 0; bottom: calc(100% + 4px); display: grid; width: max-content; min-width: 100%; max-width: calc(100vw - 24px); max-height: min(60dvh, 420px); overflow-y: auto; padding: 4px 0; border: 1px solid var(--fulcrum-fg); background: var(--fulcrum-bg); }
 .dock .model-picker [role="option"] { --action: transparent; min-height: 32px; padding: 0 12px; border: 0; background: transparent; color: var(--fulcrum-fg); font-weight: 400; text-align: left; white-space: nowrap; }
 .dock .model-picker [role="option"][aria-selected="true"] { font-weight: 700; }
-.dock .model-picker [role="option"][data-active] { border-left: var(--rail) solid var(--fulcrum-accent); background: var(--fulcrum-surface); }
+.dock .model-picker [role="option"][data-active] { border-left: var(--rail) solid var(--fulcrum-accent); background: var(--fulcrum-surface); box-shadow: inset 3px 0 var(--fulcrum-accent); }
 .dock .model-picker [role="option"]:hover, .dock .model-picker [role="option"]:focus-visible { background: var(--fulcrum-surface); }
 .model-empty { max-width: 32ch; margin: 0; padding: 6px 12px; color: var(--fulcrum-muted); font-size: 12px; }
-.settings-error { max-width: 20ch; overflow: hidden; color: var(--fulcrum-danger); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.settings-error { flex-basis: 100%; color: var(--fulcrum-danger); font-size: 12px; overflow-wrap: anywhere; }
+.dock [data-part="composer-status"][data-tone="danger"] { flex-basis: 100%; height: auto; white-space: normal; }
+.dock [data-part="composer-message"] { overflow-wrap: anywhere; white-space: normal; }
 
 /* A run with no messages: a short note on the transcript's measure. */
 .empty-run { max-width: var(--measure); margin: max(32px, 14dvh) auto 0; padding: 16px 20px; border: 1px solid var(--fulcrum-border); border-left: var(--rail) solid var(--fulcrum-accent); }
@@ -227,9 +234,10 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .artifact-markdown { padding: 12px; border: 1px solid var(--fulcrum-border); background: var(--fulcrum-surface); }
 .artifact-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--fulcrum-muted); font: 12px var(--fulcrum-font); margin-block-end: 8px; }
 .inspector-backdrop { position: fixed; z-index: 50; inset: 0; padding: 24px; background: color-mix(in srgb, var(--fulcrum-bg) 78%, transparent); }
-.inspector { display: grid; width: 100%; height: 100%; grid-template-rows: auto 1fr; background: var(--fulcrum-bg); border: 1px solid var(--fulcrum-fg); }
-.inspector-bar { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-block-end: 1px solid var(--fulcrum-border); }
-.inspector-bar strong { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inspector { display: grid; width: 100%; max-width: 100%; min-width: 0; height: 100%; box-sizing: border-box; grid-template-rows: auto 1fr; background: var(--fulcrum-bg); border: 1px solid var(--fulcrum-fg); }
+.inspector-bar { display: flex; align-items: center; gap: 12px; min-width: 0; max-width: 100%; overflow: hidden; padding: 8px 12px; border-block-end: 1px solid var(--fulcrum-border); }
+.inspector-bar strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inspector-bar a, .inspector-bar button { flex: none; }
 .inspector-bar a, .inspector-bar button { display: inline-flex; align-items: center; min-height: var(--control); padding: 0 12px; border: 1px solid var(--fulcrum-border); color: var(--fulcrum-fg); text-decoration: none; }
 .inspector-bar a:hover, .inspector-bar button:hover { border-color: var(--fulcrum-fg); }
 .inspector-body { min-height: 0; overflow: auto; padding: 16px; }
@@ -237,7 +245,14 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .inspector-body table { border-collapse: collapse; font: 13px var(--fulcrum-font); }
 .inspector-body td { border: 1px solid var(--fulcrum-border); padding: 5px 8px; white-space: pre-wrap; }
 .inspector-body pre { white-space: pre-wrap; overflow-wrap: anywhere; }
-@media (max-width: 600px) { .inspector-backdrop { padding: 0; } .artifacts { padding-inline-start: 8px; } }
+@media (max-width: 600px) {
+  .inspector-backdrop { padding: 0; }
+  .artifacts { padding-inline-start: 8px; }
+  .undelivered[data-empty][data-reserve] { display: block; min-height: 3.2em; visibility: hidden; }
+  .undelivered:not([data-empty]) { min-height: 3.2em; }
+  .new-run-label { display: none; }
+  .new-run-short { display: inline; font-size: 18px; }
+}
 /* Narrow composer: the vim mode leads the hint on the first row; the tools fill the second row, model first. */
 @container (max-width: 480px) {
   .dock .vim-mode { order: 1; }
@@ -249,8 +264,16 @@ button:active:not(:disabled) { transform: scale(0.97); }
   .topbar-yolo { display: none; }
   .brand-name { display: none; }
   .run-title h1 { max-width: none; }
-  .dock .model-picker > button { max-width: 18ch; }
+  .dock .model-picker > button { width: 14ch; max-width: 14ch; }
+  .dock .model-picker { min-width: 8ch; }
   .attachments { flex-wrap: nowrap; overflow-x: auto; }
   [data-part="attachment"] { flex: 0 0 150px; }
   .model-picker [role="listbox"] { right: auto; left: 0; }
+}
+@media (max-width: 420px) {
+  .topbar { flex-wrap: wrap; }
+  .topbar .run-title { order: 2; flex-basis: 100%; }
+  .dock .composer-tools { flex-wrap: wrap; justify-content: flex-start; }
+  .dock .composer-tools > .model-picker { flex-basis: 100%; }
+  .dock .model-picker > button { width: 100%; max-width: 100%; }
 }

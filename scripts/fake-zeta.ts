@@ -445,6 +445,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     requests,
     imageSends,
     get settings() { return settings; },
+    get running() { return running; },
     /** Every accepted send and steer, in order. */
     sent: composer.sent,
     clearSent() { composer.clearSent(); },

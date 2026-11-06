@@ -67,7 +67,7 @@ function ModelPicker({ value, models, resolvedDefault, onChange }: { value: stri
   };
   return <div className="model-picker" ref={root}>
     <button ref={button} type="button" className="composer-tool" aria-haspopup="listbox" aria-expanded={open} aria-label={`model: ${label}`} title={label} onClick={() => setOpen(!open)}>{label}</button>
-    {open ? <div role="listbox" aria-label="model" tabIndex={0} aria-activedescendant={`${listId}-${active}`} onKeyDown={key}>
+    {open ? <div role="listbox" aria-label="model" tabIndex={0} aria-activedescendant={`${listId}-${active}`} onKeyDown={key} onBlur={(event) => { if (!root.current?.contains(event.relatedTarget)) setOpen(false); }}>
       {options.map((model, index) => <button id={`${listId}-${index}`} tabIndex={-1} type="button" role="option" aria-selected={model === value} data-active={index === active || undefined} key={model || "default"} onClick={() => { onChange(model); close(); }}>{model || defaultLabel}</button>)}
     </div> : null}
   </div>;
@@ -77,41 +77,41 @@ function ModelPicker({ value, models, resolvedDefault, onChange }: { value: stri
  * The run's model and approval mode, from zeta. A blank run has no session yet: it shows zeta's catalog and the mode
  * the first send starts the run with (`nextRunModel`, then `set_settings` for YOLO).
  */
-export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaClient | null; sessionId: string | null; yolo: boolean; onYolo(value: boolean): void }) {
-  // zeta lists these methods under hello's `requests`, which fulcrum's client does not expose, so a request tells:
-  // only "method not found" hides the controls.
+export function RunSettings({ client, sessionId, createdWithDefault, yolo, onYolo }: { client: ZetaClient | null; sessionId: string | null; createdWithDefault: boolean; yolo: boolean; onYolo(value: boolean): void }) {
   const [unsupported, setUnsupported] = useState(false);
   const [settings, setSettings] = useState<SessionSettings>({});
   const [models, setModels] = useState<string[]>(() => cachedCatalog().models);
-  const [pending, setPending] = useState(() => nextRunModel().model ?? "");
+  const [preference, setPreference] = useState(() => nextRunModel().model ?? "");
+  const [selected, setSelected] = useState("");
   const [resolvedDefault, setResolvedDefault] = useState<string>();
   const [error, setError] = useState("");
   const [confirmYolo, setConfirmYolo] = useState(false);
   const confirmRef = useRef<HTMLDivElement>(null);
   const approvalButton = useRef<HTMLButtonElement>(null);
-  const startedSession = useRef<string | null | undefined>(sessionId === null ? undefined : null);
-  if (startedSession.current === undefined && sessionId) startedSession.current = sessionId;
-  const load = useCallback(async () => {
+  useEffect(() => {
     if (!client) return;
-    try {
-      // New zeta servers serve the catalog from the connected controller, even before a session exists.
-      const catalog = await client.request("model_catalog", sessionId ? { session_id: sessionId } : {}, { timeoutMs: 15_000 });
+    let live = true;
+    setError("");
+    setResolvedDefault(undefined);
+    setSelected("");
+    void client.request("model_catalog", sessionId ? { session_id: sessionId } : {}, { timeoutMs: 15_000 }).then((catalog) => {
+      if (!live) return;
       localStorage.setItem(CATALOG, JSON.stringify(catalog));
       setModels(catalogModels(catalog));
-    } catch (cause) {
-      if ((cause as { code?: unknown }).code === -32601) { setUnsupported(true); return; }
-      if (!sessionId) return;
-    }
-    if (sessionId) {
-      try {
-        const next = settingModel(await client.request("session_settings", { session_id: sessionId }, { timeoutMs: 15_000 }));
-        setSettings(next);
-        if (startedSession.current === sessionId && !pending) setResolvedDefault(next.model);
-        onYolo(next.approval_mode === "allow");
-      } catch (cause) { setError(cause instanceof Error ? cause.message : "settings unavailable"); }
-    }
-  }, [client, sessionId, onYolo, pending]);
-  useEffect(() => { setError(""); void load(); }, [load]);
+    }, (cause: unknown) => {
+      if (!live) return;
+      if ((cause as { code?: unknown }).code === -32601) setUnsupported(true);
+    });
+    if (sessionId) void client.request("session_settings", { session_id: sessionId }, { timeoutMs: 15_000 }).then((value) => {
+      if (!live) return;
+      const next = settingModel(value);
+      setSettings(next);
+      setResolvedDefault(next.model);
+      setSelected(createdWithDefault ? "" : next.model ?? "");
+      onYolo(next.approval_mode === "allow");
+    }, (cause: unknown) => { if (live) setError(cause instanceof Error ? cause.message : "settings unavailable"); });
+    return () => { live = false; };
+  }, [client, sessionId, createdWithDefault, onYolo]);
   const closeConfirm = useCallback(() => { setConfirmYolo(false); approvalButton.current?.focus(); }, []);
   useDismiss(confirmYolo, confirmRef, closeConfirm);
   useEffect(() => { if (confirmYolo) confirmRef.current?.querySelector<HTMLButtonElement>("button[data-safe]")?.focus(); }, [confirmYolo]);
@@ -120,19 +120,21 @@ export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaC
     setError("");
     try {
       await client.request("set_settings", { session_id: sessionId, ...settingsRequest(settings, patch) });
-      if (patch.model) localStorage.setItem(MODEL, patch.model);
-      await load();
+      const next = settingModel(await client.request("session_settings", { session_id: sessionId }, { timeoutMs: 15_000 }));
+      setSettings(next);
+      onYolo(next.approval_mode === "allow");
     } catch (cause) { setError(cause instanceof Error ? cause.message : "could not change settings"); }
   };
   const pick = (model: string) => {
-    if (sessionId) {
-      const selected = model || resolvedDefault || settings.model;
-      if (!selected) return;
-      setPending(model);
-      return void change({ model: selected });
+    if (!sessionId) {
+      if (model) localStorage.setItem(MODEL, model); else localStorage.removeItem(MODEL);
+      setPreference(model);
+      return;
     }
-    localStorage.setItem(MODEL, model);
-    setPending(model);
+    const target = model || resolvedDefault;
+    if (!target) return;
+    setSelected(model);
+    void change({ model: target });
   };
   const toggle = () => {
     if (!yolo) { setConfirmYolo(true); return; }
@@ -142,7 +144,7 @@ export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaC
   const confirmAllow = () => { closeConfirm(); if (sessionId) void change({ approval_mode: "allow" }); else onYolo(true); };
   return (
     <>
-      <ModelPicker value={!sessionId || startedSession.current === sessionId ? pending : settings.model ?? ""} models={models} resolvedDefault={sessionId && startedSession.current === sessionId ? resolvedDefault : undefined} onChange={pick} />
+      <ModelPicker value={sessionId ? selected : preference} models={models} resolvedDefault={sessionId ? resolvedDefault : undefined} onChange={pick} />
       <button
         ref={approvalButton}
         type="button"
@@ -156,9 +158,9 @@ export function RunSettings({ client, sessionId, yolo, onYolo }: { client: ZetaC
         {yolo ? "YOLO" : "Ask"}
       </button>
       {error ? <span className="settings-error" role="alert" title={error}>{error}</span> : null}
-      {confirmYolo ? <div ref={confirmRef} className="confirm-popover" role="dialog" aria-label="allow tools without asking">
+      {confirmYolo ? <div ref={confirmRef} className="confirm-popover" role="dialog" aria-label="allow tools without asking" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setConfirmYolo(false); }}>
         <p>allow tools to run without asking in this run?</p>
-        <div className="actions"><button type="button" className="confirm-primary" onClick={confirmAllow}>allow</button><button type="button" className="confirm-secondary" data-safe onClick={closeConfirm}>keep asking</button></div>
+        <div className="actions"><button type="button" className="confirm-danger" onClick={confirmAllow}>allow</button><button type="button" className="confirm-primary" data-safe onClick={closeConfirm}>keep asking</button></div>
       </div> : null}
     </>
   );

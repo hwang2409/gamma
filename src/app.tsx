@@ -9,7 +9,7 @@ import { createConnection, serveCommand, type Connection, type ConnectionState }
 import { createDelivery, stopTurn } from "./delivery";
 import { createRun, sessionPresentation, sessionTitle, transitionRun, type OpenRun, type RunControl, type RunState, type SessionMeta } from "./session";
 import { ThemePicker, useTheme } from "./theme";
-import { GammaComposer, type Submit } from "./composer";
+import { createComposerDrafts, GammaComposer, type ComposerDrafts, type Submit } from "./composer";
 import { nextRunModel, RunSettings, SettingsMenu, useVimSetting, VimToggle } from "./controls";
 import { settingModel, settingsRequest } from "./settings";
 import { artifactContentUrl, hostBindings, useArtifacts } from "./host-client";
@@ -35,14 +35,14 @@ function UserRow({ id }: { id: string }) {
   const delivery = useItemSelector(id, (item) => (item?.type === "user" && item.event.type === "user_message" ? item.event.delivery_id : undefined));
   const undelivered = useContext(Undelivered);
   const waitingDeliveries = useContext(WaitingDeliveries);
-  const identity = intent ?? delivery ?? "";
+  const identity = intent ?? delivery ?? (id.startsWith("user:intent:") ? id.slice("user:intent:".length) : id.startsWith("user:delivery:") ? id.slice("user:delivery:".length) : "");
   const lost = undelivered.has(identity);
   const waiting = waitingDeliveries.has(identity) && !lost;
   return (
     <>
       <Fallback id={id} />
       {waiting ? <p className="queued-delivery" role="status" aria-label="message queued">queued</p> : null}
-      {lost ? <p className="undelivered" role="note">not delivered · the stop ended the turn before zeta took this steer</p> : null}
+      <p className="undelivered" data-empty={!lost || undefined} data-reserve={identity || undefined} data-user-id={id} role={lost ? "note" : undefined} aria-hidden={!lost || undefined}>{lost ? "not delivered · the stop ended the turn before zeta took this steer" : "\u00a0"}</p>
     </>
   );
 }
@@ -119,30 +119,52 @@ const RUN = "gamma-run";
 /** The run to resume: `?run=` first (a shared link), else the one this browser had open. */
 const initialRun = () => {
   const id = new URLSearchParams(location.search).get("run") ?? localStorage.getItem(RUN);
-  if (id) rememberRun(id); // a run reopened from storage is in the url too, so the address can be shared
+  if (id) rememberRun(id, false, id); // a run reopened from storage is in the url too, so the address can be shared
   return id;
 };
-const rememberRun = (id: string | null, push = false) => {
+const rememberRun = (id: string | null, push = false, composerScope = id ?? "blank:0") => {
   const url = new URL(location.href);
   if (id) { url.searchParams.set("run", id); localStorage.setItem(RUN, id); }
   else { url.searchParams.delete("run"); localStorage.removeItem(RUN); }
-  history[push ? "pushState" : "replaceState"](null, "", url);
+  history[push ? "pushState" : "replaceState"]({ ...history.state, gammaComposerScope: composerScope }, "", url);
 };
 
 export function App() {
   const [theme, setTheme] = useTheme();
   const [vim, setVim] = useVimSetting();
   const connection = useMemo(() => createConnection({ origin: location.origin }), []);
+  const selected = useMemo(initialRun, []);
+  const drafts = useMemo(() => createComposerDrafts(), []);
+  const scopeSequence = useRef(0);
+  const [composerScope, setComposerScope] = useState(() => selected ?? "blank:0");
+  const composerScopeRef = useRef(composerScope);
+  const navigationScope = useRef<string | null>(null);
+  const creating = useRef<{ defaultModel: boolean } | null>(null);
+  const createdWithDefault = useRef(new Set<string>());
   const pushSelection = useRef(false);
-  const runs = useMemo(() => createRun(connection, { selected: initialRun(), onSelect: (id) => { rememberRun(id, pushSelection.current); pushSelection.current = false; }, bindings: hostBindings }), [connection]);
+  const runs = useMemo(() => createRun(connection, { selected, onSelect: (id) => {
+    let scope = composerScopeRef.current;
+    if (id && creating.current) {
+      if (creating.current.defaultModel) createdWithDefault.current.add(id);
+    } else {
+      scope = navigationScope.current ?? id ?? `blank:${++scopeSequence.current}`;
+      navigationScope.current = null;
+      composerScopeRef.current = scope;
+      setComposerScope(scope);
+    }
+    rememberRun(id, pushSelection.current, scope);
+    pushSelection.current = false;
+  }, bindings: hostBindings }), [connection, selected]);
   useEffect(() => {
-    const pop = () => {
+    const pop = (event: PopStateEvent) => {
       const id = new URLSearchParams(location.search).get("run");
+      const scope = (event.state as { gammaComposerScope?: unknown } | null)?.gammaComposerScope;
+      navigationScope.current = typeof scope === "string" ? scope : id;
       if (id) runs.select(id); else runs.reset();
     };
     addEventListener("popstate", pop);
-    return () => { removeEventListener("popstate", pop); runs.dispose(); connection.stop(); };
-  }, [connection, runs]);
+    return () => { removeEventListener("popstate", pop); drafts.dispose(); runs.dispose(); connection.stop(); };
+  }, [connection, drafts, runs]);
   const state = useExternal(connection);
   const view = useExternal(runs);
   const open = sessionPresentation(view.transition).open;
@@ -158,16 +180,25 @@ export function App() {
   const closeViewer = useCallback(() => { setViewer(null); requestAnimationFrame(() => viewerOpener.current?.focus()); }, []);
   const [newRunConfirm, setNewRunConfirm] = useState(false);
   const newRunButton = useRef<HTMLButtonElement>(null);
-  const [undelivered, setUndelivered] = useState<ReadonlySet<string>>(() => new Set());
-  const [waitingDeliveries, setWaitingDeliveries] = useState<ReadonlySet<string>>(() => new Set());
-  const onWaitingDelivery = useCallback((intent: string, waiting: boolean) => setWaitingDeliveries((current) => {
-    const next = new Set(current);
-    if (waiting) next.add(intent); else next.delete(intent);
+  const [undeliveredByRun, setUndeliveredByRun] = useState<ReadonlyMap<string, ReadonlySet<string>>>(() => new Map());
+  const [waitingByRun, setWaitingByRun] = useState<ReadonlyMap<string, ReadonlySet<string>>>(() => new Map());
+  const onWaitingDelivery = useCallback((scope: string, intent: string, waiting: boolean) => setWaitingByRun((current) => {
+    const next = new Map(current);
+    const marks = new Set(next.get(scope));
+    if (waiting) marks.add(intent); else marks.delete(intent);
+    next.set(scope, marks);
     return next;
   }), []);
-  const onUndelivered = useCallback((intents: string[]) => {
-    if (intents.length) setUndelivered((current) => new Set([...current, ...intents]));
+  const onUndelivered = useCallback((scope: string, intents: string[]) => {
+    if (!intents.length) return;
+    setUndeliveredByRun((current) => {
+      const next = new Map(current);
+      next.set(scope, new Set([...(next.get(scope) ?? []), ...intents]));
+      return next;
+    });
   }, []);
+  const undelivered = undeliveredByRun.get(composerScope) ?? new Set<string>();
+  const waitingDeliveries = waitingByRun.get(composerScope) ?? new Set<string>();
   const newRun = useCallback(async () => {
     if (store.getState().agent === "running") {
       setNewRunConfirm(true);
@@ -176,7 +207,6 @@ export function App() {
     pushSelection.current = true;
     runs.reset();
     setYolo(false);
-    setUndelivered(new Set());
     setEpoch((value) => value + 1);
     requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('.dock textarea[aria-label="message"]')?.focus());
   }, [runs, store]);
@@ -186,7 +216,6 @@ export function App() {
     pushSelection.current = true;
     runs.reset();
     setYolo(false);
-    setUndelivered(new Set());
     setEpoch((value) => value + 1);
   }, [connection, newRun]);
   const client = state.phase === "connected" ? connection.client : null;
@@ -203,7 +232,7 @@ export function App() {
                 <span className="brand"><span className="brand-mark" aria-hidden="true" /><span className="brand-name">gamma</span></span>
                 <RunTitle session={view.session} blank={!sessionPresentation(view.transition).selected} />
                 <YoloIndicator className="topbar-yolo" />
-                <button ref={newRunButton} type="button" className="ghost new-run" onClick={() => void newRun()} disabled={!sessionPresentation(view.transition).selected}>new run</button>
+                <button ref={newRunButton} type="button" className="ghost new-run" aria-label="new run" onClick={() => void newRun()} disabled={!sessionPresentation(view.transition).selected}><span className="new-run-label">new run</span><span className="new-run-short" aria-hidden="true">+</span></button>
                 <SettingsMenu>
                   <ThemePicker theme={theme} onChange={setTheme} />
                   <VimToggle on={vim} onChange={setVim} />
@@ -211,7 +240,7 @@ export function App() {
               </header>
               <main className="main">
                 <Body state={state} view={view} connection={connection} runs={runs} onNewRun={() => void newRun()} />
-                <Dock key={epoch} state={state} view={view} connection={connection} runs={runs} vim={vim} onUndelivered={onUndelivered} onWaitingDelivery={onWaitingDelivery} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />
+                <Dock key={composerScope} draftKey={composerScope} drafts={drafts} createdWithDefault={createdWithDefault.current} onCreating={(value) => { creating.current = value; }} state={state} view={view} connection={connection} runs={runs} vim={vim} onUndelivered={onUndelivered} onWaitingDelivery={onWaitingDelivery} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />
                 {newRunConfirm ? <ConfirmDialog title="stop the running turn?" confirm="stop and start new run" onConfirm={confirmNewRun} onCancel={() => { setNewRunConfirm(false); newRunButton.current?.focus(); }} /> : null}
                 {viewer ? <Inspector value={viewer} onClose={closeViewer} /> : null}
               </main>
@@ -296,7 +325,7 @@ function focusApproval() {
  */
 function StatusLine({ phase }: { phase: RunPhase }) {
   const tone = phase.kind === "approval" ? "warn" : phase.kind === "ready" ? "ok" : "busy";
-  const text = { ready: "ready", thinking: "thinking…", connecting: "connecting…", reconnecting: "reconnecting…", opening: "opening the run…", approval: "", running: "" }[phase.kind];
+  const text = { ready: "ready", thinking: "working…", connecting: "connecting…", reconnecting: "reconnecting…", opening: "opening the run…", approval: "", running: "" }[phase.kind];
   return (
     <div className="status-line" data-state={phase.kind} data-tone={tone} role="status">
       {phase.kind === "approval" ? (
@@ -308,16 +337,17 @@ function StatusLine({ phase }: { phase: RunPhase }) {
   );
 }
 
-async function submitRun({ text, images, steer, connection, runs, delivery, yolo }: { text: string; images: readonly import("./image-queue").QueuedImage[]; steer: boolean; connection: Connection; runs: RunControl; delivery: ReturnType<typeof createDelivery>; yolo: boolean }) {
+async function submitRun({ text, images, steer, connection, runs, delivery, yolo, onCreating }: { text: string; images: readonly import("./image-queue").QueuedImage[]; steer: boolean; connection: Connection; runs: RunControl; delivery: ReturnType<typeof createDelivery>; yolo: boolean; onCreating(value: { defaultModel: boolean } | null): void }) {
   const target = connection.client;
   if (!target) throw new Error("not connected to zeta serve");
   if (!transitionRun(runs.state.transition)) {
     const choice = nextRunModel();
+    onCreating({ defaultModel: !choice.model });
     try { await runs.create(choice.model && target.features.includes("new_session_settings") ? { ...choice, approval_mode: yolo ? "allow" : "ask" } : choice); }
     catch (cause) {
-      if ((cause as { code?: unknown }).code === -32004) throw new Error("zeta could not start a new run because another turn is active");
+      if ((cause as { code?: unknown }).code === -32004) throw new Error("another client has a turn running in zeta; wait for it to finish, then send again");
       throw cause;
-    }
+    } finally { onCreating(null); }
     if (!choice.model || !target.features.includes("new_session_settings")) await applyFirstTurnSettings(target, transitionRun(runs.state.transition)!.id, choice, yolo);
   }
   const id = transitionRun(runs.state.transition)!.id;
@@ -334,45 +364,48 @@ function dockPhase(state: ConnectionState, present: ReturnType<typeof sessionPre
   return { kind: "ready" };
 }
 
-function DockComposer({ readOnly, running, vim, onSubmit, onStop, onImageOpen, client, sessionId, yolo, onYolo }: { readOnly: string | null; running: boolean; vim: boolean; onSubmit: Submit; onStop(): Promise<unknown>; onImageOpen(block: any): void; client: ZetaClient | null; sessionId: string | null; yolo: boolean; onYolo(value: boolean): void }) {
-  if (readOnly !== null) return <GammaComposer state="read-only" reason={readOnly} vim={vim} onSubmit={onSubmit} onImageOpen={onImageOpen} />;
-  return <GammaComposer state={running ? "steerable" : "idle"} vim={vim} autoFocus onSubmit={onSubmit} onStop={onStop} onImageOpen={onImageOpen} footer={<RunSettings client={client} sessionId={sessionId} yolo={yolo} onYolo={onYolo} />} />;
+function DockComposer({ readOnly, running, vim, onSubmit, onStop, onImageOpen, client, sessionId, yolo, onYolo, drafts, draftKey, createdWithDefault }: { readOnly: string | null; running: boolean; vim: boolean; onSubmit: Submit; onStop(): Promise<unknown>; onImageOpen(block: any): void; client: ZetaClient | null; sessionId: string | null; yolo: boolean; onYolo(value: boolean): void; drafts: ComposerDrafts; draftKey: string; createdWithDefault: boolean }) {
+  if (readOnly !== null) return <GammaComposer state="read-only" reason={readOnly} vim={vim} onSubmit={onSubmit} onImageOpen={onImageOpen} drafts={drafts} draftKey={draftKey} />;
+  return <GammaComposer state={running ? "steerable" : "idle"} vim={vim} autoFocus onSubmit={onSubmit} onStop={onStop} onImageOpen={onImageOpen} drafts={drafts} draftKey={draftKey} footer={<RunSettings client={client} sessionId={sessionId} createdWithDefault={createdWithDefault} yolo={yolo} onYolo={onYolo} />} />;
 }
 
-function useDockDelivery(runs: RunControl, running: boolean, client: ZetaClient | null, onUndelivered: (intents: string[]) => void, onWaiting: (intent: string, waiting: boolean) => void) {
+function useDockDelivery(runs: RunControl, scope: string, running: boolean, client: ZetaClient | null, onUndelivered: (scope: string, intents: string[]) => void, onWaiting: (scope: string, intent: string, waiting: boolean) => void) {
   const provisional = useRef(new Map<string, unknown>());
+  const activeStore = transitionRun(runs.state.transition)?.lease.store;
+  const storeRef = useRef(activeStore);
+  storeRef.current = activeStore;
   const delivery = useMemo(() => createDelivery(undefined, (event) => {
-    const store = transitionRun(runs.state.transition)?.lease.store;
+    const store = storeRef.current;
     const deliveryId = event.type === "user_message" && event.delivery_id;
     if (!store || !deliveryId) return;
     // A real echo can arrive before the request reply. Only a missing echo needs a provisional queued row.
-    if (store.hasMessageDelivery(deliveryId)) { onWaiting(deliveryId, false); return; }
+    if (store.hasMessageDelivery(deliveryId)) { onWaiting(scope, deliveryId, false); return; }
     store.dispatch(event);
     const item = store.getState().outline.map(({ id }) => store.getItem(id)).find((candidate) => candidate?.type === "user" && candidate.event.type === "user_message" && candidate.event.delivery_id === deliveryId);
     provisional.current.set(deliveryId, item);
-    onWaiting(deliveryId, true);
-  }), [runs, onWaiting]);
-  const store = transitionRun(runs.state.transition)?.lease.store;
+    onWaiting(scope, deliveryId, true);
+  }), [scope, onWaiting]);
+  const store = activeStore;
   useEffect(() => {
     if (!store) return;
     const reconcile = () => {
       for (const [deliveryId, fallback] of provisional.current) {
         const item = store.getState().outline.map(({ id }) => store.getItem(id)).find((candidate) => candidate?.type === "user" && candidate.event.type === "user_message" && candidate.event.delivery_id === deliveryId);
-        if (item !== fallback) { provisional.current.delete(deliveryId); onWaiting(deliveryId, false); }
+        if (item !== fallback) { provisional.current.delete(deliveryId); onWaiting(scope, deliveryId, false); }
       }
     };
     reconcile();
     return store.subscribe(reconcile);
-  }, [store, onWaiting]);
+  }, [store, scope, onWaiting]);
   const wasRunning = useRef(running);
   useEffect(() => {
     if (!running && wasRunning.current && client) {
-      for (const deliveryId of provisional.current.keys()) onWaiting(deliveryId, false);
+      for (const deliveryId of provisional.current.keys()) onWaiting(scope, deliveryId, false);
       provisional.current.clear();
-      delivery.turnEnded(client).then(onUndelivered, () => {});
+      delivery.turnEnded(client).then((intents) => onUndelivered(scope, intents), () => {});
     }
     wasRunning.current = running;
-  }, [running, client, delivery, onUndelivered, onWaiting]);
+  }, [running, client, delivery, scope, onUndelivered, onWaiting]);
   return delivery;
 }
 
@@ -384,8 +417,8 @@ function useDockRetry(agent: ReturnType<typeof useAgentPhase>, client: ZetaClien
   }, [failed, client, delivery, onRetryTurn]);
 }
 
-function Dock({ state, view, connection, runs, vim, onUndelivered, onWaitingDelivery, onRetryTurn, onImageOpen }: {
-  state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; vim: boolean; onUndelivered(intents: string[]): void; onWaitingDelivery(intent: string, waiting: boolean): void; onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>; onImageOpen(block: any): void;
+function Dock({ state, view, connection, runs, vim, onUndelivered, onWaitingDelivery, onRetryTurn, onImageOpen, drafts, draftKey, createdWithDefault, onCreating }: {
+  state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; vim: boolean; onUndelivered(scope: string, intents: string[]): void; onWaitingDelivery(scope: string, intent: string, waiting: boolean): void; onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>; onImageOpen(block: any): void; drafts: ComposerDrafts; draftKey: string; createdWithDefault: ReadonlySet<string>; onCreating(value: { defaultModel: boolean } | null): void;
 }) {
   const present = sessionPresentation(view.transition);
   const open = present.open;
@@ -396,13 +429,13 @@ function Dock({ state, view, connection, runs, vim, onUndelivered, onWaitingDeli
   const { yolo, setYolo } = useContext(ApprovalModeContext);
   // This dock's own first send is starting the run: the composer stays put while zeta creates and opens it.
   const [starting, setStarting] = useState(false);
-  const delivery = useDockDelivery(runs, running, client, onUndelivered, onWaitingDelivery);
+  const delivery = useDockDelivery(runs, draftKey, running, client, onUndelivered, onWaitingDelivery);
 
   const onSubmit: Submit = useCallback(async (text, images, { steer }) => {
     setStarting(true);
-    try { return await submitRun({ text, images, steer, connection, runs, delivery, yolo }); }
+    try { return await submitRun({ text, images, steer, connection, runs, delivery, yolo, onCreating }); }
     finally { setStarting(false); }
-  }, [connection, runs, delivery, yolo]);
+  }, [connection, runs, delivery, yolo, onCreating]);
   const onStop = useCallback(() => (client ? delivery.stop(client) : Promise.reject(new Error("not connected to zeta serve"))), [client, delivery]);
   const lastPrompt = useLastPrompt();
 
@@ -412,7 +445,8 @@ function Dock({ state, view, connection, runs, vim, onUndelivered, onWaitingDeli
   const problem = (state.phase !== "connected" && state.phase !== "connecting" && state.phase !== "dropped") || Boolean(failure && !failure.restored);
   const phase = dockPhase(state, present, open, agent, starting);
   const readOnly = problem ? "" : !client ? "sending is paused until zeta reconnects" : starting ? null : present.opening || open?.stale ? "sending is paused until the run opens" : null;
-  return <div className="dock"><>{problem ? null : <StatusLine phase={phase} />}</><DockComposer readOnly={readOnly} running={running} vim={vim} onSubmit={onSubmit} onStop={onStop} onImageOpen={onImageOpen} client={client} sessionId={blank || starting ? null : open?.id ?? null} yolo={yolo} onYolo={setYolo} /></div>;
+  const sessionId = blank || starting ? null : open?.id ?? null;
+  return <div className="dock"><>{problem ? null : <StatusLine phase={phase} />}</><DockComposer readOnly={readOnly} running={running} vim={vim} onSubmit={onSubmit} onStop={onStop} onImageOpen={onImageOpen} client={client} sessionId={sessionId} createdWithDefault={Boolean(sessionId && createdWithDefault.has(sessionId))} yolo={yolo} onYolo={setYolo} drafts={drafts} draftKey={draftKey} /></div>;
 }
 
 /** The last prompt the user sent, so a failed turn can be retried with it. */
@@ -480,7 +514,7 @@ function ConfirmDialog({ title, confirm, onConfirm, onCancel }: { title: string;
   const destructive = useRef<HTMLButtonElement>(null);
   const safe = useRef<HTMLButtonElement>(null);
   useEffect(() => { safe.current?.focus(); const key = (event: KeyboardEvent) => { if (event.key === "Escape") { event.preventDefault(); onCancel(); } if (event.key === "Tab" && event.shiftKey && document.activeElement === destructive.current) { event.preventDefault(); safe.current?.focus(); } else if (event.key === "Tab" && !event.shiftKey && document.activeElement === safe.current) { event.preventDefault(); destructive.current?.focus(); } }; addEventListener("keydown", key); return () => removeEventListener("keydown", key); }, [onCancel]);
-  return <div className="confirm-backdrop"><div className="confirm-dialog" role="dialog" aria-modal="true" aria-label={title}><h2>{title}</h2><p>the current turn will be stopped before the new run opens.</p><div className="actions"><button ref={destructive} type="button" className="confirm-primary" onClick={onConfirm}>{confirm}</button><button ref={safe} type="button" className="confirm-secondary" onClick={onCancel}>cancel</button></div></div></div>;
+  return <div className="confirm-backdrop"><div className="confirm-dialog" role="dialog" aria-modal="true" aria-label={title}><h2>{title}</h2><p>the current turn will be stopped before the new run opens.</p><div className="actions"><button ref={destructive} type="button" className="confirm-danger" onClick={onConfirm}>{confirm}</button><button ref={safe} type="button" className="confirm-primary" onClick={onCancel}>cancel</button></div></div></div>;
 }
 
 function Inspector({ value, onClose }: { value: any; onClose(): void }) {
@@ -605,10 +639,14 @@ function ConnectionNotice({ state, connection, compact = false }: { state: Conne
         </>
       ) : (
         <>
-          <p>zeta serve is running but refused the token. restart it so the dev server hands over a fresh token:</p>
+          <p>zeta serve refused this controller credential. restart zeta serve so the dev server can hand gamma the new credential:</p>
           <Copy value={command} />
         </>
       );
+      break;
+    case "unresponsive":
+      title = "zeta serve did not answer";
+      body = <p>the server accepted the socket but did not finish hello within 15 seconds. check its terminal, then retry.</p>;
       break;
     case "busy":
       title = "zeta serve is in use";
@@ -617,7 +655,7 @@ function ConnectionNotice({ state, connection, compact = false }: { state: Conne
       break;
     case "incompatible":
       title = "unsupported protocol version";
-      body = <><p>gamma needs zeta protocol 1.2, but this server offers an older version. update zeta, then retry.</p><button type="button" className="primary" onClick={() => location.reload()}>reload after updating zeta</button></>;
+      body = <><p>gamma requires zeta protocol 1.2, but the server rejected that version. update zeta, then reload this page to retry.</p><button type="button" className="primary" onClick={() => location.reload()}>reload and retry</button></>;
       break;
   }
   if (compact) {
