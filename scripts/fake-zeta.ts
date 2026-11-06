@@ -121,6 +121,8 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
   const deliveries = new Map<string, Json>();
   const statuses = new Map<string, "queued" | "delivered" | "dropped">();
   let aborts = 0;
+  let echo = true;
+  const withheldEchoes: Array<() => void> = [];
   let chat: { session: string; steers: string[]; aborted: boolean } | null = null;
   type Send = (event: Json) => void;
   const chatTurn = async (session: string, send: Send, prompt: string) => {
@@ -171,7 +173,8 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
     if (method === "steer" && !running.get()) return { error: { code: -32005, message: "no turn is running for steering" } };
     const value = String(params.text ?? "");
     sent.push({ method, text: value, delivery_id: delivery });
-    send({ event: "user_message", session_id: active, text: value, mode: method, attachments: images.map((image) => ({ name: image.name, mime_type: image.mime_type, size: Math.floor(String(image.data).length * 3 / 4) })), ...(delivery ? { delivery_id: delivery } : {}) });
+    const userMessage = { event: "user_message", session_id: active, text: value, mode: method, attachments: images.map((image) => ({ name: image.name, mime_type: image.mime_type, size: Math.floor(String(image.data).length * 3 / 4) })), ...(delivery ? { delivery_id: delivery } : {}) };
+    if (echo) send(userMessage); else withheldEchoes.push(() => send(userMessage));
     const accepted = method === "send" ? { accepted: true, session_id: active } : { accepted: true };
     if (delivery) { deliveries.set(delivery, accepted); statuses.set(delivery, method === "steer" ? "queued" : "delivered"); }
     if (method === "steer") { if (delivery) chat?.steers.push(delivery); return { result: accepted }; }
@@ -196,6 +199,8 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
     /** Every accepted send and steer, in order. */
     sent,
     clearSent() { sent.splice(0); },
+    setEcho(value: boolean) { echo = value; },
+    flushEchoes() { withheldEchoes.splice(0).forEach((send) => send()); },
     get history() { return histories[ACTIVE] ?? []; },
     get aborts() { return aborts; },
     /** The reply body for a composer method, or undefined for any other method. */
@@ -236,6 +241,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   let delayedOpen = false;
   let catalogBusy = false;
   let settingsEnabled = true;
+  let advertiseNewSessionSettings = newSessionSettings;
   let settings = { model: "claude-opus-4-6", approval_mode: "ask" as "ask" | "allow" | "deny" };
   const imageSends: Json[] = [];
   const decisions: Json[] = [];
@@ -320,10 +326,10 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           if (mode === "incompatible") { reply({ error: { code: -32002, message: "version mismatch", data: { requested: "1.2", supported: ["1.0"] } } }); socket.close(); return; }
           if (mode === "slow") await wait(60_000);
           controller = socket;
-          const features = (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && newSessionSettings)) ?? [];
+          const features = (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings)) ?? [];
           const reconnect = features.includes("approval_reconnect");
           if (reconnect) reconnectControllers.add(socket as object);
-          reply({ result: { protocol_version: "1.2", server: "fake-zeta", capabilities: { features, requests: settingsEnabled ? ["model_catalog", "session_settings", "set_settings", "send_images", ...(newSessionSettings ? ["new_session_settings"] : [])] : [] } } });
+          reply({ result: { protocol_version: "1.2", server: "fake-zeta", capabilities: { features, requests: settingsEnabled ? ["model_catalog", "session_settings", "set_settings", "send_images", ...(advertiseNewSessionSettings ? ["new_session_settings"] : [])] : [] } } });
           if (decide && !approvalAborted) {
             if (!reconnect) expireApproval();
             else {
@@ -437,6 +443,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     /** Every accepted send and steer, in order. */
     sent: composer.sent,
     clearSent() { composer.clearSent(); },
+    setEcho(value: boolean) { composer.setEcho(value); },
+    flushEchoes() { composer.flushEchoes(); },
     get aborts() { return composer.aborts; },
     /** Closes every socket, like a network blip; the server keeps running. */
     drop() { for (const socket of sockets) socket.close(1012, "restart"); },
@@ -459,6 +467,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     async wrongToken() { await write({ port: server.port, token: "stale-token", pid: process.pid, origins: allowed }); },
     setMode(next: Mode) { mode = next; },
     setSettingsEnabled(value: boolean) { settingsEnabled = value; },
+    setNewSessionSettings(value: boolean) { advertiseNewSessionSettings = value; },
     setOpenDelay(ms: number) { openDelay = ms; },
     /** `true`: new_session fails the way real zeta does while a turn runs (`require_idle`). */
     setRejectCreate(next: boolean) { rejectCreate = next; },
