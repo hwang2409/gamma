@@ -111,6 +111,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 /* A steer that a stop dropped: the row stays, struck through, with a danger rail and a note that says why. */
 .scroll [data-kind="user"]:has(+ .undelivered) { border-left-color: var(--fulcrum-danger); color: var(--fulcrum-muted); text-decoration: line-through; text-decoration-color: var(--fulcrum-danger); }
 .undelivered { margin: 4px 0 0; padding-left: 14px; color: var(--fulcrum-danger); font-size: 12px; font-weight: 700; }
+.queued-delivery { margin: 4px 0 0; padding-left: 14px; color: var(--fulcrum-muted); font-size: 12px; font-weight: 700; }
 
 /* Notices and empty states. */
 .panel { width: min(64ch, calc(100% - 48px)); margin: max(32px, 12dvh) auto 32px; padding: 20px 24px; border: 1px solid var(--fulcrum-border); border-left: var(--rail) solid var(--fulcrum-muted); }

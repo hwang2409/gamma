@@ -38,7 +38,7 @@ function UserRow({ id }: { id: string }) {
   return (
     <>
       <Fallback id={id} />
-      {waiting ? <p className="undelivered" role="status" aria-label="message queued">queued</p> : null}
+      {waiting ? <p className="queued-delivery" role="status" aria-label="message queued">queued</p> : null}
       {lost ? <p className="undelivered" role="note">not delivered · the stop ended the turn before zeta took this steer</p> : null}
     </>
   );
