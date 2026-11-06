@@ -65,9 +65,9 @@ try {
       try { await send(page, "fail this turn after the real echo"); await waitUntil(() => fake.sent.length === 1, "send missing"); await Bun.sleep(1_000); if (await page.getByRole("status", { name: "message queued" }).count()) throw new Error("queued remained after echo-first failed turn"); await page.screenshot({ path: join(shots, "b1-echo-first-failed-1440.png") }); }
       finally { await close(context); }
     });
-    await check("reply-first-echo-reconciles", async () => {
+    await check("reply-first-reconnect-replay-reconciles", async () => {
       const { context, page } = await fresh(browser, 390);
-      try { fake.setEcho(false); await send(page, "hold this turn while the echo is withheld"); await page.getByRole("status", { name: "message queued" }).waitFor(); if (await page.locator('[data-kind="user"]', { hasText: "hold this turn" }).count() !== 1) throw new Error("provisional row duplicated"); fake.flushEchoes(); await page.getByRole("status", { name: "message queued" }).waitFor({ state: "detached", timeout: 10_000 }); if (await page.locator('[data-kind="user"]', { hasText: "hold this turn" }).count() !== 1) throw new Error("echo row duplicated"); await page.screenshot({ path: join(shots, "b1-reply-first-390.png") }); }
+      try { fake.setEcho(false); await send(page, "hold this turn while the echo is withheld"); await page.getByRole("status", { name: "message queued" }).waitFor(); if (await page.locator('[data-kind="user"]', { hasText: "hold this turn" }).count() !== 1) throw new Error("provisional row duplicated"); fake.drop(); await page.getByText(/connection lost|reconnecting/).first().waitFor({ timeout: 3_000 }); await page.getByRole("status", { name: "message queued" }).waitFor({ state: "detached", timeout: 10_000 }); if (await page.locator('[data-kind="user"]', { hasText: "hold this turn" }).count() !== 1) throw new Error("echo row duplicated"); await page.screenshot({ path: join(shots, "b1-reply-first-390.png") }); }
       finally { fake.setEcho(true); fake.flushEchoes(); await close(context); }
     });
     await check("stopped-turn-clears-queued", async () => {

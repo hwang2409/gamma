@@ -352,16 +352,18 @@ function useDockDelivery(runs: RunControl, running: boolean, client: ZetaClient 
     provisional.current.set(deliveryId, item);
     onWaiting(deliveryId, true);
   }), [runs, onWaiting]);
+  const store = transitionRun(runs.state.transition)?.lease.store;
   useEffect(() => {
-    const store = transitionRun(runs.state.transition)?.lease.store;
     if (!store) return;
-    return store.subscribe(() => {
+    const reconcile = () => {
       for (const [deliveryId, fallback] of provisional.current) {
         const item = store.getState().outline.map(({ id }) => store.getItem(id)).find((candidate) => candidate?.type === "user" && candidate.event.type === "user_message" && candidate.event.delivery_id === deliveryId);
         if (item !== fallback) { provisional.current.delete(deliveryId); onWaiting(deliveryId, false); }
       }
-    });
-  }, [runs, onWaiting]);
+    };
+    reconcile();
+    return store.subscribe(reconcile);
+  }, [store, onWaiting]);
   const wasRunning = useRef(running);
   useEffect(() => {
     if (!running && wasRunning.current && client) {
