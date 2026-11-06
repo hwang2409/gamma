@@ -153,7 +153,8 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .drop-hint { position: absolute; inset: 0; z-index: 1; display: grid; place-items: center; background: color-mix(in srgb, var(--fulcrum-accent) 12%, var(--fulcrum-bg)); color: var(--fulcrum-fg); font-weight: 700; pointer-events: none; }
 .attachments { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: var(--inset) var(--inset) 0; list-style: none; }
 [data-part="attachment"] { display: flex; align-items: center; max-width: 220px; border: 1px solid var(--fulcrum-border); background: var(--fulcrum-surface); font-size: 12px; }
-[data-part="attachment"] img { flex: none; width: 34px; height: 34px; object-fit: cover; border-right: 1px solid var(--fulcrum-border); }
+[data-part="attachment"] img { flex: none; width: 64px; height: 64px; object-fit: cover; }
+[data-part="attachment"] .attachment-preview { display: block; flex: none; padding: 0; border: 0; border-right: 1px solid var(--fulcrum-border); line-height: 0; }
 [data-part="attachment"] span { min-width: 0; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .attach-error { padding: 6px var(--inset) 0; color: var(--fulcrum-danger); font-size: 12px; font-weight: 700; }
 [data-part="composer-bar"] { flex-wrap: wrap; row-gap: 6px; }
@@ -193,7 +194,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
   .scroll [data-part] button { min-height: 44px; }
   .dock [data-part="composer"] .composer-tool, .dock [data-part="composer"] button { min-height: 44px; }
   .dock [data-part="attachment"] .composer-tool { min-width: 44px; min-height: 44px; }
-  [data-part="attachment"] img { width: 44px; height: 44px; }
+  [data-part="attachment"] img { width: 56px; height: 56px; }
   .dock .model-picker [role="option"] { min-height: 44px; }
 }
 @media (max-width: 860px) {

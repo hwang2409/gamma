@@ -229,6 +229,12 @@ function useAgentPhase(): { kind: "idle" | "thinking" | "approval" } | { kind: "
 }
 
 /** Moves focus to the pending approval's first decision, scrolling the run to it first. */
+export async function applyFirstTurnSettings(target: ZetaClient, sessionId: string, choice: { model?: string; provider?: string }, yolo: boolean) {
+  const approval_mode = yolo ? "allow" : "ask";
+  const current = settingModel(await target.request("session_settings", { session_id: sessionId }));
+  await target.request("set_settings", { session_id: sessionId, ...settingsRequest(current, { approval_mode }) });
+}
+
 function focusApproval() {
   const scroll = document.querySelector<HTMLElement>(".scroll");
   const find = () => scroll?.querySelector<HTMLElement>('[data-part="approval"][data-state="pending"]');
@@ -237,7 +243,7 @@ function focusApproval() {
   requestAnimationFrame(() => {
     const row = find();
     row?.scrollIntoView({ block: "center" });
-    row?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus({ preventScroll: true });
+    row?.querySelector<HTMLButtonElement>('button[data-action="approve"]:not(:disabled), button:not(:disabled)')?.focus({ preventScroll: true });
   });
 }
 
@@ -290,12 +296,15 @@ function Dock({ state, view, connection, runs, vim, onUndelivered, onRetryTurn }
     if (!transitionRun(runs.state.transition)) {
       setStarting(true);
       try {
-        await runs.create({ ...nextRunModel(), approval_mode: yolo ? "allow" : "ask" });
-        // Older zeta accepts model on new_session but not approval_mode; set it before the first turn.
-        if (!target.features.includes("new_session_settings")) {
+        const choice = nextRunModel();
+        // zeta requires model and approval_mode together. A default-model run is created first,
+        // then receives approval mode with the resolved current model before its first turn.
+        await runs.create(choice.model && target.features.includes("new_session_settings")
+          ? { ...choice, approval_mode: yolo ? "allow" : "ask" }
+          : choice);
+        if (!choice.model || !target.features.includes("new_session_settings")) {
           const created = transitionRun(runs.state.transition)!.id;
-          const current = settingModel(await target.request("session_settings", { session_id: created }));
-          await target.request("set_settings", { session_id: created, ...settingsRequest(current, { approval_mode: yolo ? "allow" : "ask" }) });
+          await applyFirstTurnSettings(target, created, choice, yolo);
         }
       } finally { setStarting(false); }
     }

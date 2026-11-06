@@ -1,5 +1,5 @@
 import type { ZetaClient } from "@fulcrum/zeta";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { catalogModels, catalogProviders, settingModel, settingsRequest, type SessionSettings } from "./settings";
 
 const CATALOG = "gamma-catalog";
@@ -40,25 +40,27 @@ function useDismiss(open: boolean, root: React.RefObject<HTMLElement | null>, cl
 
 function ModelPicker({ value, models, onChange }: { value: string; models: string[]; onChange(value: string): void }) {
   const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(0);
   const root = useRef<HTMLDivElement>(null);
   const button = useRef<HTMLButtonElement>(null);
+  const options = ["", ...models.filter((model) => model !== "")];
+  const label = value ? value : "default (claude-opus-4-6)";
   const close = useCallback(() => { setOpen(false); button.current?.focus(); }, []);
   useDismiss(open, root, close);
-  useEffect(() => { if (open) root.current?.querySelector<HTMLElement>("[aria-selected=true], [role=option]")?.focus(); }, [open]);
-  return (
-    <div className="model-picker" ref={root}>
-      <button ref={button} type="button" className="composer-tool" aria-haspopup="listbox" aria-expanded={open} aria-label={`model: ${value || "default"}`} title={value || "zeta's default model"} onClick={() => setOpen(!open)}>
-        {value || "default model"}
-      </button>
-      {open ? (
-        <div role="listbox" aria-label="model">
-          {models.length ? models.map((model) => (
-            <button type="button" role="option" aria-selected={model === value} key={model} onClick={() => { onChange(model); close(); }}>{model}</button>
-          )) : <p className="model-empty">no models are available; this run uses zeta's default model.</p>}
-        </div>
-      ) : null}
-    </div>
-  );
+  useEffect(() => { if (open) { setActive(Math.max(0, options.indexOf(value))); root.current?.querySelector<HTMLElement>("[role=listbox]")?.focus(); } }, [open, value]);
+  const key = (event: ReactKeyboardEvent) => {
+    if (event.key === "ArrowDown") { event.preventDefault(); setActive((item) => Math.min(options.length - 1, item + 1)); }
+    else if (event.key === "ArrowUp") { event.preventDefault(); setActive((item) => Math.max(0, item - 1)); }
+    else if (event.key === "Home") { event.preventDefault(); setActive(0); }
+    else if (event.key === "End") { event.preventDefault(); setActive(options.length - 1); }
+    else if (event.key === "Enter") { event.preventDefault(); onChange(options[active] ?? ""); close(); }
+  };
+  return <div className="model-picker" ref={root}>
+    <button ref={button} type="button" className="composer-tool" aria-haspopup="listbox" aria-expanded={open} aria-label={`model: ${label}`} title={label} onClick={() => setOpen(!open)}>{label}</button>
+    {open ? <div role="listbox" aria-label="model" tabIndex={0} onKeyDown={key}>
+      {options.map((model, index) => <button type="button" role="option" aria-selected={model === value} data-active={index === active || undefined} key={model || "default"} onClick={() => { onChange(model); close(); }}>{model || "default (claude-opus-4-6)"}</button>)}
+    </div> : null}
+  </div>;
 }
 
 /**

@@ -18,5 +18,7 @@ describe("slice 1 image queue", () => {
     expect(() => addImage(queue, image(1))).toThrow("up to 4");
     expect(() => addImage([], image(MAX_BYTES + 1))).toThrow("512 KiB");
     await expect(readImage(new File([new Uint8Array(MAX_BYTES + 1)], "large.png", { type: "image/png" }))).rejects.toThrow("512 KiB");
+    const nearLimit = await readImage(new File([new Uint8Array(MAX_BYTES - 1)], "near-limit.png", { type: "image/png" }));
+    expect(nearLimit.data).toHaveLength(Math.ceil((MAX_BYTES - 1) / 3) * 4);
   });
 });

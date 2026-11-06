@@ -524,7 +524,7 @@ try {
     await check("composer: layout, controls, and contrast in all 12 themes after a run", () => auditThemes(page, "1440 composer", 36));
     await check("a fresh zeta: the blank run focuses the composer; the first send creates the run; new run clears it", async () => {
       fake.setEmpty(true);
-      await page.evaluate(() => localStorage.removeItem("gamma-run"));
+      await page.evaluate(() => { localStorage.removeItem("gamma-run"); localStorage.removeItem("gamma-model"); });
       await page.goto(`${origin}/?theme=tokyo-night`);
       await ready(page, 5000);
       await page.locator(".empty-run", { hasText: "new run" }).waitFor({ timeout: 3000 });

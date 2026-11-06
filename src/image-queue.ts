@@ -6,7 +6,10 @@ export async function readImage(file: File): Promise<QueuedImage> {
   if (!allowed.has(file.type)) throw new Error("only png, jpeg, gif, and webp images are supported");
   const bytes = new Uint8Array(await file.arrayBuffer());
   if (bytes.byteLength > MAX_BYTES) throw new Error("images must be 512 KiB or smaller in total");
-  const data = btoa(String.fromCharCode(...bytes));
+  let binary = "";
+  // Keep each call below browser argument-stack limits for the full 512 KiB contract.
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  const data = btoa(binary);
   return { name: file.name || "image.png", mime_type: file.type as QueuedImage["mime_type"], data, url: URL.createObjectURL(file), size: bytes.byteLength };
 }
 export function addImage(queue: readonly QueuedImage[], image: QueuedImage) {

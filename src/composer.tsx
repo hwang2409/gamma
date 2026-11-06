@@ -204,7 +204,7 @@ export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, foo
         <ul className="attachments" aria-label="attached images">
           {images.map((image, index) => (
             <li key={image.url} data-part="attachment">
-              <img src={image.url} alt="" />
+              <button type="button" className="attachment-preview" aria-label={`open image: ${image.name}`} onClick={() => window.open(image.url, "_blank", "noopener,noreferrer")}><img src={image.url} alt="" /></button>
               <span title={image.name}>{image.name}</span>
               <button type="button" className="composer-tool" aria-label={`remove ${image.name}`} onClick={() => remove(index)}>×</button>
             </li>
