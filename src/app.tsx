@@ -295,6 +295,42 @@ async function submitRun({ text, images, steer, connection, runs, delivery, yolo
   return target.request("send_images", { session_id: id, text, images: images.map(({ name, mime_type, data }) => ({ name, mime_type, data })) }, { timeoutMs: 30_000 });
 }
 
+function dockPhase(state: ConnectionState, present: ReturnType<typeof sessionPresentation>, open: OpenRun | null, agent: ReturnType<typeof useAgentPhase>, starting: boolean): RunPhase {
+  if (state.phase === "connecting" || state.phase === "dropped") return { kind: state.phase === "connecting" && !state.lost ? "connecting" : "reconnecting" };
+  if ((present.opening || open?.stale) && !starting) return { kind: open?.stale ? "reconnecting" : "opening" };
+  if (agent.kind === "approval") return { kind: "approval" };
+  if (agent.kind === "running") return { kind: "running", tool: agent.tool };
+  if (agent.kind === "thinking") return { kind: "thinking" };
+  return { kind: "ready" };
+}
+
+function DockComposer({ readOnly, running, vim, onSubmit, onStop, onImageOpen, client, sessionId, yolo, onYolo }: { readOnly: string | null; running: boolean; vim: boolean; onSubmit: Submit; onStop(): Promise<unknown>; onImageOpen(block: any): void; client: ZetaClient | null; sessionId: string | null; yolo: boolean; onYolo(value: boolean): void }) {
+  if (readOnly !== null) return <GammaComposer state="read-only" reason={readOnly} vim={vim} onSubmit={onSubmit} onImageOpen={onImageOpen} />;
+  return <GammaComposer state={running ? "steerable" : "idle"} vim={vim} autoFocus onSubmit={onSubmit} onStop={onStop} onImageOpen={onImageOpen} footer={<RunSettings client={client} sessionId={sessionId} yolo={yolo} onYolo={onYolo} />} />;
+}
+
+function useDockDelivery(runs: RunControl, running: boolean, client: ZetaClient | null, onUndelivered: (intents: string[]) => void) {
+  const delivery = useMemo(() => createDelivery(undefined, (event) => {
+    const store = transitionRun(runs.state.transition)?.lease.store;
+    const deliveryId = event.type === "user_message" && event.delivery_id;
+    if (store && deliveryId && !store.hasMessageDelivery(deliveryId)) store.dispatch(event);
+  }), [runs]);
+  const wasRunning = useRef(running);
+  useEffect(() => {
+    if (!running && wasRunning.current && client) delivery.turnEnded(client).then(onUndelivered, () => {});
+    wasRunning.current = running;
+  }, [running, client, delivery, onUndelivered]);
+  return delivery;
+}
+
+function useDockRetry(agent: ReturnType<typeof useAgentPhase>, client: ZetaClient | null, delivery: ReturnType<typeof createDelivery>, lastPrompt: string | null, onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>) {
+  const failed = agent.kind === "failed" && client && lastPrompt ? lastPrompt : null;
+  useEffect(() => {
+    onRetryTurn(failed && client ? () => () => void delivery.submit(client, failed, false).catch(() => {}) : null);
+    return () => onRetryTurn(null);
+  }, [failed, client, delivery, onRetryTurn]);
+}
+
 function Dock({ state, view, connection, runs, vim, onUndelivered, onRetryTurn, onImageOpen }: {
   state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; vim: boolean; onUndelivered(intents: string[]): void; onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>; onImageOpen(block: any): void;
 }) {
@@ -307,17 +343,7 @@ function Dock({ state, view, connection, runs, vim, onUndelivered, onRetryTurn, 
   const { yolo, setYolo } = useContext(ApprovalModeContext);
   // This dock's own first send is starting the run: the composer stays put while zeta creates and opens it.
   const [starting, setStarting] = useState(false);
-  const delivery = useMemo(() => createDelivery(undefined, (event) => {
-    const store = transitionRun(runs.state.transition)?.lease.store;
-    const deliveryId = event.type === "user_message" && event.delivery_id;
-    if (store && deliveryId && !store.hasMessageDelivery(deliveryId)) store.dispatch(event);
-  }), [runs]);
-  const wasRunning = useRef(running);
-  useEffect(() => {
-    // shortcut: a resend that fails is not shown; upgrade when the composer can take a host-reported error.
-    if (!running && wasRunning.current && client) delivery.turnEnded(client).then(onUndelivered, () => {});
-    wasRunning.current = running;
-  }, [running, client, delivery, onUndelivered]);
+  const delivery = useDockDelivery(runs, running, client, onUndelivered);
 
   const onSubmit: Submit = useCallback(async (text, images, { steer }) => {
     setStarting(true);
@@ -327,42 +353,13 @@ function Dock({ state, view, connection, runs, vim, onUndelivered, onRetryTurn, 
   const onStop = useCallback(() => (client ? delivery.stop(client) : Promise.reject(new Error("not connected to zeta serve"))), [client, delivery]);
   const lastPrompt = useLastPrompt();
 
-  const failed = agent.kind === "failed" && client && lastPrompt ? lastPrompt : null;
-  useEffect(() => {
-    onRetryTurn(failed && client ? () => () => void delivery.submit(client, failed, false).catch(() => {}) : null);
-    return () => onRetryTurn(null);
-  }, [failed, client, delivery, onRetryTurn]);
+  useDockRetry(agent, client, delivery, lastPrompt, onRetryTurn);
 
   const failure = present.openError;
-  // A connection or run-open problem shows in the main panel (see StatusLine), so the dock adds nothing to it.
   const problem = (state.phase !== "connected" && state.phase !== "connecting" && state.phase !== "dropped") || Boolean(failure && !failure.restored);
-  const phase: RunPhase =
-    state.phase === "connecting" || state.phase === "dropped" ? { kind: state.phase === "connecting" && !state.lost ? "connecting" : "reconnecting" }
-    : (present.opening || open?.stale) && !starting ? { kind: open?.stale ? "reconnecting" : "opening" }
-    : agent.kind === "approval" ? { kind: "approval" }
-    : agent.kind === "running" ? { kind: "running", tool: agent.tool }
-    : agent.kind === "thinking" ? { kind: "thinking" }
-    : { kind: "ready" };
-
+  const phase = dockPhase(state, present, open, agent, starting);
   const readOnly = problem ? "" : !client ? "sending is paused until zeta reconnects" : starting ? null : present.opening || open?.stale ? "sending is paused until the run opens" : null;
-  return (
-    <div className="dock">
-      {problem ? null : <StatusLine phase={phase} />}
-      {readOnly !== null ? (
-        <GammaComposer state="read-only" reason={readOnly} vim={vim} onSubmit={onSubmit} onImageOpen={onImageOpen} />
-      ) : (
-        <GammaComposer
-          state={running ? "steerable" : "idle"}
-          vim={vim}
-          autoFocus
-          onSubmit={onSubmit}
-          onStop={onStop}
-          onImageOpen={onImageOpen}
-          footer={<RunSettings client={client} sessionId={blank || starting ? null : open?.id ?? null} yolo={yolo} onYolo={setYolo} />}
-        />
-      )}
-    </div>
-  );
+  return <div className="dock"><>{problem ? null : <StatusLine phase={phase} />}</><DockComposer readOnly={readOnly} running={running} vim={vim} onSubmit={onSubmit} onStop={onStop} onImageOpen={onImageOpen} client={client} sessionId={blank || starting ? null : open?.id ?? null} yolo={yolo} onYolo={setYolo} /></div>;
 }
 
 /** The last prompt the user sent, so a failed turn can be retried with it. */
