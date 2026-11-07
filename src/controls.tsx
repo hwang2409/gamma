@@ -124,7 +124,7 @@ export function RunSettings({ available, deliveries, sessionId, createdWithDefau
       <button ref={approvalButton} type="button" className="composer-tool approval-mode" data-yolo={yolo || undefined} aria-pressed={yolo} aria-label={yolo ? "approval mode: YOLO, tools run without asking" : "approval mode: Ask, tools ask before they run"} title={yolo ? "tools run without asking · press to ask again" : "tools ask before they run · press for YOLO"} onClick={toggle}>
         {yolo ? "YOLO" : "Ask"}
       </button>
-      {record.model.deferred ? <span className="model-deferred" role="status">settings apply to the next turn</span> : null}
+      {record.model.deferred ? <span className="model-deferred" role="status">model applies to the next turn</span> : null}
       {settings.error ? <span className="settings-error" role="alert" title={settings.error}>{settings.error}</span> : null}
       {confirmYolo ? <div ref={confirmRef} className="confirm-popover" role="dialog" aria-label="allow tools without asking" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setConfirmYolo(false); }}>
         <p>allow tools to run without asking in this run?</p>
