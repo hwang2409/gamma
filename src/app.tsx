@@ -141,10 +141,9 @@ export function App() {
   const [vim, setVim] = useVimSetting();
   const connection = useMemo(() => createConnection({ origin: location.origin, initialPort: Number(import.meta.env.VITE_ZETA_PORT) || 8765 }), []);
   const firstEntry = useMemo(initialEntry, []);
-  const runState = useMemo(() => createRunStateStore(), []);
-  const [browserEntry, setBrowserEntry] = useState(firstEntry);
-  const browserEntryRef = useRef(browserEntry);
-  browserEntryRef.current = browserEntry;
+  const runState = useMemo(() => createRunStateStore(8, localStorage, sessionStorage, { id: firstEntry.gammaEntryId as EntryId, run: firstEntry.run as RunId }), [firstEntry]);
+  const selectedEntry = useSyncExternalStore(runState.subscribe, runState.getEntry);
+  const browserEntry = { gammaEntryId: selectedEntry.id, run: selectedEntry.run };
   const selectedSession = firstEntry.run.startsWith("draft:") ? null : firstEntry.run;
   const runs = useMemo(() => createRun(connection, { selected: selectedSession, bindings: hostBindings }), [connection, selectedSession]);
   useEffect(() => {
@@ -160,7 +159,7 @@ export function App() {
       const state = event.state as Partial<BrowserEntry> | null;
       const next = { gammaEntryId: typeof state?.gammaEntryId === "string" ? state.gammaEntryId : entryId(), run: canonical };
       if (canonical !== raw || !state?.gammaEntryId) writeEntry(next, "replace");
-      setBrowserEntry(next); runState.dispatch({ type: "NAVIGATED", entryId: next.gammaEntryId as EntryId, runId: canonical as RunId }); activate(canonical);
+      runState.dispatch({ type: "NAVIGATED", entryId: next.gammaEntryId as EntryId, runId: canonical as RunId }); activate(canonical);
       if (canonical.startsWith("draft:")) runs.reset(); else runs.select(canonical);
     };
     addEventListener("popstate", pop);
@@ -199,21 +198,22 @@ export function App() {
   useEffect(() => () => deliveries.dispose(), [deliveries]);
   const newRun = useCallback(() => {
     const next = { gammaEntryId: entryId(), run: draftId() };
-    writeEntry(next, "push"); setBrowserEntry(next); runState.dispatch({ type: "NEW_RUN", entryId: next.gammaEntryId as EntryId, runId: next.run as DraftRunId }); runState.activate(next.run, nextRunModel().model ? { choice: "explicit", model: nextRunModel().model! } : { choice: "default" });
+    writeEntry(next, "push"); runState.dispatch({ type: "NEW_RUN", entryId: next.gammaEntryId as EntryId, runId: next.run as DraftRunId }); runState.activate(next.run, nextRunModel().model ? { choice: "explicit", model: nextRunModel().model! } : { choice: "default" });
     runs.reset(); setEpoch((value) => value + 1);
     requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('.dock textarea[aria-label="message"]')?.focus());
   }, [runState, runs]);
   const onCreated = useCallback((from: string, sessionId: string) => {
+    const currentEntry = runState.getEntry();
+    const current = { gammaEntryId: currentEntry.id, run: currentEntry.run };
     deliveries.promote(from, sessionId);
     runState.promote(from, sessionId);
-    const current = browserEntryRef.current;
     if (current.run !== from) return;
     const next = { ...current, run: sessionId };
-    writeEntry(next, "replace"); setBrowserEntry(next);
+    writeEntry(next, "replace");
   }, [deliveries, runState]);
   const selectRun = useCallback((id: string) => {
     const next = { gammaEntryId: entryId(), run: id };
-    writeEntry(next, "push"); setBrowserEntry(next); runState.dispatch({ type: "NAVIGATED", entryId: next.gammaEntryId as EntryId, runId: id as RunId }); runState.activate(id, { choice: "explicit", model: "" }); runs.select(id);
+    writeEntry(next, "push"); runState.dispatch({ type: "NAVIGATED", entryId: next.gammaEntryId as EntryId, runId: id as RunId }); runState.activate(id, { choice: "explicit", model: "" }); runs.select(id);
   }, [runState, runs]);
   const client = state.phase === "connected" ? connection.client : null;
 

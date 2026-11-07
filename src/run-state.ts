@@ -37,8 +37,9 @@ export type AttachmentState =
   | { kind: "detached" }
   | { kind: "attached"; sessionId: SessionId; turn: "idle" | "running" | "tool" | "approval" }
   | { kind: "disconnected"; lastAttached?: SessionId; lastTurnOwner?: SessionId };
+export type BrowserEntry = { readonly id: EntryId; readonly run: RunId };
 export type WorkspaceState = {
-  readonly entry: { id: EntryId; run: RunId };
+  readonly entry: BrowserEntry;
   readonly runs: ReadonlyMap<RunId, RunRecord>;
   readonly aliases: ReadonlyMap<DraftRunId, SessionId>;
   readonly attachment: AttachmentState;
@@ -168,9 +169,9 @@ const DEFAULTS_LIMIT = 32;
 const parseMap = (storage: RunStorage | undefined, key: string): Record<string, string> => { try { const value = JSON.parse(storage?.getItem(key) ?? "null"); return value && typeof value === "object" ? value : {}; } catch { return {}; } };
 
 /** React facade over the live reducer. It owns no run facts; every change is a WorkspaceEvent. */
-export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefined = globalThis.localStorage, draftStorage: RunStorage | undefined = globalThis.sessionStorage) {
-  const seed = "draft:initial" as DraftRunId;
-  let state: WorkspaceState = { entry: { id: "initial" as EntryId, run: seed }, runs: new Map(), aliases: new Map(), attachment: { kind: "detached" } };
+export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefined = globalThis.localStorage, draftStorage: RunStorage | undefined = globalThis.sessionStorage, initialEntry: BrowserEntry = { id: "initial" as EntryId, run: "draft:initial" as DraftRunId }) {
+  const seed = initialEntry.run;
+  let state: WorkspaceState = { entry: initialEntry, runs: new Map(), aliases: new Map(), attachment: { kind: "detached" } };
   const listeners = new Set<() => void>();
   let active: RunId = seed;
   let defaults = parseMap(storage, DEFAULTS_KEY);
@@ -189,6 +190,7 @@ export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefi
   const facade = {
     canonical(id: string) { return key(id); },
     get(id: string) { return value(id); },
+    getEntry() { return state.entry; },
     getNotice() { return state.notice ?? null; },
     dispatch,
     subscribe(listener: () => void) { listeners.add(listener); return () => listeners.delete(listener); },
