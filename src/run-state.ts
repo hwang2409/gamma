@@ -46,11 +46,20 @@ export type WorkspaceState = {
 export type WorkspaceEffect =
   | { type: "history-push" | "history-replace-current"; entryId: EntryId; runId: RunId }
   | { type: "status" }
-  | { type: "resume" | "open-history" | "load-settings" | "delivery-status" | "abort"; runId: SessionId; operationId: OperationId }
-  | { type: "new-session" | "deliver" | "set-settings"; runId: RunId; operationId: OperationId }
+  | { type: "resume" | "open-history" | "load-settings" | "abort"; runId: SessionId; operationId: OperationId }
+  | { type: "delivery-status"; runId: SessionId; operationId: OperationId; intentId: string }
+  | { type: "new-session" | "set-settings"; runId: RunId; operationId: OperationId }
+  | { type: "deliver"; runId: RunId; operationId: OperationId; intentId: string }
   | { type: "persist-draft"; runId: RunId; text: string }
   | { type: "release-lease"; runId: SessionId };
 export type WorkspaceEvent =
+  | { type: "ENSURE_RUN"; runId: RunId; model?: RunModel; text?: string }
+  | { type: "COMPOSER_EDIT"; runId: RunId; text?: string; attachments?: readonly QueuedImage[] }
+  | { type: "REMOVE_ATTACHMENT"; runId: RunId; index: number }
+  | { type: "DELIVERY_SETTLE"; runId: RunId; intentId: string; accepted: boolean }
+  | { type: "PROMOTE"; runId: DraftRunId; sessionId: SessionId }
+  | { type: "MODEL_SET"; runId: RunId; model: RunModel }
+  | { type: "APPROVAL_MODE_SET"; runId: RunId; approval_mode: "ask" | "allow" }
   | { type: "NEW_RUN"; entryId: EntryId; runId: DraftRunId }
   | { type: "NAVIGATED"; entryId: EntryId; runId: RunId }
   | { type: "FIRST_SEND"; runId: DraftRunId; operationId: OperationId }
@@ -63,8 +72,10 @@ export type WorkspaceEvent =
   | { type: "FIRST_PAGE"; runId: SessionId; operationId?: OperationId; lease?: unknown; title?: string; transcript?: string }
   | { type: "TURN_START"; runId: SessionId; turn?: "running" | "tool" | "approval" }
   | { type: "TURN_END"; runId: SessionId }
+  | { type: "DELIVERY_BEGIN"; runId: RunId; delivery: PendingDelivery; operationId: OperationId }
   | { type: "DELIVERY_ACK"; runId: RunId; intentId: string; queued?: boolean }
   | { type: "DELIVERY_STATUS"; runId: RunId; intentId: string; status: "delivered" | "dropped" }
+  | { type: "SETTINGS_DESIRED"; runId: RunId; model?: string; approval_mode?: "ask" | "allow" }
   | { type: "STOP"; runId: SessionId }
   | { type: "DISCONNECT" }
   | { type: "RECONNECT" }
@@ -87,6 +98,13 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     runs.set(target, change(runs.get(target) ?? blank(target)));
   };
   switch (event.type) {
+    case "ENSURE_RUN": if (!runs.has(canonical({ ...state, aliases }, event.runId))) runs.set(event.runId, { ...blank(event.runId), ...(event.model ? { model: event.model } : {}), ...(event.text ? { text: event.text } : {}) }); break;
+    case "COMPOSER_EDIT": update(event.runId, (record) => ({ ...record, text: event.text ?? record.text, attachments: event.attachments ?? record.attachments })); break;
+    case "REMOVE_ATTACHMENT": update(event.runId, (record) => ({ ...record, attachments: record.attachments.filter((_, index) => index !== event.index) })); break;
+    case "DELIVERY_SETTLE": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); const delivery = deliveries.get(event.intentId); deliveries.delete(event.intentId); if (!delivery || !event.accepted) return { ...record, deliveries }; return { ...record, text: record.text.startsWith(delivery.text) ? record.text.slice(delivery.text.length) : record.text, attachments: record.attachments.filter((image) => !delivery.images.includes(image)), deliveries }; }); break;
+    case "PROMOTE": { const source = runs.get(event.runId) ?? blank(event.runId); const target = runs.get(event.sessionId); runs.delete(event.runId); runs.set(event.sessionId, target && (target.text || target.attachments.length || target.deliveries.size) ? target : { ...source, id: event.sessionId, lifecycle: { kind: "opening" } }); aliases.set(event.runId, event.sessionId); if (entry.run === event.runId) entry = { ...entry, run: event.sessionId }; break; }
+    case "MODEL_SET": update(event.runId, (record) => ({ ...record, model: event.model })); break;
+    case "APPROVAL_MODE_SET": update(event.runId, (record) => ({ ...record, settings: record.settings.kind === "ready" ? { ...record.settings, approval_mode: event.approval_mode } : { kind: "ready", approval_mode: event.approval_mode } })); break;
     case "NEW_RUN":
       runs.set(event.runId, blank(event.runId)); entry = { id: event.entryId, run: event.runId };
       effects.push({ type: "history-push", entryId: event.entryId, runId: event.runId }); break;
@@ -107,19 +125,30 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
       break;
     }
     case "NEW_SESSION_FAIL": update(event.runId, (record) => operationMatches(record, event.operationId) ? { ...record, lifecycle: { kind: "failed", error: event.error } } : record); break;
-    case "STATUS": attachment = event.sessionId ? { kind: "attached", sessionId: event.sessionId, turn: event.turn } : { kind: "detached" }; break;
-    case "RESUME_OK": attachment = { kind: "attached", sessionId: event.runId, turn: "idle" }; update(event.runId, (record) => ({ ...record, lifecycle: { kind: "opening", operationId: event.operationId }, settings: { kind: "loading", operationId: event.operationId } })); effects.push({ type: "load-settings", runId: event.runId, operationId: event.operationId }); break;
+    case "STATUS":
+      attachment = event.sessionId ? { kind: "attached", sessionId: event.sessionId, turn: event.turn } : { kind: "detached" };
+      if (event.sessionId) for (const intentId of runs.get(event.sessionId)?.deliveries.keys() ?? []) effects.push({ type: "delivery-status", runId: event.sessionId, operationId: crypto.randomUUID() as OperationId, intentId });
+      break;
+    case "RESUME_OK":
+      if (attachment.kind === "attached" && attachment.turn !== "idle" && attachment.sessionId !== event.runId) break;
+      attachment = { kind: "attached", sessionId: event.runId, turn: "idle" }; update(event.runId, (record) => ({ ...record, lifecycle: { kind: "opening", operationId: event.operationId }, settings: { kind: "loading", operationId: event.operationId } })); effects.push({ type: "load-settings", runId: event.runId, operationId: event.operationId });
+      for (const intentId of runs.get(event.runId)?.deliveries.keys() ?? []) effects.push({ type: "delivery-status", runId: event.runId, operationId: crypto.randomUUID() as OperationId, intentId }); break;
     case "RESUME_BUSY": update(event.runId, (record) => ({ ...record, lifecycle: { kind: "opening", operationId: event.operationId, waitingForIdle: event.owner } })); break;
     case "RESUME_FAIL": update(event.runId, (record) => operationMatches(record, event.operationId) ? { ...record, lifecycle: { kind: "failed", error: event.error } } : record); break;
     case "FIRST_PAGE": update(event.runId, (record) => !event.operationId || operationMatches(record, event.operationId) ? { ...record, lifecycle: { kind: "open", lease: event.lease, title: event.title, transcript: event.transcript } } : record); break;
     case "TURN_START": if (attachment.kind === "attached" && attachment.sessionId === event.runId) attachment = { ...attachment, turn: event.turn ?? "running" }; break;
     case "TURN_END": if (attachment.kind === "attached" && attachment.sessionId === event.runId) attachment = { ...attachment, turn: "idle" }; break;
+    case "DELIVERY_BEGIN": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); deliveries.set(event.delivery.id, { ...event.delivery, state: "requesting" }); effects.push({ type: "deliver", runId: record.id, operationId: event.operationId, intentId: event.delivery.id }); return { ...record, deliveries }; }); break;
     case "DELIVERY_ACK": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); const delivery = deliveries.get(event.intentId); if (delivery) event.queued ? deliveries.set(event.intentId, { ...delivery, state: "queued" }) : deliveries.delete(event.intentId); return { ...record, deliveries }; }); break;
-    case "DELIVERY_STATUS": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); const delivery = deliveries.get(event.intentId); if (event.status === "delivered") deliveries.delete(event.intentId); else if (delivery) deliveries.set(event.intentId, { ...delivery, state: "retrying" }); return { ...record, deliveries }; }); break;
+    case "DELIVERY_STATUS": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); const delivery = deliveries.get(event.intentId); if (event.status === "delivered") deliveries.delete(event.intentId); else if (delivery && delivery.state !== "dropped") { deliveries.set(event.intentId, { ...delivery, state: "retrying" }); effects.push({ type: "deliver", runId: record.id, operationId: crypto.randomUUID() as OperationId, intentId: event.intentId }); } return { ...record, deliveries }; }); break;
+    case "SETTINGS_DESIRED": update(event.runId, (record) => ({ ...record, settings: { kind: "unknown", desired: { model: event.model, approval_mode: event.approval_mode } } })); break;
     case "STOP": update(event.runId, (record) => ({ ...record, deliveries: new Map([...record.deliveries].map(([id, delivery]) => [id, delivery.method === "steer" ? { ...delivery, state: "dropped" as const } : delivery])) })); effects.push({ type: "abort", runId: event.runId, operationId: crypto.randomUUID() as OperationId }); break;
     case "DISCONNECT": attachment = { kind: "disconnected", ...(attachment.kind === "attached" ? { lastAttached: attachment.sessionId, ...(attachment.turn !== "idle" ? { lastTurnOwner: attachment.sessionId } : {}) } : {}) }; break;
-    case "RECONNECT": effects.push({ type: "status" }); break;
-    case "SETTINGS_OK": update(event.runId, (record) => record.settings.kind === "loading" && record.settings.operationId !== event.operationId ? record : { ...record, settings: { kind: "ready", model: event.model, approval_mode: event.approval_mode } }); break;
+    case "RECONNECT":
+      effects.push({ type: "status" });
+      if (attachment.kind === "disconnected" && attachment.lastAttached) for (const intentId of runs.get(attachment.lastAttached)?.deliveries.keys() ?? []) effects.push({ type: "delivery-status", runId: attachment.lastAttached, operationId: crypto.randomUUID() as OperationId, intentId });
+      break;
+    case "SETTINGS_OK": update(event.runId, (record) => record.settings.kind === "loading" && record.settings.operationId !== event.operationId ? record : { ...record, settings: { kind: "ready", model: record.settings.kind === "unknown" ? record.settings.desired?.model ?? event.model : event.model, approval_mode: record.settings.kind === "unknown" ? record.settings.desired?.approval_mode ?? event.approval_mode : event.approval_mode } }); break;
     case "SETTINGS_FAIL": update(event.runId, (record) => record.settings.kind === "loading" && record.settings.operationId !== event.operationId ? record : { ...record, settings: { kind: "failed", error: event.error } }); break;
   }
   return { state: { entry, runs, aliases, attachment }, effects };
@@ -134,40 +163,41 @@ const DRAFTS_KEY = "gamma-run-drafts";
 const DEFAULTS_LIMIT = 32;
 const parseMap = (storage: RunStorage | undefined, key: string): Record<string, string> => { try { const value = JSON.parse(storage?.getItem(key) ?? "null"); return value && typeof value === "object" ? value : {}; } catch { return {}; } };
 
-/** React adapter over the workspace record data. Browser policy uses reduceWorkspace directly. */
+/** React facade over the live reducer. It owns no run facts; every change is a WorkspaceEvent. */
 export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefined = globalThis.localStorage, draftStorage: RunStorage | undefined = globalThis.sessionStorage) {
-  const records = new Map<string, RunRecord>();
-  const snapshots = new Map<string, RunRecord>();
-  const aliases = new Map<string, string>();
+  const seed = "draft:initial" as DraftRunId;
+  let state: WorkspaceState = { entry: { id: "initial" as EntryId, run: seed }, runs: new Map(), aliases: new Map(), attachment: { kind: "detached" } };
   const listeners = new Set<() => void>();
-  let active: string | null = null;
+  let active: RunId = seed;
   let defaults = parseMap(storage, DEFAULTS_KEY);
   let drafts = parseMap(draftStorage, DRAFTS_KEY);
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
   const emit = () => listeners.forEach((listener) => listener());
-  const key = (id: string) => aliases.get(id) ?? id;
-  const value = (id: string): RunRecord => { const target = key(id); const current = records.get(target) ?? snapshots.get(target); if (current) return current; const created = { ...blank(target as RunId), text: drafts[target] ?? "" }; snapshots.set(target, created); return created; };
-  const write = (id: string, record: RunRecord) => { const target = key(id); snapshots.delete(target); records.delete(target); records.set(target, record); emit(); };
+  const dispatch = (event: WorkspaceEvent, notify = true) => { state = reduceWorkspace(state, event).state; if (notify) emit(); };
+  const key = (id: string) => canonical(state, id as RunId);
+  const value = (id: string): RunRecord => { const target = key(id); let current = state.runs.get(target); if (!current) { dispatch({ type: "ENSURE_RUN", runId: target, text: drafts[target] }, false); current = state.runs.get(target)!; } return current; };
   const revoke = (images: readonly QueuedImage[]) => images.forEach((image) => URL.revokeObjectURL(image.url));
   const dirty = (record: RunRecord) => Boolean(record.text || record.attachments.length || record.deliveries.size || record.lifecycle.kind === "creating");
-  const evict = () => { let clean = [...records].filter(([id, record]) => id !== active && !dirty(record)); while (clean.length > cleanLimit) { const [id, record] = clean.shift()!; revoke(record.attachments); records.delete(id); } };
+  const evict = () => { const runs = new Map(state.runs); let clean = [...runs].filter(([id, record]) => id !== active && !dirty(record)); while (clean.length > cleanLimit) { const [id, record] = clean.shift()!; revoke(record.attachments); runs.delete(id); } state = { ...state, runs }; };
   const persistDrafts = () => { persistTimer = null; try { draftStorage?.setItem(DRAFTS_KEY, JSON.stringify(drafts)); } catch {} };
-  const queueDraft = (id: string, text: string) => { if (text) drafts[key(id)] = text; else delete drafts[key(id)]; if (persistTimer) clearTimeout(persistTimer); persistTimer = setTimeout(persistDrafts, 120); };
+  const queueDraft = (id: string, text: string) => { const target = key(id); if (text) drafts[target] = text; else delete drafts[target]; if (persistTimer) clearTimeout(persistTimer); persistTimer = setTimeout(persistDrafts, 120); };
   const persistDefault = (id: string, model: string) => { delete defaults[id]; defaults[id] = model; defaults = Object.fromEntries(Object.entries(defaults).slice(-DEFAULTS_LIMIT)); try { storage?.setItem(DEFAULTS_KEY, JSON.stringify(defaults)); } catch {} };
-  return {
+  const facade = {
     canonical(id: string) { return key(id); },
     get(id: string) { return value(id); },
+    dispatch,
     subscribe(listener: () => void) { listeners.add(listener); return () => listeners.delete(listener); },
-    activate(id: string, initialModel: RunModel = { choice: "default" }) { active = key(id); if (!records.has(active)) { records.set(active, { ...value(id), id: active as RunId, model: initialModel }); snapshots.delete(active); } evict(); emit(); },
-    edit(id: string, patch: { text?: string; attachments?: readonly QueuedImage[] }) { const current = value(id); const text = patch.text ?? current.text; write(id, { ...current, text, attachments: patch.attachments ?? current.attachments }); if (patch.text !== undefined) queueDraft(id, text); evict(); },
-    removeAttachment(id: string, index: number) { const current = value(id); const image = current.attachments[index]; if (!image) return; URL.revokeObjectURL(image.url); write(id, { ...current, attachments: current.attachments.filter((_, item) => item !== index) }); },
-    beginDelivery(id: string, delivery: PendingDelivery) { const current = value(id); const deliveries = new Map(current.deliveries); deliveries.set(delivery.id, { ...delivery, state: delivery.state ?? "requesting" }); write(id, { ...current, deliveries }); },
-    settleDelivery(id: string, deliveryId: string, status: "accepted" | "rejected") { const current = value(id); const delivery = current.deliveries.get(deliveryId); if (!delivery) return; const deliveries = new Map(current.deliveries); deliveries.delete(deliveryId); if (status === "rejected") return write(id, { ...current, deliveries }); const text = current.text.startsWith(delivery.text) ? current.text.slice(delivery.text.length) : current.text; const attachments = current.attachments.filter((image) => !delivery.images.includes(image)); revoke(delivery.images.filter((image) => !attachments.includes(image))); queueDraft(id, text); write(id, { ...current, text, attachments, deliveries }); evict(); },
-    promote(from: string, to: string) { if (from === to) return; const source = value(from); const target = records.get(to); records.delete(from); records.set(to, target && dirty(target) ? target : { ...source, id: to as RunId, lifecycle: { kind: "opening" } }); aliases.set(from, to); if (drafts[from]) { drafts[to] = drafts[from]; delete drafts[from]; queueDraft(to, drafts[to]!); } if (active === from) active = to; emit(); },
-    setModel(id: string, model: RunModel) { write(id, { ...value(id), model }); },
-    setApprovalMode(id: string, approval_mode: "ask" | "allow") { const current = value(id); write(id, { ...current, settings: current.settings.kind === "ready" ? { ...current.settings, approval_mode } : { kind: "ready", approval_mode } }); },
-    resolveDefault(id: string, currentModel: string, createdWithDefault: boolean) { const persisted = defaults[id]; if (persisted) return this.setModel(id, currentModel === persisted ? { choice: "default", resolvedDefault: persisted } : { choice: "explicit", model: currentModel, resolvedDefault: persisted }); if (createdWithDefault) { persistDefault(id, currentModel); return this.setModel(id, { choice: "default", resolvedDefault: currentModel }); } this.setModel(id, { choice: "explicit", model: currentModel }); },
-    dispose() { if (persistTimer) { clearTimeout(persistTimer); persistDrafts(); } records.forEach((record) => revoke(record.attachments)); records.clear(); snapshots.clear(); aliases.clear(); listeners.clear(); },
+    activate(id: string, initialModel: RunModel = { choice: "default" }) { active = key(id); dispatch({ type: "ENSURE_RUN", runId: active, model: initialModel, text: drafts[active] }); evict(); },
+    edit(id: string, patch: { text?: string; attachments?: readonly QueuedImage[] }) { const current = value(id); const text = patch.text ?? current.text; dispatch({ type: "COMPOSER_EDIT", runId: key(id), text, ...(patch.attachments ? { attachments: patch.attachments } : {}) }); if (patch.text !== undefined) queueDraft(id, text); evict(); },
+    removeAttachment(id: string, index: number) { const image = value(id).attachments[index]; if (!image) return; URL.revokeObjectURL(image.url); dispatch({ type: "REMOVE_ATTACHMENT", runId: key(id), index }); },
+    beginDelivery(id: string, delivery: PendingDelivery) { dispatch({ type: "DELIVERY_BEGIN", runId: key(id), delivery, operationId: crypto.randomUUID() as OperationId }); },
+    settleDelivery(id: string, deliveryId: string, status: "accepted" | "rejected") { const delivery = value(id).deliveries.get(deliveryId); if (!delivery) return; const kept = value(id).attachments.filter((image) => !delivery.images.includes(image)); if (status === "accepted") revoke(delivery.images.filter((image) => !kept.includes(image))); dispatch({ type: "DELIVERY_SETTLE", runId: key(id), intentId: deliveryId, accepted: status === "accepted" }); queueDraft(id, value(id).text); evict(); },
+    promote(from: string, to: string) { if (from === to) return; dispatch({ type: "PROMOTE", runId: from as DraftRunId, sessionId: to as SessionId }); if (drafts[from]) { drafts[to] = drafts[from]; delete drafts[from]; queueDraft(to, drafts[to]!); } if (active === from) active = to as SessionId; },
+    setModel(id: string, model: RunModel) { dispatch({ type: "MODEL_SET", runId: key(id), model }); },
+    setApprovalMode(id: string, approval_mode: "ask" | "allow") { dispatch({ type: "APPROVAL_MODE_SET", runId: key(id), approval_mode }); },
+    resolveDefault(id: string, currentModel: string, createdWithDefault: boolean) { const persisted = defaults[id]; if (persisted) return facade.setModel(id, currentModel === persisted ? { choice: "default", resolvedDefault: persisted } : { choice: "explicit", model: currentModel, resolvedDefault: persisted }); if (createdWithDefault) { persistDefault(id, currentModel); return facade.setModel(id, { choice: "default", resolvedDefault: currentModel }); } facade.setModel(id, { choice: "explicit", model: currentModel }); },
+    dispose() { if (persistTimer) { clearTimeout(persistTimer); persistDrafts(); } state.runs.forEach((record) => revoke(record.attachments)); state = { ...state, runs: new Map(), aliases: new Map() }; listeners.clear(); },
   };
+  return facade;
 }
 export type RunStateStore = ReturnType<typeof createRunStateStore>;

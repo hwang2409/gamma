@@ -12,7 +12,7 @@ import { ThemePicker, useTheme } from "./theme";
 import { GammaComposer, type Submit } from "./composer";
 import { nextRunModel, RunSettings, SettingsMenu, useVimSetting, VimToggle } from "./controls";
 import { settingModel, settingsRequest } from "./settings";
-import { createRunStateStore, type RunStateStore } from "./run-state";
+import { createRunStateStore, type DraftRunId, type EntryId, type RunId, type RunStateStore } from "./run-state";
 import { artifactContentUrl, hostBindings, useArtifacts } from "./host-client";
 import type { Artifact } from "./host/types";
 
@@ -152,6 +152,7 @@ export function App() {
       const nextModel = nextRunModel().model;
       runState.activate(id, id.startsWith("draft:") ? nextModel ? { choice: "explicit", model: nextModel } : { choice: "default" } : { choice: "explicit", model: "" });
     };
+    runState.dispatch({ type: "NAVIGATED", entryId: firstEntry.gammaEntryId as EntryId, runId: firstEntry.run as RunId });
     activate(firstEntry.run);
     const pop = (event: PopStateEvent) => {
       const raw = new URLSearchParams(location.search).get("run") ?? draftId();
@@ -159,7 +160,7 @@ export function App() {
       const state = event.state as Partial<BrowserEntry> | null;
       const next = { gammaEntryId: typeof state?.gammaEntryId === "string" ? state.gammaEntryId : entryId(), run: canonical };
       if (canonical !== raw || !state?.gammaEntryId) writeEntry(next, "replace");
-      setBrowserEntry(next); activate(canonical);
+      setBrowserEntry(next); runState.dispatch({ type: "NAVIGATED", entryId: next.gammaEntryId as EntryId, runId: canonical as RunId }); activate(canonical);
       if (canonical.startsWith("draft:")) runs.reset(); else runs.select(canonical);
     };
     addEventListener("popstate", pop);
@@ -194,7 +195,7 @@ export function App() {
   useEffect(() => () => deliveries.dispose(), [deliveries]);
   const newRun = useCallback(() => {
     const next = { gammaEntryId: entryId(), run: draftId() };
-    writeEntry(next, "push"); setBrowserEntry(next); runState.activate(next.run, nextRunModel().model ? { choice: "explicit", model: nextRunModel().model! } : { choice: "default" });
+    writeEntry(next, "push"); setBrowserEntry(next); runState.dispatch({ type: "NEW_RUN", entryId: next.gammaEntryId as EntryId, runId: next.run as DraftRunId }); runState.activate(next.run, nextRunModel().model ? { choice: "explicit", model: nextRunModel().model! } : { choice: "default" });
     runs.reset(); setEpoch((value) => value + 1);
     requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('.dock textarea[aria-label="message"]')?.focus());
   }, [runState, runs]);
@@ -208,7 +209,7 @@ export function App() {
   }, [deliveries, runState]);
   const selectRun = useCallback((id: string) => {
     const next = { gammaEntryId: entryId(), run: id };
-    writeEntry(next, "push"); setBrowserEntry(next); runState.activate(id, { choice: "explicit", model: "" }); runs.select(id);
+    writeEntry(next, "push"); setBrowserEntry(next); runState.dispatch({ type: "NAVIGATED", entryId: next.gammaEntryId as EntryId, runId: id as RunId }); runState.activate(id, { choice: "explicit", model: "" }); runs.select(id);
   }, [runState, runs]);
   const client = state.phase === "connected" ? connection.client : null;
 
@@ -402,6 +403,7 @@ function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, ru
   const record = useSyncExternalStore(runState.subscribe, () => runState.get(runId));
 
   const onSubmit: Submit = useCallback(async (text, images, { steer, deliveryId }) => {
+    if (runId.startsWith("draft:")) runState.dispatch({ type: "FIRST_SEND", runId: runId as DraftRunId, operationId: crypto.randomUUID() as import("./run-state").OperationId });
     setStarting(true);
     try { return await submitRun({ text, images, steer, deliveryId, connection, runs, deliveries, yolo, runId, onCreated }); }
     finally { setStarting(false); }
