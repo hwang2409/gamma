@@ -371,9 +371,9 @@ function dockPhase(state: ConnectionState, present: ReturnType<typeof sessionPre
   return { kind: "ready" };
 }
 
-function DockComposer({ readOnly, running, vim, onSubmit, onStop, onImageOpen, client, sessionId, yolo, onYolo, runState, runId, createdWithDefault }: { readOnly: string | null; running: boolean; vim: boolean; onSubmit: Submit; onStop(): Promise<unknown>; onImageOpen(block: any): void; client: ZetaClient | null; sessionId: string | null; yolo: boolean; onYolo(value: boolean): void; runState: RunStateStore; runId: string; createdWithDefault: boolean }) {
+function DockComposer({ readOnly, blockedReason, running, vim, onSubmit, onStop, onImageOpen, client, sessionId, yolo, onYolo, runState, runId, createdWithDefault }: { readOnly: string | null; blockedReason: string | null; running: boolean; vim: boolean; onSubmit: Submit; onStop(): Promise<unknown>; onImageOpen(block: any): void; client: ZetaClient | null; sessionId: string | null; yolo: boolean; onYolo(value: boolean): void; runState: RunStateStore; runId: string; createdWithDefault: boolean }) {
   if (readOnly !== null) return <GammaComposer state="read-only" reason={readOnly} vim={vim} onSubmit={onSubmit} onImageOpen={onImageOpen} store={runState} runId={runId} />;
-  return <GammaComposer state={running ? "steerable" : "idle"} vim={vim} autoFocus onSubmit={onSubmit} onStop={onStop} onImageOpen={onImageOpen} store={runState} runId={runId} footer={<RunSettings client={client} sessionId={sessionId} createdWithDefault={createdWithDefault} yolo={yolo} onYolo={onYolo} store={runState} runId={runId} />} />;
+  return <GammaComposer state={running ? "steerable" : "idle"} blockedReason={blockedReason ?? undefined} vim={vim} autoFocus onSubmit={onSubmit} onStop={running ? onStop : undefined} onImageOpen={onImageOpen} store={runState} runId={runId} footer={<RunSettings client={client} sessionId={sessionId} createdWithDefault={createdWithDefault} running={running} yolo={yolo} onYolo={onYolo} store={runState} runId={runId} />} />;
 }
 
 function useDockDelivery(runs: RunControl, scope: string, running: boolean, client: ZetaClient | null, onUndelivered: (scope: string, intents: string[]) => void, onWaiting: (scope: string, intent: string, waiting: boolean) => void) {
@@ -426,6 +426,17 @@ function useDockRetry(agent: ReturnType<typeof useAgentPhase>, client: ZetaClien
   }, [failed, client, delivery, onRetryTurn]);
 }
 
+function dockReadOnlyReason(displayed: string | null, active: string | null) {
+  return active && displayed !== active ? "this run is read-only while another run has the active zeta turn; stop it or wait" : null;
+}
+
+function dockBlockedReason(state: ConnectionState, present: ReturnType<typeof sessionPresentation>, open: OpenRun | null) {
+  if (state.phase === "not_running") return "sending is paused until zeta serve runs again";
+  if (state.phase !== "connected") return "sending is paused until zeta reconnects";
+  if (present.openError) return "sending is paused until the run opens";
+  return present.opening || open?.stale ? "sending is paused until the run opens" : null;
+}
+
 function Dock({ state, view, connection, runs, vim, onUndelivered, onWaitingDelivery, onRetryTurn, onImageOpen, runState, runId, onCreating }: {
   state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; vim: boolean; onUndelivered(scope: string, intents: string[]): void; onWaitingDelivery(scope: string, intent: string, waiting: boolean): void; onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>; onImageOpen(block: any): void; runState: RunStateStore; runId: string; onCreating(value: { defaultModel: boolean } | null): void;
 }) {
@@ -434,7 +445,8 @@ function Dock({ state, view, connection, runs, vim, onUndelivered, onWaitingDeli
   const blank = !present.selected;
   const client = state.phase === "connected" ? connection.client : null;
   const agent = useAgentPhase();
-  const running = agent.kind === "thinking" || agent.kind === "approval" || agent.kind === "running";
+  const agentRunning = agent.kind === "thinking" || agent.kind === "approval" || agent.kind === "running";
+  const running = agentRunning && open?.id === view.active;
   const { yolo, setYolo } = useContext(ApprovalModeContext);
   // This dock's own first send is starting the run: the composer stays put while zeta creates and opens it.
   const [starting, setStarting] = useState(false);
@@ -452,11 +464,15 @@ function Dock({ state, view, connection, runs, vim, onUndelivered, onWaitingDeli
   useDockRetry(agent, client, delivery, lastPrompt, onRetryTurn);
 
   const failure = present.openError;
+  useEffect(() => {
+    if (failure?.busy && view.active === null && state.phase === "connected") runs.select(failure.id);
+  }, [failure, runs, state.phase, view.active]);
   const problem = (state.phase !== "connected" && state.phase !== "connecting" && state.phase !== "dropped") || Boolean(failure);
   const phase = dockPhase(state, present, open, agent, starting);
-  const readOnly = failure?.busy ? "this run is read-only while another run has the active zeta turn; stop it or wait" : state.phase === "not_running" ? "sending is paused until zeta serve runs again" : problem ? "sending is paused until the connection problem is fixed" : !client ? "sending is paused until zeta reconnects" : starting ? null : present.opening || open?.stale ? "sending is paused until the run opens" : null;
+  const readOnly = dockReadOnlyReason(open?.id ?? null, view.active);
+  const blockedReason = starting ? null : dockBlockedReason(state, present, open);
   const sessionId = blank || starting ? null : open?.id ?? null;
-  return <div className="dock"><>{problem ? null : <StatusLine phase={phase} />}</><DockComposer readOnly={readOnly} running={running} vim={vim} onSubmit={onSubmit} onStop={onStop} onImageOpen={onImageOpen} client={client} sessionId={sessionId} createdWithDefault={record.model.choice === "default"} yolo={yolo} onYolo={setYolo} runState={runState} runId={runId} /></div>;
+  return <div className="dock"><>{problem ? null : <StatusLine phase={phase} />}</><DockComposer readOnly={readOnly} blockedReason={blockedReason} running={running} vim={vim} onSubmit={onSubmit} onStop={onStop} onImageOpen={onImageOpen} client={client} sessionId={sessionId} createdWithDefault={record.model.choice === "default"} yolo={yolo} onYolo={setYolo} runState={runState} runId={runId} /></div>;
 }
 
 /** The last prompt the user sent, so a failed turn can be retried with it. */
@@ -473,13 +489,13 @@ function OpenBody({ state, connection, present, runs }: { state: ConnectionState
   const open = present.open!;
   const failed = present.openError;
   const offline = state.phase !== "connected";
-  return <><>{offline && state.phase !== "connecting" && state.phase !== "dropped" ? <ConnectionNotice state={state} connection={connection} compact /> : null}</><>{!open.history.complete ? <p className="note" data-tone="busy" role="status">loading earlier messages… {open.history.messages.toLocaleString("en")} loaded</p> : null}</><>{open.syncing ? <p className="note" data-tone="busy" role="status">live updates paused while this run is busy; it will catch up</p> : null}</><>{failed && !(failed.busy && failed.restored) ? <div className="note" data-tone="danger" role="alert"><span>could not reopen this run: {failed.message}</span> <button type="button" className="ghost" onClick={() => runs.dismissOpenError()}>dismiss</button> <button type="button" className="ghost" onClick={() => runs.select(failed.id)}>try again</button></div> : null}</><Run client={offline ? null : connection.client} open={open} readOnly={Boolean(present.opening || (failed && !failed.restored))} /></>;
+  return <><>{offline && (state.phase !== "connecting" || state.lastFailure) && state.phase !== "dropped" ? <ConnectionNotice state={state} connection={connection} compact /> : null}</><>{!open.history.complete ? <p className="note" data-tone="busy" role="status">loading earlier messages… {open.history.messages.toLocaleString("en")} loaded</p> : null}</><>{open.syncing ? <p className="note" data-tone="busy" role="status">live updates paused while this run is busy; it will catch up</p> : null}</><>{failed && !(failed.busy && failed.restored) ? <div className="note" data-tone="danger" role="alert"><span>could not reopen this run: {failed.message}</span> <button type="button" className="ghost" onClick={() => runs.dismissOpenError()}>dismiss</button> <button type="button" className="ghost" onClick={() => runs.select(failed.id)}>try again</button></div> : null}</><Run client={offline ? null : connection.client} open={open} readOnly={Boolean(present.opening || (failed && !failed.restored))} /></>;
 }
 function Body({ state, view, connection, runs, onNewRun }: { state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; onNewRun(): void }) {
   const present = sessionPresentation(view.transition);
   const offline = state.phase !== "connected";
   if (present.open) return <OpenBody state={state} connection={connection} present={present} runs={runs} />;
-  if (offline && state.phase !== "connecting" && state.phase !== "dropped") return <div className="scroll"><ConnectionNotice state={state} connection={connection} /></div>;
+  if (offline && (state.phase !== "connecting" || state.lastFailure) && state.phase !== "dropped") return <div className="scroll"><ConnectionNotice state={state} connection={connection} /></div>;
   if (present.selected && !present.openError && view.session?.session_id !== present.selected) return <div className="scroll"><Panel title="opening the run" tone="busy"><p>loading history{present.opening?.messages ? ` · ${present.opening.messages.toLocaleString("en")} messages` : ""}</p></Panel></div>;
   if (present.openError) { const failure = present.openError; return <div className="scroll"><Panel title={failure.busy ? "zeta is busy with another run" : "could not open this run"} tone={failure.busy ? "warn" : "danger"}><p className="mono">{failure.busy ? "zeta serve opens a run only when no turn runs. wait for the running turn to end, then try again." : failure.message}</p><div className="actions"><button type="button" className="primary" onClick={() => runs.select(failure.id)}>try again</button><button type="button" className="ghost" onClick={onNewRun}>new run</button></div></Panel></div>; }
   return <div className="scroll"><div className="empty-run" role="note"><h2>start a conversation</h2><p>write below to start. zeta creates the run when you send the first message.</p></div></div>;
@@ -606,6 +622,22 @@ function Copy({ value }: { value: string }) {
   );
 }
 
+function formatConnectionNotice(state: ConnectionState, command: string) {
+  const lost = "lost" in state && state.lost;
+  switch (state.phase) {
+    case "connected": return null;
+    case "connecting": return state.lastFailure
+      ? { title: "zeta serve did not answer", tone: "danger", detail: "hello timed out; retrying now", body: <p>the server accepted the socket but did not finish hello within 15 seconds. check its terminal while gamma retries.</p> }
+      : { title: lost ? "reconnecting to zeta serve" : "connecting to zeta serve", tone: "busy", detail: "looking for zeta serve", body: <p>looking for the server through this dev server's handoff.</p> };
+    case "dropped": return { title: "connection lost", tone: "danger", detail: "the socket closed", body: <p>the socket to zeta serve closed. the run keeps going on the server; this page reconnects and rebuilds the session from its history.</p> };
+    case "not_running": return { title: lost ? "connection lost: zeta serve stopped" : "zeta serve is not running", tone: "danger", detail: "start zeta serve", copy: true, body: <><p>start it with this page's origin in the allowlist. this page connects as soon as it is up.</p><Copy value={command} /></> };
+    case "auth_failed": return { title: "auth failed", tone: "danger", detail: state.reason === "origin" ? "this page origin is not allowed" : "controller credential refused; restart zeta serve", copy: true, body: state.reason === "origin" ? <><p>zeta serve does not allow this page's origin <code>{location.origin}</code>. restart it with this origin:</p><Copy value={command} /></> : <><p>zeta serve refused this controller credential. restart zeta serve so the dev server can hand gamma the new credential:</p><Copy value={command} /></> };
+    case "unresponsive": return { title: "zeta serve did not answer", tone: "danger", detail: "hello did not finish within 15 seconds", body: <p>the server accepted the socket but did not finish hello within 15 seconds. check its terminal, then retry.</p> };
+    case "busy": return { title: "zeta serve is in use", tone: "warn", detail: "another client has the controller", body: <p>zeta serve accepts one client at a time. close the other client (another tab, the playground, or the zeta app) and this page takes over.</p> };
+    case "incompatible": return { title: "unsupported protocol version", tone: "danger", detail: "zeta serve does not speak protocol 1.2; update zeta", body: <><p>gamma requires zeta protocol 1.2, but the server rejected that version. update zeta, then reload this page to retry.</p><button type="button" className="ghost" onClick={() => location.reload()}>reload and retry</button></> };
+  }
+}
+
 function ConnectionNotice({ state, connection, compact = false }: { state: ConnectionState; connection: Connection; compact?: boolean }) {
   const wait = useCountdown("retryAt" in state ? state.retryAt : null);
   const command = serveCommand(location.origin, connection.port);
@@ -615,73 +647,22 @@ function ConnectionNotice({ state, connection, compact = false }: { state: Conne
       <button type="button" className="primary" onClick={() => connection.retryNow()}>retry now</button>
     </div>
   );
-  const lost = "lost" in state && state.lost;
-  let title: string;
-  let tone = "danger";
-  let body: ReactNode;
-  switch (state.phase) {
-    case "connected":
-      return null;
-    case "connecting":
-      title = lost ? "reconnecting to zeta serve" : "connecting to zeta serve";
-      tone = "busy";
-      body = <p>looking for the server through this dev server's handoff.</p>;
-      break;
-    case "dropped":
-      title = "connection lost";
-      body = <p>the socket to zeta serve closed. the run keeps going on the server; this page reconnects and rebuilds the session from its history.</p>;
-      break;
-    case "not_running":
-      title = lost ? "connection lost: zeta serve stopped" : "zeta serve is not running";
-      body = (
-        <>
-          <p>start it with this page's origin in the allowlist. this page connects as soon as it is up.</p>
-          <Copy value={command} />
-        </>
-      );
-      break;
-    case "auth_failed":
-      title = "auth failed";
-      body = state.reason === "origin" ? (
-        <>
-          <p>zeta serve allows {state.origins.map((origin, index) => <span key={origin}>{index ? ", " : ""}<code>{origin}</code></span>)}, not this page's origin <code>{location.origin}</code>. restart it with this origin:</p>
-          <Copy value={command} />
-        </>
-      ) : (
-        <>
-          <p>zeta serve refused this controller credential. restart zeta serve so the dev server can hand gamma the new credential:</p>
-          <Copy value={command} />
-        </>
-      );
-      break;
-    case "unresponsive":
-      title = "zeta serve did not answer";
-      body = <p>the server accepted the socket but did not finish hello within 15 seconds. check its terminal, then retry.</p>;
-      break;
-    case "busy":
-      title = "zeta serve is in use";
-      tone = "warn";
-      body = <p>zeta serve accepts one client at a time. close the other client (another tab, the playground, or the zeta app) and this page takes over.</p>;
-      break;
-    case "incompatible":
-      title = "unsupported protocol version";
-      body = <><p>gamma requires zeta protocol 1.2, but the server rejected that version. update zeta, then reload this page to retry.</p><button type="button" className="primary" onClick={() => location.reload()}>reload and retry</button></>;
-      break;
-  }
+  const notice = formatConnectionNotice(state, command);
+  if (!notice) return null;
   if (compact) {
     return (
-      <div className="notice" data-tone={tone} role="status">
-        <strong>{title}</strong>
-        {state.phase === "auth_failed" ? <span>{state.reason === "origin" ? "this page origin is not allowed" : "controller credential refused; restart zeta serve"}</span> : null}
+      <div className="notice" data-tone={notice.tone} role="status">
+        <strong>{notice.title}</strong>
+        <span>{notice.detail}</span>
         <span className="wait">{wait === null ? "" : wait > 0 ? `retrying in ${wait}s` : "retrying"}</span>
         {wait !== null ? <button type="button" className="ghost" onClick={() => connection.retryNow()}>retry now</button> : null}
-        {state.phase === "not_running" || state.phase === "auth_failed" ? <Copy value={command} /> : null}
+        {notice.copy ? <Copy value={command} /> : null}
       </div>
     );
   }
   return (
-    <Panel title={title} tone={tone}>
-      {body}
+    <Panel title={notice.title} tone={notice.tone}>
+      {notice.body}
       {retry}
     </Panel>
   );

@@ -18,6 +18,11 @@ test("a failure only ends an attempt in flight and counts up", () => {
   expect(state).toEqual({ phase: "busy", attempt: 2, retryAt: 2000, lost: false });
 });
 
+test("a hello timeout stays visible during the next attempt", () => {
+  const timedOut = reduceConnection(initialConnection, { type: "unresponsive", now: 1_000 });
+  expect(reduceConnection(timedOut, { type: "attempt" })).toEqual({ phase: "connecting", attempt: 1, lost: false, lastFailure: "unresponsive" });
+});
+
 test("a drop stays marked lost, and a protocol mismatch retries after an update", () => {
   let state = reduceConnection(initialConnection, { type: "connected" });
   state = reduceConnection(state, { type: "closed", now: 100 });

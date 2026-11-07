@@ -5,7 +5,7 @@ import { createClient, discoverZeta, webSocketTransport, ZetaError, type ZetaCli
  * automatic try). `lost` marks failures that follow a connection this page had, so the UI can say "connection lost".
  */
 export type ConnectionState =
-  | { phase: "connecting"; attempt: number; lost: boolean }
+  | { phase: "connecting"; attempt: number; lost: boolean; lastFailure?: "unresponsive" }
   | { phase: "connected" }
   | { phase: "not_running"; attempt: number; retryAt: number; lost: boolean }
   | { phase: "auth_failed"; reason: "origin" | "rejected"; origins: string[]; attempt: number; retryAt: number; lost: boolean }
@@ -36,7 +36,7 @@ export function reduceConnection(state: ConnectionState, event: ConnectionEvent)
   const lost = lostOf(state);
   switch (event.type) {
     case "attempt":
-      return state.phase === "connected" ? state : { phase: "connecting", attempt: attemptOf(state), lost };
+      return state.phase === "connected" ? state : { phase: "connecting", attempt: attemptOf(state), lost, ...(state.phase === "unresponsive" || (state.phase === "connecting" && state.lastFailure === "unresponsive") ? { lastFailure: "unresponsive" as const } : {}) };
     case "connected":
       return { phase: "connected" };
     case "closed":

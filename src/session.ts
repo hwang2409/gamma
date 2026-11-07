@@ -268,6 +268,8 @@ export type RunState = {
   transition: SessionTransition;
   /** zeta's metadata for the run on screen: its title, model, and cwd. Null for a blank run. */
   session: SessionMeta | null;
+  /** The run that owns zeta's active turn. This is independent from the run selected by the URL. */
+  active: string | null;
 };
 
 type Source = { readonly client: ZetaClient | null; subscribe(listener: () => void): () => void };
@@ -280,15 +282,25 @@ const message = (error: unknown) => (error instanceof Error ? error.message : St
  * leases of abandoned opens are released.
  */
 export function createRun(connection: Source, { selected = null, onSelect, bindings }: { selected?: string | null; onSelect?: (id: string | null) => void; bindings?: HostBindings } = {}) {
-  let state: RunState = { transition: { kind: "idle", selected }, session: null };
+  let state: RunState = { transition: { kind: "idle", selected }, session: null, active: null };
+  const cachedRuns = new Map<string, OpenRun>();
+  const cachedSessions = new Map<string, SessionMeta>();
   const listeners = new Set<() => void>();
   const set = (patch: Partial<RunState>) => { state = { ...state, ...patch }; listeners.forEach((listener) => listener()); };
   const transition = (event: TransitionEvent) => set({ transition: reduceSessionTransition(state.transition, event) });
   let client: ZetaClient | null = null;
+  let attached: string | null = null;
+  let activeSubscription = () => {};
   let openGeneration = 0;
   let openAbort: AbortController | null = null;
   const live = (target: ZetaClient) => client === target;
   const register = (target: ZetaClient, id?: string) => bindings && target.features.includes("session_host_commands") ? bindings.register(id) : undefined;
+  const watchActiveTurn = (id: string, run: OpenRun) => {
+    activeSubscription();
+    const update = () => set({ active: run.lease.store.getState().agent === "running" ? id : null });
+    activeSubscription = run.lease.store.subscribe(update);
+    update();
+  };
 
   const open = async (id: string, knownStatus?: ServerStatus) => {
     const target = client;
@@ -296,22 +308,39 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
     openAbort?.abort();
     const abort = new AbortController();
     openAbort = abort;
-    transition({ type: "start", id });
-    if (!target) return;
     const previous = transitionRun(state.transition);
-    const previousId = previous?.id !== id ? previous?.id : null;
+    const previousAttached = attached;
+    if (previous) cachedRuns.set(previous.id, previous);
+    const cached = cachedRuns.get(id);
+    transition({ type: "start", id });
+    if (cached) set({ transition: { kind: "open", run: cached }, session: cachedSessions.get(id) ?? null });
+    if (!target || (cached && attached === id)) return;
     try {
+      let registration: Registration | undefined;
+      if (cached && !knownStatus) {
+        registration = await register(target, id);
+        const resumed = await target.request("resume", { session_id: id, ...(registration ? { host_commands: [registration.command] } : {}) }, { timeoutMs: 30_000, signal: abort.signal }) as { session?: SessionMeta };
+        knownStatus = await getStatus(target, abort.signal);
+        if (!knownStatus.session) knownStatus = { ...knownStatus, session: resumed.session ?? null };
+        if (mine !== openGeneration || !live(target)) return;
+        attached = id;
+      }
       let history = { messages: 0, complete: false };
       const opened = await openSession(target, id, (messages, complete) => {
         history = { messages, complete };
         if (mine !== openGeneration) return;
         transition({ type: "progress", id, messages });
-      }, abort.signal, knownStatus, await register(target, id));
+      }, abort.signal, knownStatus, registration ?? await register(target, id));
       const { lease } = opened;
       if (mine !== openGeneration || !live(target)) return lease.release();
-      previous?.lease.release();
-      if (opened.session) set({ session: opened.session });
-      transition({ type: "opened", run: { id, lease, stale: false, history, syncing: opened.syncing } });
+      if (previous?.id !== id) previous?.lease.release();
+      const run = { id, lease, stale: false, history, syncing: opened.syncing };
+      cachedRuns.set(id, run);
+      if (opened.session) cachedSessions.set(id, opened.session);
+      attached = id;
+      set(opened.session ? { session: opened.session } : {});
+      transition({ type: "opened", run });
+      watchActiveTurn(id, run);
       void opened.complete.then((result) => {
         if (mine !== openGeneration || !live(target)) return result.lease?.release();
         if (result.lease) {
@@ -328,16 +357,19 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
       });
     } catch (error) {
       if (mine !== openGeneration || !live(target)) return;
-      let restored = false;
-      if (previousId) {
+      const busy = isBusyError(error);
+      let restored = busy && previousAttached !== null;
+      const previousId = previousAttached !== id ? previousAttached : null;
+      if (!busy && previousId) {
         try {
           const binding = await register(target, previousId);
           await target.request("resume", { session_id: previousId, ...(binding ? { host_commands: [binding.command] } : {}) }, { timeoutMs: 30_000 });
+          attached = previousId;
           restored = true;
-        } catch { /* keep the retained run read-only with an explicit reopen action */ }
+        } catch { /* keep the selected transcript visible with an explicit reopen action */ }
       }
       if (mine !== openGeneration || !live(target)) return;
-      transition({ type: "failed", id, error: { id, message: message(error), busy: isBusyError(error), ...(restored ? { restored: true } : {}) } });
+      transition({ type: "failed", id, error: { id, message: message(error), busy, ...(restored ? { restored: true } : {}) } });
     }
   };
 
@@ -353,6 +385,10 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
   const disconnect = (disconnected: ZetaClient | null) => {
     openGeneration++;
     openAbort?.abort();
+    attached = null;
+    activeSubscription();
+    activeSubscription = () => {};
+    set({ active: null });
     markApprovalsReconnecting(disconnected);
     transition({ type: "stale" });
   };
@@ -370,8 +406,8 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
     if (connection.client === client) return;
     const disconnected = client;
     client = connection.client;
+    if (disconnected) disconnect(disconnected);
     if (client) void connect(client);
-    else disconnect(disconnected);
   };
   const unsubscribe = connection.subscribe(onConnection);
   onConnection();
@@ -382,7 +418,7 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
     /** Opens `id` again, for a retry after a failed open. */
     select(id: string) {
       const run = transitionRun(state.transition);
-      if (id === transitionSelected(state.transition) && ((state.transition.kind === "opening" || state.transition.kind === "replacing") || (run?.id === id && !run.stale))) return;
+      if (id === transitionSelected(state.transition) && ((state.transition.kind === "opening" || state.transition.kind === "replacing") || (state.transition.kind === "open" && run?.id === id && !run.stale))) return;
       onSelect?.(id);
       void open(id);
     },
@@ -400,6 +436,7 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
       const { session } = (await target.request("new_session", params, { timeoutMs: 30_000 })) as { session: SessionMeta };
       if (binding) await bindings!.bind(binding.registration_id, session.session_id);
       if (!live(target)) throw new Error("the connection dropped while the run started");
+      cachedSessions.set(session.session_id, session);
       set({ session });
       onSelect?.(session.session_id);
       await open(session.session_id);
@@ -413,13 +450,16 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
       openAbort?.abort();
       transitionRun(state.transition)?.lease.release();
       onSelect?.(null);
-      set({ transition: { kind: "idle", selected: null }, session: null });
+      set({ transition: { kind: "idle", selected: null }, session: null, active: null });
     },
     dispose() {
       unsubscribe();
       openGeneration++;
       openAbort?.abort();
       transitionRun(state.transition)?.lease.release();
+      cachedRuns.forEach((run) => run.lease.release());
+      cachedRuns.clear();
+      activeSubscription();
     },
   };
 }

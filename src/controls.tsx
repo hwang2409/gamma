@@ -78,7 +78,7 @@ function ModelPicker({ value, models, resolvedDefault, allowDefault, onChange }:
  * The run's model and approval mode, from zeta. A blank run has no session yet: it shows zeta's catalog and the mode
  * the first send starts the run with (`nextRunModel`, then `set_settings` for YOLO).
  */
-export function RunSettings({ client, sessionId, createdWithDefault, yolo, onYolo, store, runId }: { client: ZetaClient | null; sessionId: string | null; createdWithDefault: boolean; yolo: boolean; onYolo(value: boolean): void; store: RunStateStore; runId: string }) {
+export function RunSettings({ client, sessionId, createdWithDefault, running, yolo, onYolo, store, runId }: { client: ZetaClient | null; sessionId: string | null; createdWithDefault: boolean; running: boolean; yolo: boolean; onYolo(value: boolean): void; store: RunStateStore; runId: string }) {
   const [unsupported, setUnsupported] = useState(false);
   const [settings, setSettings] = useState<SessionSettings>({});
   const [models, setModels] = useState<string[]>(() => cachedCatalog().models);
@@ -87,6 +87,7 @@ export function RunSettings({ client, sessionId, createdWithDefault, yolo, onYol
   const resolvedDefault = record.model.resolvedDefault;
   const [error, setError] = useState("");
   const [confirmYolo, setConfirmYolo] = useState(false);
+  const [modelDeferred, setModelDeferred] = useState(false);
   const confirmRef = useRef<HTMLDivElement>(null);
   const approvalButton = useRef<HTMLButtonElement>(null);
   useEffect(() => {
@@ -110,6 +111,7 @@ export function RunSettings({ client, sessionId, createdWithDefault, yolo, onYol
     }, (cause: unknown) => { if (live) setError(cause instanceof Error ? cause.message : "settings unavailable"); });
     return () => { live = false; };
   }, [client, sessionId, createdWithDefault, onYolo, store, runId]);
+  useEffect(() => { if (!running) setModelDeferred(false); }, [running]);
   const closeConfirm = useCallback(() => { setConfirmYolo(false); approvalButton.current?.focus(); }, []);
   useDismiss(confirmYolo, confirmRef, closeConfirm);
   useEffect(() => { if (confirmYolo) confirmRef.current?.querySelector<HTMLButtonElement>("button[data-safe]")?.focus(); }, [confirmYolo]);
@@ -124,6 +126,7 @@ export function RunSettings({ client, sessionId, createdWithDefault, yolo, onYol
     } catch (cause) { setError(cause instanceof Error ? cause.message : "could not change settings"); }
   };
   const pick = (model: string) => {
+    if (running) setModelDeferred(true);
     if (!sessionId) {
       if (model) localStorage.setItem(MODEL, model); else localStorage.removeItem(MODEL);
       store.setModel(runId, model ? { choice: "explicit", model } : { choice: "default" });
@@ -155,6 +158,7 @@ export function RunSettings({ client, sessionId, createdWithDefault, yolo, onYol
       >
         {yolo ? "YOLO" : "Ask"}
       </button>
+      {modelDeferred ? <span className="model-deferred" role="status">model applies to the next turn</span> : null}
       {error ? <span className="settings-error" role="alert" title={error}>{error}</span> : null}
       {confirmYolo ? <div ref={confirmRef} className="confirm-popover" role="dialog" aria-label="allow tools without asking" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setConfirmYolo(false); }}>
         <p>allow tools to run without asking in this run?</p>

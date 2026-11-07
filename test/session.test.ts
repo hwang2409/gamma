@@ -225,6 +225,31 @@ test("a failed replacement keeps the previous run usable", async () => {
   expect(present(view).opening).toBeNull();
 });
 
+test("a busy resume displays the URL-selected cached run and forward restores the active run", async () => {
+  let current = "a";
+  let blockA = false;
+  const fake = await server(handlers("a", {
+    status: () => ({ session: meta(current, "x"), state: "idle", pending_approvals: [] }),
+    resume: (params) => {
+      const id = params.session_id as string;
+      if (blockA && id === "a") throw { code: -32004, message: "a turn is already running" };
+      current = id;
+      return { session: meta(id, "x") };
+    },
+  }));
+  const view = createRun(source(fake.client), { selected: "a" });
+  await tick();
+  view.select("b"); await tick();
+  blockA = true;
+  view.select("a"); await tick();
+  expect(present(view).open?.id).toBe("a");
+  expect(view.state.session?.session_id).toBe("a");
+  expect(present(view).openError).toMatchObject({ id: "a", busy: true, restored: true });
+  view.select("b"); await tick();
+  expect(present(view).open?.id).toBe("b");
+  expect(view.state.session?.session_id).toBe("b");
+});
+
 test("a busy server is reported as busy and the selection stays", async () => {
   const fake = await server(handlers(null, { resume: () => { throw { code: -32004, message: "a turn is already running" }; } }));
   const view = createRun(source(fake.client));

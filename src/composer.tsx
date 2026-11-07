@@ -44,7 +44,7 @@ function SubmitStopSlot({ steer, stopping, onStop, stopRef }: { steer: boolean; 
 function hint({ vim, mode, steer, images }: { vim: boolean; mode: Vim["mode"]; steer: boolean; images: boolean }) {
   const send = steer ? "enter to steer" : "enter to send";
   if (steer && images) return "images send when the turn ends · stop it or wait";
-  if (!vim) return `${send} · esc to stop · shift+enter for a new line`;
+  if (!vim) return steer ? `${send} · esc stop · shift+enter newline` : `${send} · shift+enter newline`;
   if (mode === "insert") return `${send} · esc normal · ^c to stop`;
   return `${send} · i type · u undo${steer ? " · ^c stop" : ""}`;
 }
@@ -113,14 +113,18 @@ function useAttachments(input: RefObject<HTMLTextAreaElement | null>, images: re
   }, []);
   const addFiles = useCallback(async (list: Iterable<File>) => {
     let queue = imagesRef.current;
-    const failures: string[] = [];
+    const failures = new Map<string, string[]>();
     for (const file of list) {
       let image: QueuedImage | undefined;
       try { image = await readImage(file); queue = addImage(queue, image); }
-      catch (cause) { if (image) URL.revokeObjectURL(image.url); failures.push(`${file.name}: ${errorText(cause)}`); }
+      catch (cause) {
+        if (image) URL.revokeObjectURL(image.url);
+        const reason = errorText(cause);
+        failures.set(reason, [...(failures.get(reason) ?? []), file.name]);
+      }
     }
     setQueue(queue);
-    setAttachError([...new Set(failures)].join(" · "));
+    setAttachError([...failures].map(([reason, names]) => `${names.join(", ")}: ${reason}`).join(" · "));
   }, []);
   const remove = (index: number) => {
     if (!imagesRef.current[index]) return;
@@ -140,7 +144,7 @@ function useAttachments(input: RefObject<HTMLTextAreaElement | null>, images: re
   return { files, images, current: imagesRef, attachError, dragging, setDragging, addFiles, remove, onPaste };
 }
 
-function useSubmission(state: ComposerState, onSubmit: Submit, onStop: (() => Promise<unknown>) | undefined, draft: ReturnType<typeof useComposerDraft>, attachments: ReturnType<typeof useAttachments>, store: RunStateStore, runId: string, pending: boolean) {
+function useSubmission(state: ComposerState, blocked: boolean, onSubmit: Submit, onStop: (() => Promise<unknown>) | undefined, draft: ReturnType<typeof useComposerDraft>, attachments: ReturnType<typeof useAttachments>, store: RunStateStore, runId: string, pending: boolean) {
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string>();
   const inFlight = useRef({ submit: false, stop: false });
@@ -148,7 +152,7 @@ function useSubmission(state: ComposerState, onSubmit: Submit, onStop: (() => Pr
   runIdRef.current = runId;
   const steer = state === "steerable";
   const sending = pending;
-  const canSubmit = (draft.text.trim() !== "" || attachments.images.length > 0) && !sending && !(steer && attachments.images.length > 0);
+  const canSubmit = !blocked && (draft.text.trim() !== "" || attachments.images.length > 0) && !sending && !(steer && attachments.images.length > 0);
   const submit = () => {
     if (inFlight.current.submit || !canSubmit || state === "read-only") return;
     inFlight.current.submit = true;
@@ -173,9 +177,10 @@ function useSubmission(state: ComposerState, onSubmit: Submit, onStop: (() => Pr
   return { steer, canSubmit, sending, stopping, error, submit, stop };
 }
 
-export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, footer, autoFocus, onImageOpen, store, runId }: {
+export function GammaComposer({ state, reason, blockedReason, vim: vimOn, onSubmit, onStop, footer, autoFocus, onImageOpen, store, runId }: {
   state: ComposerState;
   reason?: string;
+  blockedReason?: string;
   vim: boolean;
   onSubmit: Submit;
   onStop?(): Promise<unknown>;
@@ -194,7 +199,7 @@ export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, foo
   const draft = useComposerDraft(vimOn, record.text, saveText);
   const attachments = useAttachments(draft.input, record.attachments, saveImages, removeImage);
   const pending = record.deliveries.size > 0;
-  const submission = useSubmission(state, onSubmit, onStop, draft, attachments, store, runId, pending);
+  const submission = useSubmission(state, Boolean(blockedReason), onSubmit, onStop, draft, attachments, store, runId, pending);
   useEffect(() => { if (autoFocus && (!document.activeElement || document.activeElement === document.body)) draft.input.current?.focus({ preventScroll: true }); }, [autoFocus]);
   const stopRef = useCallback((button: HTMLButtonElement | null) => {
     if (!button) return;
@@ -209,7 +214,7 @@ export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, foo
     {reason ? <p data-part="composer-reason">{reason}</p> : null}
   </div>;
 
-  const message = submission.error ?? (submission.stopping ? "stopping" : submission.sending ? (submission.steer ? "steering" : "sending") : "");
+  const message = submission.error ?? (submission.stopping ? "stopping" : submission.sending ? (submission.steer ? "steering" : "sending") : blockedReason ?? "");
   return <ComposerBody
     field={{ id, state, vimOn, vim: draft.vim, text: draft.text, input: draft.input, onKeyDown, onChange: draft.setText }}
     attachments={{ images: attachments.images, error: attachments.attachError, dragging: attachments.dragging, files: attachments.files, onPaste: attachments.onPaste, onImageOpen, onRemove: attachments.remove, onFiles: attachments.addFiles, setDragging: attachments.setDragging }}
