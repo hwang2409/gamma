@@ -374,7 +374,7 @@ function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, ru
   const client = state.phase === "connected" ? connection.client : null;
   const agent = useAgentPhase();
   const agentRunning = agent.kind === "thinking" || agent.kind === "approval" || agent.kind === "running";
-  const running = agentRunning && open?.id === view.active;
+  const running = state.phase === "connected" && agentRunning && open?.id === view.active;
   const yolo = useContext(ApprovalModeContext);
   useEffect(() => { deliveries.bind(runId, open?.lease.store); }, [deliveries, runId, open?.lease.store]);
   const record = useSyncExternalStore(runState.subscribe, () => runState.get(runId));

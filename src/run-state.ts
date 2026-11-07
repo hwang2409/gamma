@@ -215,11 +215,6 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     case "TURN_END": {
       if (attachment.kind !== "attached" || attachment.sessionId !== event.runId) break;
       attachment = { ...attachment, turn: "idle" };
-      const selected = canonical({ ...state, aliases }, entry.run);
-      if (!selected.startsWith("draft:")) {
-        if (selected === event.runId) attachment = { kind: "detached" };
-        beginOpen(selected as SessionId, crypto.randomUUID() as OperationId);
-      }
       break;
     }
     case "DELIVERY_BEGIN": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); deliveries.set(event.delivery.id, event.delivery); effects.push(event.delivery.method === "send_images" ? { type: "send-images", runId: record.id as SessionId, operationId: event.operationId, intentId: event.delivery.id } : { type: "deliver", runId: record.id, operationId: event.operationId, intentId: event.delivery.id }); return { ...record, deliveries, submitting: false }; }); break;

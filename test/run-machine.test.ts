@@ -33,7 +33,7 @@ class Reference {
       case "RESUME_FAIL": if (this.lifecycle.get(event.runId)?.operation === event.operationId) this.lifecycle.set(event.runId, { kind: "failed" }); break;
       case "FIRST_PAGE": if (!event.operationId || !this.lifecycle.get(event.runId)?.operation || this.lifecycle.get(event.runId)?.operation === event.operationId) this.lifecycle.set(event.runId, { kind: "open" }); break;
       case "TURN_START": if (this.attached === event.runId) this.turn = event.turn ?? "running"; break;
-      case "TURN_END": if (this.attached === event.runId) { this.turn = "idle"; if (this.selected === event.runId && !this.selected.startsWith("draft:")) { this.attached = null; this.turn = null; } } break;
+      case "TURN_END": if (this.attached === event.runId) this.turn = "idle"; break;
       case "DELIVERY_BEGIN": { const items = this.deliveries.get(event.runId) ?? new Map(); items.set(event.delivery.id, "requesting"); this.deliveryMethods.set(event.delivery.id, event.delivery.method); this.deliveryOperations.set(event.delivery.id, event.operationId); this.deliveries.set(event.runId, items); break; }
       case "DELIVERY_ACK": { if (this.deliveryOperations.get(event.intentId) !== event.operationId) break; const items = this.deliveries.get(event.runId); if (event.queued && !event.failed) items?.set(event.intentId, "queued"); else items?.delete(event.intentId); break; }
       case "DELIVERY_STATUS": { if (this.deliveryOperations.get(event.intentId) !== event.operationId) break; const items = this.deliveries.get(event.runId); if (event.status === "delivered") items?.delete(event.intentId); else if (items?.get(event.intentId) !== "dropped") { items?.set(event.intentId, "retrying"); this.deliveryOperations.set(event.intentId, "generated"); } break; }
