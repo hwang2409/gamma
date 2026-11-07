@@ -83,7 +83,12 @@ function audit(minHeight: number) {
     for (let parent: Element | null = element; parent; parent = parent.parentElement) opacity *= Number(getComputedStyle(parent).opacity);
     const ratio = contrast(style.color, backgroundOf(element));
     const label = `${element.tagName.toLowerCase()}${element.className && typeof element.className === "string" ? "." + element.className.split(" ")[0] : ""} "${node.textContent.trim().slice(0, 30)}"`;
-    if (ratio * Math.min(1, opacity) < 4.5) (element.closest("[class*=tok-]") ? tokens : problems).push(`${label} ${ratio.toFixed(2)}:1${opacity < 1 ? ` at opacity ${opacity.toFixed(2)}` : ""}`);
+    if (ratio * Math.min(1, opacity) < 4.5) {
+      const token = element.closest("[class*=tok-]");
+      (token ? tokens : problems).push(token
+        ? `${token.className} ${style.color} ${ratio.toFixed(2)}:1${opacity < 1 ? ` at opacity ${opacity.toFixed(2)}` : ""}`
+        : `${label} ${ratio.toFixed(2)}:1${opacity < 1 ? ` at opacity ${opacity.toFixed(2)}` : ""}`);
+    }
   }
   return { problems, tokens };
 }
@@ -99,7 +104,10 @@ async function auditThemes(page: Page, label: string, minHeight: number) {
     await settle(page);
     const { problems, tokens } = await page.evaluate(audit, minHeight);
     for (const problem of problems) fail(`${label} ${theme}: ${problem}`);
-    for (const token of tokens) (tokenReport.get(theme) ?? tokenReport.set(theme, new Set()).get(theme)!).add(token.replace(/ "[^"]*"/, ""));
+    for (const token of tokens) {
+      fail(`${label} ${theme}: syntax token ${token}`);
+      (tokenReport.get(theme) ?? tokenReport.set(theme, new Set()).get(theme)!).add(token);
+    }
   }
   await page.evaluate(() => { document.documentElement.dataset.fulcrumTheme = "tokyo-night"; });
 }
@@ -651,7 +659,7 @@ try {
   vite.kill("SIGTERM");
   await fake.close();
 }
-for (const [theme, tokens] of tokenReport) console.log(`note ${theme}: syntax tokens under 4.5:1 (palette colors, not gated): ${[...tokens].join(", ")}`);
+for (const [theme, tokens] of tokenReport) console.log(`syntax tokens under 4.5:1 in ${theme}: ${[...tokens].join(", ")}`);
 console.log(failures.length ? `\n${failures.length} failure(s)` : "\nweb gate passed");
 console.log(`screenshots: ${shots}`);
 process.exit(failures.length ? 1 : 0);
