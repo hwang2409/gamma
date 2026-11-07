@@ -151,7 +151,7 @@ export function createDeliveryManager(client: () => ZetaClient | null, storage: 
   const persist = () => storage?.setItem(DELIVERY_STORAGE, JSON.stringify(Object.fromEntries([...records].flatMap(([id, item]) => item.durable.size ? [[id, [...item.durable.values()]]] : []))));
   const listeners = new Set<() => void>();
   const emit = () => listeners.forEach((listener) => listener());
-  const find = (store: DeliveryStore, id: string) => store.getState().outline.map(({ id: itemId }) => ({ itemId, item: store.getItem(itemId) as { type?: string; event?: { type?: string; delivery_id?: string } } | undefined })).find(({ item }) => item?.type === "user" && item.event?.type === "user_message" && item.event.delivery_id === id);
+  const find = (store: DeliveryStore, id: string) => store.getState().outline.map(({ id: itemId }) => ({ itemId, item: store.getItem(itemId) as { type?: string; event?: { type?: string; delivery_id?: string; intent?: string } } | undefined })).find(({ item }) => item?.type === "user" && item.event?.type === "user_message" && item.event.delivery_id === id);
   const record = (runId: string): DeliveryRecord => {
     const prior = records.get(runId); if (prior) return prior;
     const next = {} as DeliveryRecord;
@@ -170,6 +170,7 @@ export function createDeliveryManager(client: () => ZetaClient | null, storage: 
       if (prior) next.durable.set(intent, { ...prior, attempt, method: mode, state: mode === "steer" ? "queued" : "requesting" });
       persist();
       if (!next.store) { next.waiting.add(intent); emit(); return; }
+      if (next.store.hasMessageDelivery(attempt)) { settle(next, intent); return; }
       next.publishing = true;
       try { next.store.dispatch(event); next.provisional.set(attempt, find(next.store, attempt)); }
       finally { next.publishing = false; }
@@ -182,8 +183,8 @@ export function createDeliveryManager(client: () => ZetaClient | null, storage: 
     if (!item.store || item.publishing) return;
     for (const [intent, delivery] of item.durable) {
       const current = find(item.store, delivery.attempt);
-      // Fulcrum gives synthetic rows an intent id; server/history rows have their own row id.
-      if (current && !current.itemId.startsWith("user:intent:")) { item.provisional.delete(delivery.attempt); settle(item, intent); }
+      // A synthetic row carries intent; only a server/history row without it is durable proof.
+      if (current && !current.item?.event?.intent) { item.provisional.delete(delivery.attempt); settle(item, intent); }
     }
   };
   const reconcile = async (runId: string) => {
