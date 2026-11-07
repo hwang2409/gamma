@@ -126,9 +126,9 @@ export function RunSettings({ available, deliveries, sessionId, createdWithDefau
       </button>
       {record.model.deferred ? <span className="model-deferred" role="status">settings apply to the next turn</span> : null}
       {settings.error ? <span className="settings-error" role="alert" title={settings.error}>{settings.error}</span> : null}
-      {confirmYolo ? <div ref={confirmRef} className="yolo-confirm" role="dialog" aria-modal="true" aria-label="enable YOLO mode">
-        <strong>run tools without asking?</strong><span>commands can change files and run programs.</span>
-        <div><button type="button" className="ghost" data-safe onClick={closeConfirm}>cancel</button><button type="button" className="danger" onClick={confirmAllow}>allow</button></div>
+      {confirmYolo ? <div ref={confirmRef} className="confirm-popover" role="dialog" aria-label="allow tools without asking" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setConfirmYolo(false); }}>
+        <p>allow tools to run without asking in this run?</p>
+        <div className="actions"><button type="button" className="confirm-danger" onClick={confirmAllow}>allow</button><button type="button" className="confirm-primary" data-safe onClick={closeConfirm}>keep asking</button></div>
       </div> : null}
     </>
   );
