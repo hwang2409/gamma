@@ -92,6 +92,22 @@ test("a settings change during a turn stays desired until the idle write", () =>
   expect(result.effects).toEqual([{ type: "set-settings", runId: session, operationId: operation("idle-write"), settings: { model: "next-model", approval_mode: "allow" } }]);
 });
 
+test("late default resolution keeps the model chosen during the active turn", () => {
+  const store = createRunStateStore(8, undefined, undefined, { id: "entry" as EntryId, run: session });
+  const effects: unknown[] = [];
+  store.setEffectExecutor((next) => effects.push(...next));
+  try {
+    store.activate(session);
+    store.desireSettings(session, { model: "claude-sonnet-5" });
+    store.setModelDeferred(session, true);
+    store.resolveDefault(session, "claude-opus-4-6", true);
+    expect(store.get(session).settings.desired?.model).toBe("claude-sonnet-5");
+    store.writeSettings(session, operation("idle-write"));
+
+    expect(effects).toContainEqual({ type: "set-settings", runId: session, operationId: operation("idle-write"), settings: { model: "claude-sonnet-5" } });
+  } finally { store.dispose(); }
+});
+
 test("settings are isolated by run when a slow result arrives after navigation", () => {
   const other = "s-other" as SessionId;
   let state = initial();

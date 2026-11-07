@@ -183,7 +183,7 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
       if (attachment.kind === "disconnected" && attachment.lastAttached) for (const intentId of runs.get(attachment.lastAttached)?.deliveries.keys() ?? []) effects.push({ type: "delivery-status", runId: attachment.lastAttached, operationId: crypto.randomUUID() as OperationId, intentId });
       break;
     case "SETTINGS_OK": update(event.runId, (record) => record.settings.pending?.operationId !== event.operationId ? record : { ...record, settings: { loaded: { model: event.model, approval_mode: event.approval_mode }, desired: record.settings.desired } }); break;
-    case "SETTINGS_FAIL": update(event.runId, (record) => record.settings.pending?.operationId !== event.operationId ? record : { ...record, settings: { ...record.settings, pending: undefined, error: event.error }, model: { ...record.model, pending: undefined, error: event.error } }); break;
+    case "SETTINGS_FAIL": update(event.runId, (record) => record.settings.pending?.operationId !== event.operationId ? record : { ...record, settings: { ...record.settings, pending: undefined, error: event.error } }); break;
   }
   return { state: { ...state, entry, runs, aliases, attachment, ...(notice ? { notice } : { notice: undefined }) }, effects };
 }
