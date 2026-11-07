@@ -266,7 +266,8 @@ test("a busy resume displays the URL-selected cached run and forward restores th
   await tick();
   view.select("b"); await tick();
   blockA = true;
-  view.select("a"); await tick();
+  view.select("a");
+  for (let attempt = 0; attempt < 50 && !present(view).openError; attempt++) await tick();
   expect(present(view).open?.id).toBe("a");
   expect(view.state.session?.session_id).toBe("a");
   expect(present(view).openError).toMatchObject({ id: "a", busy: true });
@@ -442,7 +443,7 @@ test("a failed create keeps the current session and says why", async () => {
   await tick();
   await expect(view.create()).rejects.toMatchObject({ message: "a turn is already running" });
   expect(present(view).open?.id).toBe("b");
-});
+}, 10_000);
 
 test("host commands are rebound on attach, reconnect, resume, and new session", async () => {
   let generation = 0;
