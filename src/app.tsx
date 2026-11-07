@@ -168,9 +168,8 @@ export function App() {
   const state = useExternal(connection);
   const view = useExternal(runs);
   const open = view.open;
-  // A new run remounts the dock (a fresh draft and delivery state) over a fresh empty store.
-  const [epoch, setEpoch] = useState(0);
-  const blank = useMemo(() => createRunStore(), [epoch]);
+  // A different reducer-owned selection gets its own empty transcript until zeta opens it.
+  const blank = useMemo(() => createRunStore(), [browserEntry.run]);
   const store = open?.lease.store ?? blank;
   const selectedRecord = useSyncExternalStore(runState.subscribe, () => runState.get(browserEntry.run));
   const landedNotice = useSyncExternalStore(runState.subscribe, runState.getNotice);
@@ -188,18 +187,15 @@ export function App() {
   // Context values must change identity when the manager mutates its internal sets.
   const undelivered = new Set(deliveryMarks.undelivered);
   const waitingDeliveries = new Set(deliveryMarks.waiting);
-  const previousActive = useRef<string | null>(null);
   useEffect(() => {
-    const previous = previousActive.current;
-    if (view.active) previousActive.current = view.active;
-    if (previous && !view.active && state.phase === "connected") { previousActive.current = null; void deliveries.turnEnded(previous); }
+    deliveries.observeActive(view.active, state.phase === "connected");
     if (state.phase === "connected" && view.attached) void deliveries.reconcile(view.attached);
   }, [deliveries, state.phase, view.active, view.attached]);
   useEffect(() => () => deliveries.dispose(), [deliveries]);
   const newRun = useCallback(() => {
     const next = { gammaEntryId: entryId(), run: draftId() };
     writeEntry(next, "push"); runState.dispatch({ type: "NEW_RUN", entryId: next.gammaEntryId as EntryId, runId: next.run as DraftRunId }); runState.activate(next.run, nextRunModel().model ? { choice: "explicit", model: nextRunModel().model! } : { choice: "default" });
-    runs.reset(); setEpoch((value) => value + 1);
+    runs.reset();
     requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('.dock textarea[aria-label="message"]')?.focus());
   }, [runState, runs]);
   const onCreated = useCallback((from: string, sessionId: string) => {
@@ -402,16 +398,13 @@ function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, ru
   const agentRunning = agent.kind === "thinking" || agent.kind === "approval" || agent.kind === "running";
   const running = agentRunning && open?.id === view.active;
   const { yolo, setYolo } = useContext(ApprovalModeContext);
-  // This dock's own first send is starting the run: the composer stays put while zeta creates and opens it.
-  const [starting, setStarting] = useState(false);
   useEffect(() => { deliveries.bind(runId, open?.lease.store); }, [deliveries, runId, open?.lease.store]);
   const record = useSyncExternalStore(runState.subscribe, () => runState.get(runId));
+  const starting = record.lifecycle.kind === "creating";
 
   const onSubmit: Submit = useCallback(async (text, images, { steer, deliveryId }) => {
     if (runId.startsWith("draft:")) runState.dispatch({ type: "FIRST_SEND", runId: runId as DraftRunId, operationId: crypto.randomUUID() as import("./run-state").OperationId });
-    setStarting(true);
-    try { return await submitRun({ text, images, steer, deliveryId, connection, runs, deliveries, yolo, runId, onCreated }); }
-    finally { setStarting(false); }
+    return submitRun({ text, images, steer, deliveryId, connection, runs, deliveries, yolo, runId, onCreated });
   }, [connection, runs, deliveries, yolo, runId, onCreated]);
   const onStop = useCallback(async () => { await deliveries.stop(runId); await runs.refreshStatus(); }, [deliveries, runId, runs]);
   const lastPrompt = useLastPrompt();

@@ -145,6 +145,7 @@ const DELIVERY_STORAGE = "gamma-deliveries";
 /** Owns delivery reconciliation by run, so navigation, reload, and reconnect cannot lose an accepted intent. */
 export function createDeliveryManager(client: () => ZetaClient | null, storage: DeliveryStorage | undefined = typeof sessionStorage === "undefined" ? undefined : sessionStorage) {
   const records = new Map<string, DeliveryRecord>();
+  let activeRun: string | null = null;
   let saved: Record<string, DurableDelivery[]> = {};
   try { saved = JSON.parse(storage?.getItem(DELIVERY_STORAGE) ?? "{}"); } catch { saved = {}; }
   const persist = () => storage?.setItem(DELIVERY_STORAGE, JSON.stringify(Object.fromEntries([...records].flatMap(([id, item]) => item.durable.size ? [[id, [...item.durable.values()]]] : []))));
@@ -210,6 +211,7 @@ export function createDeliveryManager(client: () => ZetaClient | null, storage: 
   return {
     subscribe(listener: () => void) { listeners.add(listener); return () => listeners.delete(listener); },
     marks(runId: string) { const item = record(runId); return { waiting: item.waiting as ReadonlySet<string>, undelivered: item.undelivered as ReadonlySet<string> }; },
+    observeActive(runId: string | null, connected: boolean) { const previous = activeRun; if (runId) activeRun = runId; else if (previous && connected) { activeRun = null; void this.turnEnded(previous); } },
     bind(runId: string, store: DeliveryStore | undefined) { const item = record(runId); if (item.store === store) return; item.unsubscribe?.(); item.store = store; item.unsubscribe = store?.subscribe(() => reconcileRows(item)); reconcileRows(item); void reconcile(runId); },
     reconcile,
     promote(from: string, to: string) { const item = records.get(from); if (!item || from === to) return; records.delete(from); records.set(to, item); delete saved[from]; persist(); emit(); },
