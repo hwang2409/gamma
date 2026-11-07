@@ -80,6 +80,12 @@ export function createDelivery(newId: () => string = () => `web-${crypto.randomU
       if (delivered.result.accepted === false) throw refusal(delivered.result);
       reconcileAccepted(message, delivered.used, delivered.result);
     },
+    async retry(client: ZetaClient, text: string, intent: string) {
+      const message = { text, intent, id: client.features.includes("delivery_id") ? newId() : null };
+      const delivered = await deliver(client, "send", message);
+      if (delivered.result.accepted === false) throw refusal(delivered.result);
+      reconcileAccepted(message, delivered.used, delivered.result);
+    },
     /** Stops the running turn (zeta's default session-scope abort); `turnEnded` then knows the user ended it. */
     stop(client: ZetaClient) {
       const request = stopTurn(client);
@@ -120,47 +126,91 @@ type DeliveryStore = {
   getItem(id: string): unknown;
   subscribe(listener: () => void): () => void;
 };
+type DurableDelivery = { intent: string; attempt: string; text: string; method: Method; state: "requesting" | "queued" | "retrying" | "dropped" };
 type DeliveryRecord = {
   delivery: ReturnType<typeof createDelivery>;
   store?: DeliveryStore;
   unsubscribe?: () => void;
   provisional: Map<string, unknown>;
   text: Map<string, string>;
+  durable: Map<string, DurableDelivery>;
   waiting: Set<string>;
   undelivered: Set<string>;
+  reconciling?: Promise<void>;
 };
+type DeliveryStorage = Pick<Storage, "getItem" | "setItem">;
+const DELIVERY_STORAGE = "gamma-deliveries";
 
-/** Owns delivery reconciliation by run, so navigation cannot unmount an accepted steer's state. */
-export function createDeliveryManager(client: () => ZetaClient | null) {
+/** Owns delivery reconciliation by run, so navigation, reload, and reconnect cannot lose an accepted intent. */
+export function createDeliveryManager(client: () => ZetaClient | null, storage: DeliveryStorage | undefined = typeof sessionStorage === "undefined" ? undefined : sessionStorage) {
   const records = new Map<string, DeliveryRecord>();
+  let saved: Record<string, DurableDelivery[]> = {};
+  try { saved = JSON.parse(storage?.getItem(DELIVERY_STORAGE) ?? "{}"); } catch { saved = {}; }
+  const persist = () => storage?.setItem(DELIVERY_STORAGE, JSON.stringify(Object.fromEntries([...records].flatMap(([id, item]) => item.durable.size ? [[id, [...item.durable.values()]]] : []))));
   const listeners = new Set<() => void>();
   const emit = () => listeners.forEach((listener) => listener());
   const find = (store: DeliveryStore, id: string) => store.getState().outline.map(({ id: itemId }) => store.getItem(itemId) as { type?: string; event?: { type?: string; delivery_id?: string } } | undefined).find((item) => item?.type === "user" && item.event?.type === "user_message" && item.event.delivery_id === id);
   const record = (runId: string): DeliveryRecord => {
     const prior = records.get(runId); if (prior) return prior;
     const next = {} as DeliveryRecord;
-    next.provisional = new Map(); next.text = new Map(); next.waiting = new Set(); next.undelivered = new Set();
+    next.provisional = new Map(); next.text = new Map(); next.durable = new Map(); next.waiting = new Set(); next.undelivered = new Set();
+    for (const delivery of saved[runId] ?? []) {
+      if (!delivery?.intent || !delivery.attempt || !delivery.text) continue;
+      next.durable.set(delivery.intent, delivery); next.text.set(delivery.intent, delivery.text);
+      (delivery.state === "dropped" ? next.undelivered : next.waiting).add(delivery.intent);
+    }
     next.delivery = createDelivery(undefined, (event) => {
-      const id = event.type === "user_message" ? event.delivery_id : undefined;
-      if (!id || !next.store) return;
-      if (next.store.hasMessageDelivery(id)) { next.waiting.delete(id); emit(); return; }
-      next.store.dispatch(event); next.provisional.set(id, find(next.store, id)); next.waiting.add(id); emit();
+      const attempt = event.type === "user_message" ? event.delivery_id : undefined;
+      const intent = event.type === "user_message" ? event.intent ?? attempt : undefined;
+      if (!attempt || !intent) return;
+      const prior = next.durable.get(intent);
+      const mode = (event as RunEvent & { mode?: Method }).mode ?? prior?.method ?? "send";
+      if (prior) next.durable.set(intent, { ...prior, attempt, method: mode, state: mode === "steer" ? "queued" : "requesting" });
+      persist();
+      if (!next.store) { next.waiting.add(intent); emit(); return; }
+      if (next.store.hasMessageDelivery(attempt)) { next.waiting.delete(intent); emit(); return; }
+      next.store.dispatch(event); next.provisional.set(attempt, find(next.store, attempt)); next.waiting.add(intent); emit();
     });
     records.set(runId, next); return next;
   };
+  const settle = (item: DeliveryRecord, intent: string) => { item.durable.delete(intent); item.waiting.delete(intent); item.undelivered.delete(intent); persist(); emit(); };
   const reconcileRows = (item: DeliveryRecord) => {
     if (!item.store) return;
-    for (const [id, fallback] of item.provisional) if (find(item.store, id) !== fallback) { item.provisional.delete(id); item.waiting.delete(id); emit(); }
+    for (const [intent, delivery] of item.durable) if (item.store.hasMessageDelivery(delivery.attempt)) settle(item, intent);
+    for (const [id, fallback] of item.provisional) if (find(item.store, id) !== fallback) item.provisional.delete(id);
+  };
+  const reconcile = async (runId: string) => {
+    const target = client(); const item = record(runId);
+    if (!target || item.reconciling) return item.reconciling;
+    item.reconciling = (async () => {
+      reconcileRows(item);
+      for (const [intent, delivery] of [...item.durable]) {
+        if (delivery.state === "dropped" || !item.durable.has(intent)) continue;
+        let status: string;
+        try {
+          const result = await target.request("delivery_status", { delivery_id: delivery.attempt }, { timeoutMs: 15_000 }) as { status?: string; outcome?: string };
+          status = result.status === "evicted" ? String(result.outcome) : String(result.status);
+        } catch { continue; }
+        if (status === "delivered") { settle(item, intent); continue; }
+        if (status !== "dropped") { item.waiting.add(intent); emit(); continue; }
+        const retrying = { ...delivery, state: "retrying" as const };
+        item.durable.set(intent, retrying); item.waiting.add(intent); persist(); emit();
+        try { await item.delivery.retry(target, delivery.text, intent); settle(item, intent); }
+        catch { /* Keep retrying: the next attach or reconnect queries durable truth again. */ }
+      }
+    })().finally(() => { item.reconciling = undefined; });
+    return item.reconciling;
   };
   return {
     subscribe(listener: () => void) { listeners.add(listener); return () => listeners.delete(listener); },
     marks(runId: string) { const item = record(runId); return { waiting: item.waiting as ReadonlySet<string>, undelivered: item.undelivered as ReadonlySet<string> }; },
-    bind(runId: string, store: DeliveryStore | undefined) { const item = record(runId); if (item.store === store) return; item.unsubscribe?.(); item.store = store; item.unsubscribe = store?.subscribe(() => reconcileRows(item)); reconcileRows(item); },
-    promote(from: string, to: string) { const item = records.get(from); if (!item || from === to) return; records.delete(from); records.set(to, item); emit(); },
-    async submit(runId: string, text: string, steer: boolean, deliveryId?: string) { const target = client(); if (!target) throw new Error("not connected to zeta serve"); const item = record(runId); if (deliveryId) item.text.set(deliveryId, text); return item.delivery.submit(target, text, steer, deliveryId); },
+    bind(runId: string, store: DeliveryStore | undefined) { const item = record(runId); if (item.store === store) return; item.unsubscribe?.(); item.store = store; item.unsubscribe = store?.subscribe(() => reconcileRows(item)); reconcileRows(item); void reconcile(runId); },
+    reconcile,
+    promote(from: string, to: string) { const item = records.get(from); if (!item || from === to) return; records.delete(from); records.set(to, item); delete saved[from]; persist(); emit(); },
+    async submit(runId: string, text: string, steer: boolean, deliveryId = `web-${crypto.randomUUID()}`) { const target = client(); if (!target) throw new Error("not connected to zeta serve"); const item = record(runId); item.text.set(deliveryId, text); item.durable.set(deliveryId, { intent: deliveryId, attempt: deliveryId, text, method: steer ? "steer" : "send", state: "requesting" }); item.waiting.add(deliveryId); persist(); emit(); try { const result = await item.delivery.submit(target, text, steer, deliveryId); if (!steer) settle(item, deliveryId); return result; } catch (error) { persist(); throw error; } },
     stop(runId: string) { const target = client(); return target ? record(runId).delivery.stop(target) : Promise.reject(new Error("not connected to zeta serve")); },
-    async turnEnded(runId: string) { const target = client(); if (!target) return; const item = record(runId); for (const id of item.provisional.keys()) item.waiting.delete(id); item.provisional.clear(); const dropped = await item.delivery.turnEnded(target); dropped.forEach((id) => item.undelivered.add(id)); emit(); },
-    async resend(runId: string, intentId: string) { const item = record(runId); const text = item.text.get(intentId); if (!text) return; item.undelivered.delete(intentId); emit(); await this.submit(runId, text, false); },
+    async turnEnded(runId: string) { const target = client(); if (!target) return; const item = record(runId); item.provisional.clear(); const dropped = await item.delivery.turnEnded(target); dropped.forEach((id) => { const delivery = item.durable.get(id); if (delivery) item.durable.set(id, { ...delivery, state: "dropped" }); item.waiting.delete(id); item.undelivered.add(id); }); persist(); emit(); await reconcile(runId); },
+    async resend(runId: string, intentId: string) { const item = record(runId); const text = item.text.get(intentId); if (!text) return; item.undelivered.delete(intentId); const delivery = item.durable.get(intentId); if (delivery) item.durable.set(intentId, { ...delivery, state: "retrying" }); item.waiting.add(intentId); persist(); emit(); const target = client(); if (!target) return; try { await item.delivery.retry(target, text, intentId); settle(item, intentId); } catch { persist(); } },
     dispose() { records.forEach((item) => item.unsubscribe?.()); records.clear(); listeners.clear(); },
   };
 }

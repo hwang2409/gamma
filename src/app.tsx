@@ -187,9 +187,10 @@ export function App() {
   const previousActive = useRef<string | null>(null);
   useEffect(() => {
     const previous = previousActive.current;
-    previousActive.current = view.active;
-    if (previous && !view.active) void deliveries.turnEnded(previous);
-  }, [deliveries, view.active]);
+    if (view.active) previousActive.current = view.active;
+    if (previous && !view.active && state.phase === "connected") { previousActive.current = null; void deliveries.turnEnded(previous); }
+    if (state.phase === "connected" && view.attached) void deliveries.reconcile(view.attached);
+  }, [deliveries, state.phase, view.active, view.attached]);
   useEffect(() => () => deliveries.dispose(), [deliveries]);
   const newRun = useCallback(() => {
     const next = { gammaEntryId: entryId(), run: draftId() };
@@ -232,7 +233,7 @@ export function App() {
               </header>
               <main className="main">
                 <Body state={state} view={view} connection={connection} runs={runs} onNewRun={newRun} onSelectRun={selectRun} />
-                <Dock key={browserEntry.run} runId={browserEntry.run} runState={runState} onCreated={onCreated} deliveries={deliveries} state={state} view={view} connection={connection} runs={runs} vim={vim} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />
+                <Dock key={browserEntry.run} runId={browserEntry.run} runState={runState} onCreated={onCreated} deliveries={deliveries} pendingDelivery={waitingDeliveries.size > 0} state={state} view={view} connection={connection} runs={runs} vim={vim} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />
                 {viewer ? <Inspector value={viewer} onClose={closeViewer} /> : null}
               </main>
             </div>
@@ -384,8 +385,8 @@ function dockBlockedReason(state: ConnectionState, present: RunState, open: Open
   return present.opening || open?.stale ? "sending is paused until the run opens" : null;
 }
 
-function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, runState, runId, onCreated, deliveries }: {
-  state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; vim: boolean; onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>; onImageOpen(block: any): void; runState: RunStateStore; runId: string; onCreated(from: string, sessionId: string): void; deliveries: DeliveryManager;
+function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, runState, runId, onCreated, deliveries, pendingDelivery }: {
+  state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; vim: boolean; onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>; onImageOpen(block: any): void; runState: RunStateStore; runId: string; onCreated(from: string, sessionId: string): void; deliveries: DeliveryManager; pendingDelivery: boolean;
 }) {
   const present = view;
   const open = present.open;
@@ -414,7 +415,7 @@ function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, ru
   const problem = (state.phase !== "connected" && state.phase !== "connecting" && state.phase !== "dropped") || Boolean(failure);
   const phase = dockPhase(state, present, open, agent, starting);
   const readOnly = blank ? null : dockReadOnlyReason(open?.id ?? null, view.active);
-  const blockedReason = starting ? null : view.active && blank ? `sending waits for the active run ${view.active}` : dockBlockedReason(state, present, open);
+  const blockedReason = starting ? null : pendingDelivery ? "sending waits while the previous message is pending or retrying" : view.active && blank ? `sending waits for the active run ${view.active}` : dockBlockedReason(state, present, open);
   const sessionId = blank || starting || view.attached !== open?.id ? null : open.id;
   return <div className="dock"><>{problem ? null : <StatusLine phase={phase} />}</><DockComposer runs={runs} readOnly={readOnly} blockedReason={blockedReason} running={running} vim={vim} onSubmit={onSubmit} onStop={onStop} onImageOpen={onImageOpen} client={client} sessionId={sessionId} createdWithDefault={record.model.choice === "default"} yolo={yolo} onYolo={setYolo} runState={runState} runId={runId} /></div>;
 }
@@ -458,7 +459,10 @@ function Run({ client, open, readOnly }: { client: ZetaClient | null; open: Open
     if (!client || open.stale || readOnly) return { disabledReason: readOnly ? "opening the run — decisions are paused" : "reconnecting — decisions are disabled until the server confirms this run" };
     const decide = (method: "approve" | "deny"): Decide => async (request_id) => {
       try {
-        return await client.request(method, { request_id }, { timeoutMs: 15_000 });
+        const result = await client.request(method, { request_id }, { timeoutMs: 15_000 });
+        // The decision response is durable. End the reopened snapshot row even if its live approval_end was quarantined.
+        open.lease.store.dispatch({ type: "approval_end", request_id, data: { decision: method === "approve" ? "allow" : "deny" } });
+        return result;
       } catch (error) {
         if ((error as { code?: unknown }).code === -32006) throw new Error("this approval expired while you were disconnected");
         throw error;

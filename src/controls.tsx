@@ -107,10 +107,11 @@ export function RunSettings({ available, runs, sessionId, createdWithDefault, ru
       const next = settingModel(value);
       setSettings(next);
       if (next.model) store.resolveDefault(runId, next.model, createdWithDefault);
-      onYolo(next.approval_mode === "allow");
+      // A blank run's desired mode survives promotion; an older settings read must not reverse what first-send applies.
+      if (record.settings.kind !== "ready") onYolo(next.approval_mode === "allow");
     }, (cause: unknown) => { if (live) setError(cause instanceof Error ? cause.message : "settings unavailable"); });
     return () => { live = false; };
-  }, [available, runs, sessionId, createdWithDefault, onYolo, store, runId]);
+  }, [available, runs, sessionId, createdWithDefault, onYolo, store, runId, record.settings.kind]);
   useEffect(() => { if (!running) setModelDeferred(false); }, [running]);
   const closeConfirm = useCallback(() => { setConfirmYolo(false); approvalButton.current?.focus(); }, []);
   useDismiss(confirmYolo, confirmRef, closeConfirm);

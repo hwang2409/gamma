@@ -155,8 +155,11 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
     }
     e("assistant_message", { message: { role: "assistant", content: [text(reply)] } });
     histories[session] = [...(histories[session] ?? []), { id: `reply-${sent.length}`, role: "assistant", content: [text(reply)], tool_result: null }];
-    // As in zeta: a turn with no tool call reaches no provider boundary, so steering still queued at its end is dropped.
-    for (const id of turn.steers) statuses.set(id, "dropped");
+    // serve-protocol.md:469-475: terminal steer outcomes are durable session_history rows.
+    for (const id of turn.steers) {
+      statuses.set(id, "dropped");
+      histories[session]!.push({ id: `delivery-${id}`, role: "system", event: "delivery_status", delivery_id: id, method: "steer", status: "dropped" });
+    }
     e("turn_end", { data: { turn: sent.length } });
     chat = null;
     running.set(false);
@@ -177,8 +180,9 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
     if (echo) send(userMessage); else withheldEchoes.push(() => send(userMessage));
     const accepted = method === "send" ? { accepted: true, session_id: active } : { accepted: true };
     if (delivery) { deliveries.set(delivery, accepted); statuses.set(delivery, method === "steer" ? "queued" : "delivered"); }
-    if (method === "steer") { if (delivery) chat?.steers.push(delivery); return { result: accepted }; }
+    // serve-protocol.md:811-817: the accepted echo is also a durable user history row with its delivery id.
     histories[active] = [...(histories[active] ?? []), { id: `sent-${sent.length}`, role: "user", content: [text(value)], ...(delivery ? { delivery_id: delivery } : {}), tool_result: null }];
+    if (method === "steer") { if (delivery) chat?.steers.push(delivery); return { result: accepted }; }
     // After the reply, as zeta starts the turn once the send is persisted.
     queueMicrotask(() => void chatTurn(active, send, value));
     return { result: accepted };
@@ -186,7 +190,10 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
   const abort = (send: Send): Json => {
     if (!chat) return { result: { aborted: false } };
     const turn = chat;
-    for (const id of turn.steers) statuses.set(id, "dropped");
+    for (const id of turn.steers) {
+      statuses.set(id, "dropped");
+      histories[turn.session]!.push({ id: `delivery-${id}`, role: "system", event: "delivery_status", delivery_id: id, method: "steer", status: "dropped" });
+    }
     chat = null;
     running.set(false);
     turn.aborted = true;
@@ -203,6 +210,14 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
     flushEchoes() { withheldEchoes.splice(0).forEach((send) => send()); },
     get history() { return histories[ACTIVE] ?? []; },
     get aborts() { return aborts; },
+    disconnect() {
+      if (!chat) return;
+      for (const id of chat.steers) {
+        statuses.set(id, "dropped");
+        histories[chat.session]!.push({ id: `delivery-${id}`, role: "system", event: "delivery_status", delivery_id: id, method: "steer", status: "dropped" });
+      }
+      chat.aborted = true; chat = null; running.set(false);
+    },
     /** The reply body for a composer method, or undefined for any other method. */
     handle(method: string, params: Json, active: string | null, send: Send): Json | undefined {
       if (method === "send" || method === "steer" || method === "send_images") return deliver(method, params, active, send);
@@ -298,6 +313,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         sockets.delete(socket);
         if (socket !== controller) return;
         controller = null;
+        composer.disconnect();
         if (!decide || approvalAborted) return;
         if (approvalReconnect && reconnectControllers.has(socket as object)) {
           if (approvalExpiry) clearTimeout(approvalExpiry);

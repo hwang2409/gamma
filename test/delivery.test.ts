@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createClient, type Transport } from "@fulcrum/zeta";
-import { createDelivery, stopTurn } from "../src/delivery";
+import { createDelivery, createDeliveryManager, stopTurn } from "../src/delivery";
 import { composerMethods } from "../scripts/fake-zeta";
 
 type Reply = { result?: unknown; error?: { code: number; message: string; data?: unknown } };
@@ -31,16 +31,38 @@ async function server(answer: (method: string, params: Record<string, unknown>) 
 }
 const ids = () => { let n = 0; return () => `id-${++n}`; };
 const ok = { result: { accepted: true } };
+const memoryStorage = () => {
+  const values = new Map<string, string>();
+  return { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
+};
 
-test("fake reconnect history does not replay a steer dropped at turn end", async () => {
+test("fake reconnect history keeps the accepted steer and its terminal delivery status", async () => {
   let active = false;
   const fake = composerMethods(async () => {}, { get: () => active, set: (value) => { active = value; } });
   const before = fake.history.length;
   fake.handle("send", { text: "start", delivery_id: "fake-send" }, "s-reconnect", () => {});
+  await Promise.resolve();
   active = true;
   fake.handle("steer", { text: "drop me", delivery_id: "fake-steer" }, "s-reconnect", () => {});
-  for (let i = 0; i < 10; i++) await Promise.resolve();
-  expect(fake.history.slice(before).some((row) => JSON.stringify(row).includes("drop me"))).toBe(false);
+  fake.handle("abort", {}, "s-reconnect", () => {});
+  const rows = fake.history.slice(before);
+  expect(rows.some((row) => JSON.stringify(row).includes("drop me"))).toBe(true);
+  expect(rows.some((row) => row.event === "delivery_status" && row.delivery_id === "fake-steer" && row.status === "dropped")).toBe(true);
+});
+
+test("a reload reconciles a queued steer from durable status and resends a dropped intent", async () => {
+  let dropped = false;
+  const { client, calls } = await server((method) => method === "delivery_status" ? { result: { status: dropped ? "dropped" : "queued" } } : ok);
+  const storage = memoryStorage();
+  const before = createDeliveryManager(() => client, storage);
+  await before.submit("s", "survive reload", true, "intent-1");
+  before.dispose();
+  dropped = true;
+  const after = createDeliveryManager(() => client, storage);
+  await after.reconcile("s");
+  expect(calls.map(([method]) => method)).toEqual(["steer", "delivery_status", "send"]);
+  expect((calls.at(-1)?.[1] as { delivery_id?: string }).delivery_id).not.toBe("intent-1");
+  expect(after.marks("s").waiting.size).toBe(0);
 });
 
 test("send and steer go to their methods with a delivery id when the feature is negotiated", async () => {
