@@ -253,7 +253,7 @@ function RunTitle({ session, blank }: { session: SessionMeta | null; blank: bool
   useEffect(() => { document.title = title ? `${title} · gamma` : "gamma"; }, [title]);
   return (
     <div className="run-title">
-      <h1 title={title ?? undefined}>{title ?? (blank ? "new run" : "run")}</h1>
+      <h1 title={title ?? undefined}>{title ?? (blank ? "untitled run" : "run")}</h1>
     </div>
   );
 }

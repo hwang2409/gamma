@@ -33,9 +33,9 @@ class Reference {
       case "RESUME_FAIL": if (this.lifecycle.get(event.runId)?.operation === event.operationId) this.lifecycle.set(event.runId, { kind: "failed" }); break;
       case "FIRST_PAGE": if (!event.operationId || !this.lifecycle.get(event.runId)?.operation || this.lifecycle.get(event.runId)?.operation === event.operationId) this.lifecycle.set(event.runId, { kind: "open" }); break;
       case "TURN_START": if (this.attached === event.runId) this.turn = event.turn ?? "running"; break;
-      case "TURN_END": if (this.attached === event.runId) this.turn = "idle"; break;
+      case "TURN_END": if (this.attached === event.runId) { this.turn = "idle"; for (const [id, state] of this.deliveries.get(event.runId) ?? []) if (state !== "requesting" && state !== "dropped") this.deliveryOperations.set(id, "generated"); } break;
       case "DELIVERY_BEGIN": { const items = this.deliveries.get(event.runId) ?? new Map(); items.set(event.delivery.id, "requesting"); this.deliveryMethods.set(event.delivery.id, event.delivery.method); this.deliveryOperations.set(event.delivery.id, event.operationId); this.deliveries.set(event.runId, items); break; }
-      case "DELIVERY_ACK": { if (this.deliveryOperations.get(event.intentId) !== event.operationId) break; const items = this.deliveries.get(event.runId); if (event.queued && !event.failed) items?.set(event.intentId, "queued"); else items?.delete(event.intentId); break; }
+      case "DELIVERY_ACK": { if (this.deliveryOperations.get(event.intentId) !== event.operationId) break; const items = this.deliveries.get(event.runId); if (event.queued && !event.failed && items?.get(event.intentId) !== "retrying") items.set(event.intentId, "queued"); else items?.delete(event.intentId); break; }
       case "DELIVERY_STATUS": { if (this.deliveryOperations.get(event.intentId) !== event.operationId) break; const items = this.deliveries.get(event.runId); if (event.status === "delivered") items?.delete(event.intentId); else if (items?.get(event.intentId) !== "dropped") { items?.set(event.intentId, "retrying"); this.deliveryOperations.set(event.intentId, "generated"); } break; }
       case "STOP": this.stopOperations.set(event.runId, event.operationId ?? "generated"); break;
       case "STOP_OK": { if (this.stopOperations.get(event.runId) !== event.operationId) break; this.stopOperations.delete(event.runId); const items = this.deliveries.get(event.runId); for (const [id] of items ?? []) if (this.deliveryMethods.get(id) === "steer") items!.set(id, "dropped"); break; }
@@ -70,7 +70,6 @@ test("workspace reducer matches an independent model across navigation, activity
         expect(attached).toBe(reference.attached);
         if (state.attachment.kind === "attached") expect(state.attachment.turn).toBe(reference.turn);
         for (const effect of result.effects) {
-          if (effect.type === "history-replace-current") expect(effect.entryId).toBe(state.entry.id);
           if (effect.type === "open-session" || effect.type === "new-session") expect(state.attachment.kind !== "attached" || state.attachment.turn === "idle" || state.attachment.sessionId === effect.runId).toBeTrue();
           if (effect.type === "load-settings" || effect.type === "set-settings") { expect(state.runs.get(effect.runId)?.settings.pending?.operationId).toBe(effect.operationId); expect(effect.runId).toBe(state.runs.get(effect.runId)?.id); }
         }
@@ -140,6 +139,25 @@ test("cache eviction and disposal release owned session leases", () => {
   second.dispatch({ type: "OPEN_OK", runId, operationId: secondOperation, open: { id: runId, lease: { release() {} } as never, stale: false, history: { messages: 0, complete: true }, syncing: false } });
   second.dispose();
   expect(released.filter((effect) => effect.type === "release-lease" && effect.runId === runId)).toHaveLength(2);
+});
+
+test("a natural turn end reconciles queued steers and an accepted resend settles them", () => {
+  const runId = session(1);
+  const first = operation(1);
+  let state = reduceWorkspace(initial(), { type: "STATUS", sessionId: runId, turn: "running" }).state;
+  state = reduceWorkspace(state, { type: "DELIVERY_BEGIN", runId, operationId: first, delivery: { id: "steer", attemptId: "steer", operationId: first, method: "steer", text: "keep this", images: [], state: "requesting" } }).state;
+  state = reduceWorkspace(state, { type: "DELIVERY_ACK", runId, intentId: "steer", operationId: first, attemptId: "steer", queued: true }).state;
+
+  const ended = reduceWorkspace(state, { type: "TURN_END", runId });
+  const status = ended.effects.find((effect) => effect.type === "delivery-status");
+  expect(status?.type).toBe("delivery-status");
+  if (status?.type !== "delivery-status") throw new Error("missing delivery status effect");
+  const dropped = reduceWorkspace(ended.state, { type: "DELIVERY_STATUS", runId, intentId: "steer", operationId: status.operationId, status: "dropped" });
+  const resend = dropped.effects.find((effect) => effect.type === "deliver");
+  expect(resend?.type).toBe("deliver");
+  if (resend?.type !== "deliver") throw new Error("missing resend effect");
+  const accepted = reduceWorkspace(dropped.state, { type: "DELIVERY_ACK", runId, intentId: "steer", operationId: resend.operationId, attemptId: "retry", queued: true });
+  expect(accepted.state.runs.get(runId)?.deliveries.has("steer")).toBeFalse();
 });
 
 test("store updates cannot invalidate an in-flight delivery acknowledgement", () => {

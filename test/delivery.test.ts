@@ -54,8 +54,8 @@ test("fake reconnect history keeps the accepted steer and its terminal delivery 
 });
 
 test("a reload reconciles a queued steer from durable status and resends a dropped intent", async () => {
-  let dropped = false; let statusQueries = 0;
-  const { client, calls } = await server((method) => method === "delivery_status" ? { result: { status: dropped && statusQueries++ === 0 ? "dropped" : dropped ? "delivered" : "queued" } } : ok);
+  let dropped = false;
+  const { client, calls } = await server((method) => method === "delivery_status" ? { result: { status: dropped ? "dropped" : "queued" } } : ok);
   const storage = memoryStorage();
   const beforeState = createRunStateStore(8, undefined, storage, { id: "e" as any, run: "s" as any });
   const before = createDeliveryManager(() => client, beforeState);
@@ -68,9 +68,7 @@ test("a reload reconciles a queued steer from durable status and resends a dropp
   after.reconcile("s");
   await Bun.sleep(10);
   const retryId = (calls.at(-1)?.[1] as { delivery_id?: string }).delivery_id;
-  after.reconcile("s");
-  await Bun.sleep(10);
-  expect(calls.map(([method]) => method)).toEqual(["steer", "delivery_status", "send", "delivery_status"]);
+  expect(calls.map(([method]) => method)).toEqual(["steer", "delivery_status", "send"]);
   expect(retryId).not.toBe("intent-1");
   expect(afterState.get("s").deliveries.size).toBe(0);
 });

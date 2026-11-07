@@ -39,7 +39,7 @@ async function pendingNavigation(browser: Awaited<ReturnType<typeof chromium.lau
     await field.fill("send this"); await page.getByRole("button", { name: "send message" }).click();
     await field.fill("send thiskeep this unsent follow-up");
     await page.getByRole("button", { name: "new run" }).click();
-    await page.getByRole("heading", { name: "new run" }).waitFor();
+    await page.getByRole("heading", { name: "untitled run" }).waitFor();
     await Bun.sleep(2_200); await page.goBack(); await ready(page);
     const actual = await field.inputValue();
     if (actual !== "keep this unsent follow-up") throw new Error(`follow-up became ${JSON.stringify(actual)}`);
@@ -65,7 +65,7 @@ try {
         const field = page.locator('.dock textarea[aria-label="message"]'); await field.fill("private draft that must stay");
         for (let index = 0; index < 9; index++) {
           console.log(`dirty sequence ${index}: new`);
-          await page.getByRole("button", { name: "new run" }).click(); await page.getByRole("heading", { name: "new run" }).waitFor();
+          await page.getByRole("button", { name: "new run" }).click(); await page.getByRole("heading", { name: "untitled run" }).waitFor();
           console.log(`dirty sequence ${index}: send`);
           await send(page, `create clean run ${index}`);
         }

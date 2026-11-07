@@ -24,12 +24,12 @@ async function freshPage(browser: Awaited<ReturnType<typeof chromium.launch>>, v
   const page = await context.newPage();
   await page.goto(`${origin}/?theme=tokyo-night`);
   await page.locator('.dock form[data-part="composer"]').waitFor({ timeout: 15_000 }).catch(() => { throw new Error("the fresh browser did not reach an editable composer"); });
-  if (!await page.getByRole("heading", { name: "new run" }).count()) {
+  if (!await page.getByRole("heading", { name: "untitled run" }).count()) {
     const newRun = page.locator("button.new-run");
     await newRun.waitFor();
     if (await newRun.isDisabled()) throw new Error("the open run cannot start a new run");
     await newRun.evaluate((button) => (button as HTMLButtonElement).click());
-    await page.getByRole("heading", { name: "new run" }).waitFor({ timeout: 10_000 });
+    await page.getByRole("heading", { name: "untitled run" }).waitFor({ timeout: 10_000 });
   }
   await page.locator('button[aria-label^="model:"]').waitFor({ timeout: 15_000 }).catch(() => { throw new Error("the new run did not show a model picker"); });
   return { context, page };

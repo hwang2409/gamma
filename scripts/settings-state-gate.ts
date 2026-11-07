@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { ACTIVE, startFakeZeta } from "./fake-zeta";
 
+// These four browser cases are regression guards; they already pass on b34d5fc.
 const root = new URL("..", import.meta.url).pathname;
 const port = Number(process.env.SETTINGS_GATE_PORT ?? 4331);
 const origin = `http://127.0.0.1:${port}`;

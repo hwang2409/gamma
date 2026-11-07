@@ -51,7 +51,7 @@ try {
         const field = page.locator('.dock textarea[aria-label="message"]');
         await field.fill("private draft for run a");
         await page.getByRole("button", { name: "new run" }).click();
-        await page.getByRole("heading", { name: "new run" }).waitFor();
+        await page.getByRole("heading", { name: "untitled run" }).waitFor();
         await field.fill("blank run draft b");
         await page.goBack(); await ready(page);
         if (await field.inputValue() !== "private draft for run a") throw new Error(`run a draft became ${JSON.stringify(await field.inputValue())}`);

@@ -125,6 +125,7 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
   const withheldEchoes: Array<() => void> = [];
   const withheldHistory: Array<() => void> = [];
   let chat: { session: string; sendDelivery: string | null; steers: string[]; aborted: boolean } | null = null;
+  const externalSteers: Array<{ id: string; session: string }> = [];
   type Send = (event: Json) => void;
   const chatTurn = async (session: string, send: Send, prompt: string, sendDelivery: string | null) => {
     const turn = { session, sendDelivery, steers: [] as string[], aborted: false }; // steers holds delivery ids
@@ -183,7 +184,10 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
     if (delivery) { deliveries.set(delivery, accepted); statuses.set(delivery, "queued"); }
     const persistHistory = () => { if (delivery && method === "send") statuses.set(delivery, "delivered"); histories[active] = [...(histories[active] ?? []), { id: `sent-${sent.length}`, role: "user", content: [text(value)], ...(delivery ? { delivery_id: delivery } : {}), tool_result: null }]; };
     if (echo) { persistHistory(); emitEcho(); } else { withheldHistory.push(persistHistory); withheldEchoes.push(emitEcho); }
-    if (method === "steer") { if (delivery) chat?.steers.push(delivery); return { result: accepted }; }
+    if (method === "steer") {
+      if (delivery) chat ? chat.steers.push(delivery) : externalSteers.push({ id: delivery, session: active });
+      return { result: accepted };
+    }
     // After the reply, as zeta starts the turn once the send is persisted.
     queueMicrotask(() => void chatTurn(active, send, value, delivery));
     return { result: accepted };
@@ -213,7 +217,17 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
     flushEchoes() { this.persistWithheldHistory(); withheldEchoes.splice(0).forEach((send) => send()); },
     get history() { return histories[ACTIVE] ?? []; },
     get aborts() { return aborts; },
+    finishExternalTurn(session: string) {
+      for (const steer of externalSteers.splice(0).filter((steer) => steer.session === session)) {
+        statuses.set(steer.id, "dropped");
+        histories[session]!.push({ id: `delivery-${steer.id}`, role: "system", event: "delivery_status", delivery_id: steer.id, method: "steer", status: "dropped", content: [text("steer dropped: turn_end")], reason: "turn_end" });
+      }
+    },
     disconnect() {
+      for (const steer of externalSteers.splice(0)) {
+        statuses.set(steer.id, "dropped");
+        histories[steer.session]!.push({ id: `delivery-${steer.id}`, role: "system", event: "delivery_status", delivery_id: steer.id, method: "steer", status: "dropped", content: [text("steer dropped: disconnect")], reason: "disconnect" });
+      }
       if (!chat) return;
       for (const id of chat.steers) {
         statuses.set(id, "dropped");
@@ -434,7 +448,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
               approvalAborted = false;
               decide = (decision) => { decide = null; resolve(decision); };
             });
-            setTimeout(() => void liveTurn(send, ask, wait, () => { running = false; }, currentHistoryMode)(), 300);
+            setTimeout(() => void liveTurn(send, ask, wait, () => { composer.finishExternalTurn(ACTIVE); running = false; }, currentHistoryMode)(), 300);
           }
           return;
         }

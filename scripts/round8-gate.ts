@@ -25,9 +25,9 @@ async function fresh(browser: Awaited<ReturnType<typeof chromium.launch>>, width
   const page = await context.newPage();
   await page.goto(`${origin}/?theme=${theme}`);
   await page.locator('.dock form[data-part="composer"]').waitFor({ timeout: 15_000 });
-  if (!await page.getByRole("heading", { name: "new run" }).count()) {
+  if (!await page.getByRole("heading", { name: "untitled run" }).count()) {
     await page.locator("button.new-run").click();
-    await page.getByRole("heading", { name: "new run" }).waitFor();
+    await page.getByRole("heading", { name: "untitled run" }).waitFor();
   }
   await page.locator('button[aria-label^="model:"]').waitFor();
   return { context, page };

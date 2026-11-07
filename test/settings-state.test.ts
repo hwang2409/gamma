@@ -92,7 +92,7 @@ test("a settings change during a turn stays desired until the idle write", () =>
   expect(result.effects).toEqual([{ type: "set-settings", runId: session, operationId: operation("idle-write"), settings: { model: "next-model", approval_mode: "allow" } }]);
 });
 
-test("late default resolution keeps the model chosen during the active turn", () => {
+test("regression guard: late default resolution keeps the model chosen during the active turn", () => {
   const store = createRunStateStore(8, undefined, undefined, { id: "entry" as EntryId, run: session });
   const effects: unknown[] = [];
   store.setEffectExecutor((next) => effects.push(...next));
