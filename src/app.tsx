@@ -29,22 +29,21 @@ function ZetaApproval({ id }: { id: string }) {
   return <Approval id={id} onApprove={decide?.approve} onDeny={decide?.deny} disabledReason={decide?.disabledReason} />;
 }
 // The intents of steers a stop dropped: zeta never gave them to the agent, so their rows must not look delivered.
-const Undelivered = createContext<ReadonlySet<string>>(new Set());
-const WaitingDeliveries = createContext<ReadonlySet<string>>(new Set());
+const DeliveryStates = createContext<ReadonlyMap<string, import("./run-state").PendingDelivery>>(new Map());
 const ResendDelivery = createContext<((intent: string) => void) | null>(null);
 function UserRow({ id }: { id: string }) {
   const intent = useItemSelector(id, (item) => (item?.type === "user" && item.event.type === "user_message" ? item.event.intent : undefined));
   const delivery = useItemSelector(id, (item) => (item?.type === "user" && item.event.type === "user_message" ? item.event.delivery_id : undefined));
-  const undelivered = useContext(Undelivered);
-  const waitingDeliveries = useContext(WaitingDeliveries);
+  const deliveries = useContext(DeliveryStates);
   const resend = useContext(ResendDelivery);
   const identity = intent ?? delivery ?? (id.startsWith("user:intent:") ? id.slice("user:intent:".length) : id.startsWith("user:delivery:") ? id.slice("user:delivery:".length) : "");
-  const lost = undelivered.has(identity);
-  const waiting = waitingDeliveries.has(identity) && !lost;
+  const state = deliveries.get(identity)?.state;
+  const lost = state === "dropped";
+  const waiting = state === "requesting" || state === "queued" || state === "retrying";
   return (
     <>
       <Fallback id={id} />
-      {waiting ? <p className="queued-delivery" role="status" aria-label="message queued">queued</p> : null}
+      {waiting ? <p className="queued-delivery" role="status" aria-label={`message ${state}`}>{state}</p> : null}
       <p className="undelivered" data-empty={!lost || undefined} data-reserve={identity || undefined} data-user-id={id} role={lost ? "note" : undefined} aria-hidden={!lost || undefined}>{lost ? <>not delivered · the stop ended the turn before zeta took this steer {resend ? <button type="button" className="ghost" onClick={() => resend(identity)}>resend</button> : null}</> : "\u00a0"}</p>
     </>
   );
@@ -180,13 +179,10 @@ export function App() {
   const viewerOpener = useRef<HTMLElement | null>(null);
   const openViewer = useCallback((block: any) => { viewerOpener.current = document.activeElement as HTMLElement | null; setViewer(block); }, []);
   const closeViewer = useCallback(() => { setViewer(null); requestAnimationFrame(() => viewerOpener.current?.focus()); }, []);
-  const deliveries = useMemo(() => createDeliveryManager(() => connection.client), [connection]);
-  const deliveryVersion = useSyncExternalStore(deliveries.subscribe, () => { const marks = deliveries.marks(runState.canonical(browserEntry.run)); return `${marks.waiting.size}:${marks.undelivered.size}`; });
-  void deliveryVersion;
-  const deliveryMarks = deliveries.marks(runState.canonical(browserEntry.run));
-  // Context values must change identity when the manager mutates its internal sets.
-  const undelivered = new Set(deliveryMarks.undelivered);
-  const waitingDeliveries = new Set(deliveryMarks.waiting);
+  const connectionRef = useRef(connection);
+  connectionRef.current = connection;
+  const deliveries = useMemo(() => createDeliveryManager(() => connectionRef.current.client, runState), [runState]);
+  const deliveryStates = selectedRecord.deliveries;
   useEffect(() => {
     deliveries.observeActive(view.active, state.phase === "connected");
     if (state.phase === "connected" && view.attached) void deliveries.reconcile(view.attached);
@@ -217,9 +213,8 @@ export function App() {
     <HighlightContext value={highlight}>
       <ApprovalModeContext value={{ yolo, setYolo }}>
         <RunProvider store={store} highlight={highlight} onRetry={client && open ? () => client.retrySession(open.id) : undefined}>
-          <Undelivered value={undelivered}>
+          <DeliveryStates value={deliveryStates}>
           <RetryTurn value={retryTurn}>
-            <WaitingDeliveries value={waitingDeliveries}>
             <ResendDelivery value={(intent) => void deliveries.resend(browserEntry.run, intent)}>
             <div className="app">
               <header className="topbar">
@@ -235,14 +230,13 @@ export function App() {
               <main className="main">
                 {landedNotice ? <div className="landed-notice" role="status">your message started run {landedNotice.runId} <button type="button" className="ghost" onClick={() => { runState.dismissNotice(); selectRun(landedNotice.runId); }}>open</button><button type="button" className="ghost" onClick={() => runState.dismissNotice()}>dismiss</button></div> : null}
                 <Body state={state} view={view} connection={connection} runs={runs} onNewRun={newRun} onSelectRun={selectRun} />
-                <Dock key={browserEntry.run} runId={browserEntry.run} runState={runState} onCreated={onCreated} deliveries={deliveries} pendingDelivery={waitingDeliveries.size > 0} state={state} view={view} connection={connection} runs={runs} vim={vim} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />
+                <Dock key={browserEntry.run} runId={browserEntry.run} runState={runState} onCreated={onCreated} deliveries={deliveries} state={state} view={view} connection={connection} runs={runs} vim={vim} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />
                 {viewer ? <Inspector value={viewer} onClose={closeViewer} /> : null}
               </main>
             </div>
             </ResendDelivery>
-            </WaitingDeliveries>
           </RetryTurn>
-          </Undelivered>
+          </DeliveryStates>
         </RunProvider>
       </ApprovalModeContext>
     </HighlightContext>
@@ -387,8 +381,8 @@ function dockBlockedReason(state: ConnectionState, present: RunState, open: Open
   return present.opening || open?.stale ? "sending is paused until the run opens" : null;
 }
 
-function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, runState, runId, onCreated, deliveries, pendingDelivery }: {
-  state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; vim: boolean; onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>; onImageOpen(block: any): void; runState: RunStateStore; runId: string; onCreated(from: string, sessionId: string): void; deliveries: DeliveryManager; pendingDelivery: boolean;
+function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, runState, runId, onCreated, deliveries }: {
+  state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; vim: boolean; onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>; onImageOpen(block: any): void; runState: RunStateStore; runId: string; onCreated(from: string, sessionId: string): void; deliveries: DeliveryManager;
 }) {
   const present = view;
   const open = present.open;
@@ -401,6 +395,7 @@ function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, ru
   useEffect(() => { deliveries.bind(runId, open?.lease.store); }, [deliveries, runId, open?.lease.store]);
   const record = useSyncExternalStore(runState.subscribe, () => runState.get(runId));
   const starting = record.lifecycle.kind === "creating";
+  const pendingDelivery = [...record.deliveries.values()].some((delivery) => delivery.state !== "dropped");
 
   const onSubmit: Submit = useCallback(async (text, images, { steer, deliveryId }) => {
     if (runId.startsWith("draft:")) runState.dispatch({ type: "FIRST_SEND", runId: runId as DraftRunId, operationId: crypto.randomUUID() as import("./run-state").OperationId });

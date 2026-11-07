@@ -159,7 +159,7 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
     // serve-protocol.md:469-475: terminal steer outcomes are durable session_history rows.
     for (const id of turn.steers) {
       statuses.set(id, "dropped");
-      histories[session]!.push({ id: `delivery-${id}`, role: "system", event: "delivery_status", delivery_id: id, method: "steer", status: "dropped" });
+      histories[session]!.push({ id: `delivery-${id}`, role: "system", event: "delivery_status", delivery_id: id, method: "steer", status: "dropped", content: [text("steer dropped: abort")], reason: "abort" });
     }
     e("turn_end", { data: { turn: sent.length } });
     chat = null;
@@ -194,7 +194,7 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
     if (turn.sendDelivery) statuses.set(turn.sendDelivery, "delivered");
     for (const id of turn.steers) {
       statuses.set(id, "dropped");
-      histories[turn.session]!.push({ id: `delivery-${id}`, role: "system", event: "delivery_status", delivery_id: id, method: "steer", status: "dropped" });
+      histories[turn.session]!.push({ id: `delivery-${id}`, role: "system", event: "delivery_status", delivery_id: id, method: "steer", status: "dropped", content: [text("steer dropped: abort")], reason: "abort" });
     }
     chat = null;
     running.set(false);
@@ -217,7 +217,7 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
       if (!chat) return;
       for (const id of chat.steers) {
         statuses.set(id, "dropped");
-        histories[chat.session]!.push({ id: `delivery-${id}`, role: "system", event: "delivery_status", delivery_id: id, method: "steer", status: "dropped" });
+        histories[chat.session]!.push({ id: `delivery-${id}`, role: "system", event: "delivery_status", delivery_id: id, method: "steer", status: "dropped", content: [text("steer dropped: abort")], reason: "abort" });
       }
       chat.aborted = true; chat = null; running.set(false);
     },
@@ -285,7 +285,10 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   const composer = composerMethods(wait, { get: () => running, set: (value) => { running = value; } });
   let serialTail = Promise.resolve<unknown>(undefined);
   const delayCalls = new Map<string, number>();
+  const nextDelays = new Map<string, number[]>();
   const requestDelay = (method: string) => {
+    const queued = nextDelays.get(method)?.shift();
+    if (queued !== undefined) return queued;
     const configured = serialDelays?.[method] ?? 0;
     if (typeof configured === "number") return configured;
     const call = delayCalls.get(method) ?? 0;
@@ -495,6 +498,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     setSettingsEnabled(value: boolean) { settingsEnabled = value; },
     setNewSessionSettings(value: boolean) { advertiseNewSessionSettings = value; },
     setOpenDelay(ms: number) { openDelay = ms; },
+    delayNext(method: string, ms: number) { nextDelays.set(method, [...(nextDelays.get(method) ?? []), ms]); },
     /** `true`: new_session fails the way real zeta does while a turn runs (`require_idle`). */
     setRejectCreate(next: boolean) { rejectCreate = next; },
     setHistoryMode(next: HistoryMode) { currentHistoryMode = next; },

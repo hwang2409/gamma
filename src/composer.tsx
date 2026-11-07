@@ -159,11 +159,11 @@ function useSubmission(state: ComposerState, blocked: boolean, onSubmit: Submit,
     const sent = draft.text;
     const sentImages = attachments.current.current;
     const deliveryId = `web-${crypto.randomUUID()}`;
-    store.beginDelivery(runId, { id: deliveryId, method: sentImages.length ? "send_images" : steer ? "steer" : "send", text: sent, images: sentImages });
+    if (sentImages.length) store.beginDelivery(runId, { id: deliveryId, attemptId: deliveryId, method: "send_images", text: sent, images: sentImages });
     setError(undefined);
     attempt(() => onSubmit(sent, sentImages, { steer, deliveryId })).then(
-      () => store.settleDelivery(runIdRef.current, deliveryId, "accepted"),
-      (failure: unknown) => { store.settleDelivery(runIdRef.current, deliveryId, "rejected"); setError(`could not ${steer ? "steer" : "send"}: ${errorText(failure)}`); },
+      () => { if (sentImages.length) store.settleDelivery(runIdRef.current, deliveryId, "accepted"); },
+      (failure: unknown) => { if (sentImages.length) store.settleDelivery(runIdRef.current, deliveryId, "rejected"); setError(`could not ${steer ? "steer" : "send"}: ${errorText(failure)}`); },
     ).finally(() => { inFlight.current.submit = false; });
   };
   const stop = () => {
