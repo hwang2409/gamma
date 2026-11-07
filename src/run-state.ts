@@ -14,7 +14,7 @@ export type RunModel =
   | { choice: "explicit"; model: string; resolvedDefault?: string };
 export type RunSettingsState =
   | { kind: "unknown"; desired?: { model?: string; approval_mode?: "ask" | "allow" } }
-  | { kind: "loading"; operationId: OperationId }
+  | { kind: "loading"; operationId: OperationId; desired?: { model?: string; approval_mode?: "ask" | "allow" } }
   | { kind: "ready"; model?: string; approval_mode?: "ask" | "allow"; desired?: { model?: string; approval_mode?: "ask" | "allow" } }
   | { kind: "failed"; error: string };
 export type RunLifecycle =
@@ -42,6 +42,7 @@ export type WorkspaceState = {
   readonly runs: ReadonlyMap<RunId, RunRecord>;
   readonly aliases: ReadonlyMap<DraftRunId, SessionId>;
   readonly attachment: AttachmentState;
+  readonly notice?: { runId: SessionId };
 };
 export type WorkspaceEffect =
   | { type: "history-push" | "history-replace-current"; entryId: EntryId; runId: RunId }
@@ -60,6 +61,7 @@ export type WorkspaceEvent =
   | { type: "PROMOTE"; runId: DraftRunId; sessionId: SessionId }
   | { type: "MODEL_SET"; runId: RunId; model: RunModel }
   | { type: "APPROVAL_MODE_SET"; runId: RunId; approval_mode: "ask" | "allow" }
+  | { type: "DISMISS_NOTICE" }
   | { type: "NEW_RUN"; entryId: EntryId; runId: DraftRunId }
   | { type: "NAVIGATED"; entryId: EntryId; runId: RunId }
   | { type: "FIRST_SEND"; runId: DraftRunId; operationId: OperationId }
@@ -92,6 +94,7 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
   let aliases = new Map(state.aliases);
   let entry = state.entry;
   let attachment = state.attachment;
+  let notice = state.notice;
   const effects: WorkspaceEffect[] = [];
   const update = (id: RunId, change: (record: RunRecord) => RunRecord) => {
     const target = canonical({ ...state, aliases }, id);
@@ -102,9 +105,10 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     case "COMPOSER_EDIT": update(event.runId, (record) => ({ ...record, text: event.text ?? record.text, attachments: event.attachments ?? record.attachments })); break;
     case "REMOVE_ATTACHMENT": update(event.runId, (record) => ({ ...record, attachments: record.attachments.filter((_, index) => index !== event.index) })); break;
     case "DELIVERY_SETTLE": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); const delivery = deliveries.get(event.intentId); deliveries.delete(event.intentId); if (!delivery || !event.accepted) return { ...record, deliveries }; return { ...record, text: record.text.startsWith(delivery.text) ? record.text.slice(delivery.text.length) : record.text, attachments: record.attachments.filter((image) => !delivery.images.includes(image)), deliveries }; }); break;
-    case "PROMOTE": { const source = runs.get(event.runId) ?? blank(event.runId); const target = runs.get(event.sessionId); runs.delete(event.runId); runs.set(event.sessionId, target && (target.text || target.attachments.length || target.deliveries.size) ? target : { ...source, id: event.sessionId, lifecycle: { kind: "opening" } }); aliases.set(event.runId, event.sessionId); if (entry.run === event.runId) entry = { ...entry, run: event.sessionId }; break; }
+    case "PROMOTE": { const source = runs.get(event.runId) ?? blank(event.runId); const target = runs.get(event.sessionId); runs.delete(event.runId); runs.set(event.sessionId, target && (target.text || target.attachments.length || target.deliveries.size) ? target : { ...source, id: event.sessionId, lifecycle: { kind: "opening" } }); aliases.set(event.runId, event.sessionId); if (entry.run === event.runId) entry = { ...entry, run: event.sessionId }; else notice = { runId: event.sessionId }; break; }
     case "MODEL_SET": update(event.runId, (record) => ({ ...record, model: event.model })); break;
     case "APPROVAL_MODE_SET": update(event.runId, (record) => ({ ...record, settings: record.settings.kind === "ready" ? { ...record.settings, approval_mode: event.approval_mode } : { kind: "ready", approval_mode: event.approval_mode } })); break;
+    case "DISMISS_NOTICE": notice = undefined; break;
     case "NEW_RUN":
       runs.set(event.runId, blank(event.runId)); entry = { id: event.entryId, run: event.runId };
       effects.push({ type: "history-push", entryId: event.entryId, runId: event.runId }); break;
@@ -131,7 +135,7 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
       break;
     case "RESUME_OK":
       if (attachment.kind === "attached" && attachment.turn !== "idle" && attachment.sessionId !== event.runId) break;
-      attachment = { kind: "attached", sessionId: event.runId, turn: "idle" }; update(event.runId, (record) => ({ ...record, lifecycle: { kind: "opening", operationId: event.operationId }, settings: { kind: "loading", operationId: event.operationId } })); effects.push({ type: "load-settings", runId: event.runId, operationId: event.operationId });
+      attachment = { kind: "attached", sessionId: event.runId, turn: "idle" }; update(event.runId, (record) => ({ ...record, lifecycle: { kind: "opening", operationId: event.operationId }, settings: { kind: "loading", operationId: event.operationId, ...(record.settings.kind === "unknown" && record.settings.desired ? { desired: record.settings.desired } : {}) } })); effects.push({ type: "load-settings", runId: event.runId, operationId: event.operationId });
       for (const intentId of runs.get(event.runId)?.deliveries.keys() ?? []) effects.push({ type: "delivery-status", runId: event.runId, operationId: crypto.randomUUID() as OperationId, intentId }); break;
     case "RESUME_BUSY": update(event.runId, (record) => ({ ...record, lifecycle: { kind: "opening", operationId: event.operationId, waitingForIdle: event.owner } })); break;
     case "RESUME_FAIL": update(event.runId, (record) => operationMatches(record, event.operationId) ? { ...record, lifecycle: { kind: "failed", error: event.error } } : record); break;
@@ -148,10 +152,10 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
       effects.push({ type: "status" });
       if (attachment.kind === "disconnected" && attachment.lastAttached) for (const intentId of runs.get(attachment.lastAttached)?.deliveries.keys() ?? []) effects.push({ type: "delivery-status", runId: attachment.lastAttached, operationId: crypto.randomUUID() as OperationId, intentId });
       break;
-    case "SETTINGS_OK": update(event.runId, (record) => record.settings.kind === "loading" && record.settings.operationId !== event.operationId ? record : { ...record, settings: { kind: "ready", model: record.settings.kind === "unknown" ? record.settings.desired?.model ?? event.model : event.model, approval_mode: record.settings.kind === "unknown" ? record.settings.desired?.approval_mode ?? event.approval_mode : event.approval_mode } }); break;
+    case "SETTINGS_OK": update(event.runId, (record) => record.settings.kind === "loading" && record.settings.operationId !== event.operationId ? record : { ...record, settings: { kind: "ready", model: (record.settings.kind === "unknown" || record.settings.kind === "loading") ? record.settings.desired?.model ?? event.model : event.model, approval_mode: (record.settings.kind === "unknown" || record.settings.kind === "loading") ? record.settings.desired?.approval_mode ?? event.approval_mode : event.approval_mode } }); break;
     case "SETTINGS_FAIL": update(event.runId, (record) => record.settings.kind === "loading" && record.settings.operationId !== event.operationId ? record : { ...record, settings: { kind: "failed", error: event.error } }); break;
   }
-  return { state: { entry, runs, aliases, attachment }, effects };
+  return { state: { entry, runs, aliases, attachment, ...(notice ? { notice } : {}) }, effects };
 }
 
 export const selectedRun = (state: WorkspaceState) => state.runs.get(canonical(state, state.entry.run));
@@ -185,6 +189,7 @@ export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefi
   const facade = {
     canonical(id: string) { return key(id); },
     get(id: string) { return value(id); },
+    getNotice() { return state.notice ?? null; },
     dispatch,
     subscribe(listener: () => void) { listeners.add(listener); return () => listeners.delete(listener); },
     activate(id: string, initialModel: RunModel = { choice: "default" }) { active = key(id); dispatch({ type: "ENSURE_RUN", runId: active, model: initialModel, text: drafts[active] }); evict(); },
@@ -195,6 +200,7 @@ export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefi
     promote(from: string, to: string) { if (from === to) return; dispatch({ type: "PROMOTE", runId: from as DraftRunId, sessionId: to as SessionId }); if (drafts[from]) { drafts[to] = drafts[from]; delete drafts[from]; queueDraft(to, drafts[to]!); } if (active === from) active = to as SessionId; },
     setModel(id: string, model: RunModel) { dispatch({ type: "MODEL_SET", runId: key(id), model }); },
     setApprovalMode(id: string, approval_mode: "ask" | "allow") { dispatch({ type: "APPROVAL_MODE_SET", runId: key(id), approval_mode }); },
+    dismissNotice() { dispatch({ type: "DISMISS_NOTICE" }); },
     resolveDefault(id: string, currentModel: string, createdWithDefault: boolean) { const persisted = defaults[id]; if (persisted) return facade.setModel(id, currentModel === persisted ? { choice: "default", resolvedDefault: persisted } : { choice: "explicit", model: currentModel, resolvedDefault: persisted }); if (createdWithDefault) { persistDefault(id, currentModel); return facade.setModel(id, { choice: "default", resolvedDefault: currentModel }); } facade.setModel(id, { choice: "explicit", model: currentModel }); },
     dispose() { if (persistTimer) { clearTimeout(persistTimer); persistDrafts(); } state.runs.forEach((record) => revoke(record.attachments)); state = { ...state, runs: new Map(), aliases: new Map() }; listeners.clear(); },
   };

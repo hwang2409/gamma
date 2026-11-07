@@ -43,7 +43,7 @@ function UserRow({ id }: { id: string }) {
   const waiting = waitingDeliveries.has(identity) && !lost;
   return (
     <>
-      <Fallback id={id} />
+      <Message id={id} markdown={RichMarkdown} />
       {waiting ? <p className="queued-delivery" role="status" aria-label="message queued">queued</p> : null}
       <p className="undelivered" data-empty={!lost || undefined} data-reserve={identity || undefined} data-user-id={id} role={lost ? "note" : undefined} aria-hidden={!lost || undefined}>{lost ? <>not delivered · the stop ended the turn before zeta took this steer {resend ? <button type="button" className="ghost" onClick={() => resend(identity)}>resend</button> : null}</> : "\u00a0"}</p>
     </>
@@ -174,6 +174,7 @@ export function App() {
   const blank = useMemo(() => createRunStore(), [epoch]);
   const store = open?.lease.store ?? blank;
   const selectedRecord = useSyncExternalStore(runState.subscribe, () => runState.get(browserEntry.run));
+  const landedNotice = useSyncExternalStore(runState.subscribe, runState.getNotice);
   const yolo = selectedRecord.settings.kind === "ready" && selectedRecord.settings.approval_mode === "allow";
   const setYolo = useCallback((value: boolean) => runState.setApprovalMode(browserEntry.run, value ? "allow" : "ask"), [browserEntry.run, runState]);
   const [retryTurn, setRetryTurn] = useState<(() => void) | null>(null);
@@ -233,6 +234,7 @@ export function App() {
                 </SettingsMenu>
               </header>
               <main className="main">
+                {landedNotice ? <div className="landed-notice" role="status">your message started run {landedNotice.runId} <button type="button" className="ghost" onClick={() => { runState.dismissNotice(); selectRun(landedNotice.runId); }}>open</button><button type="button" className="ghost" onClick={() => runState.dismissNotice()}>dismiss</button></div> : null}
                 <Body state={state} view={view} connection={connection} runs={runs} onNewRun={newRun} onSelectRun={selectRun} />
                 <Dock key={browserEntry.run} runId={browserEntry.run} runState={runState} onCreated={onCreated} deliveries={deliveries} pendingDelivery={waitingDeliveries.size > 0} state={state} view={view} connection={connection} runs={runs} vim={vim} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />
                 {viewer ? <Inspector value={viewer} onClose={closeViewer} /> : null}

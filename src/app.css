@@ -82,6 +82,8 @@ button:active:not(:disabled) { transform: scale(0.97); }
 
 .note { width: min(var(--measure), calc(100% - 2 * var(--gutter))); margin-inline: auto; padding: 8px var(--gutter); color: var(--fulcrum-muted); font-size: 12px; }
 .note[data-tone="danger"] { border-left: var(--rail) solid var(--fulcrum-danger); color: var(--fulcrum-fg); }
+.landed-notice { width: min(var(--measure), calc(100% - 2 * var(--gutter))); margin-inline: auto; padding: 8px var(--gutter); border-bottom: 1px solid var(--fulcrum-border); color: var(--fulcrum-fg); font-size: 12px; }
+.landed-notice .ghost { min-height: var(--control); margin-left: 8px; padding-inline: 8px; }
 
 /* Theme picker: a listbox under its button in the settings popover. */
 .theme-picker { position: relative; }
