@@ -35,6 +35,9 @@ const seeded = [
   meta("s-untitled", 60 * 24 * 40),
 ];
 
+// Opaque command inputs by id. Zeta echoes an opaque input's display_text, the typed command line, as the user
+// message (zeta dcc4ce9 src/zeta/core/slash.py:754 display_text=value; src/zeta/server/delivery.py:107-108).
+const opaqueInputs = new Map<string, string>();
 const text = (value: string) => ({ type: "text", text: value });
 const toolUse = (id: string, name: string, args: Json = {}) => ({ type: "tool_use", tool_call: { id, name, arguments: args } });
 // History keeps a result's text only; bash's is "stdout:\n" + stdout + "\nstderr:\n" + stderr (zeta src/zeta/tools/bash).
@@ -180,7 +183,7 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
     if (!active) return { error: { code: -32003, message: "no active session" } };
     if (method === "send" && running.get()) return { error: { code: -32004, message: "a turn is already running" } };
     if (method === "steer" && !running.get()) return { error: { code: -32005, message: "no turn is running for steering" } };
-    const value = params.input_id === "opaque-review-input" ? "$review" : String(params.text ?? "");
+    const value = typeof params.input_id === "string" ? opaqueInputs.get(params.input_id) ?? "" : String(params.text ?? "");
     sent.push({ method, text: value, delivery_id: delivery });
     const userMessage = { event: "user_message", session_id: active, text: value, mode: method, attachments: images.map((image) => ({ name: image.name, mime_type: image.mime_type, size: Math.floor(String(image.data).length * 3 / 4) })), ...(delivery ? { delivery_id: delivery } : {}) };
     const emitEcho = () => send(userMessage);
@@ -473,7 +476,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         if (method === "slash_run") {
           const command = String(params.text ?? "").trim();
           if (command === "/status") return reply({ result: { kind: "output", text: longStatus ? `fake status\nready\n${Array.from({ length: 80 }, (_, index) => `status detail ${index + 1}`).join("\n")}` : "fake status\nready" } });
-          if (command === "/review") return reply({ result: { kind: "model_input", input_id: "opaque-review-input", display_text: "$review" } });
+          if (command === "/review" || command.startsWith("/review ")) { opaqueInputs.set("opaque-review-input", command); return reply({ result: { kind: "model_input", input_id: "opaque-review-input", display_text: command } }); }
           if (command === "/malformed") return reply({ result: { unexpected: true } });
           if (command === "/legacy-output") return reply({ result: { kind: "text", text: "legacy output" } });
           if (command === "/mcp" || command === "/mcp status") return reply({ result: { kind: "output", text: "mcp: 0 mounted, 0 failed\nmcp limits: deadline 300s | wire 67108864 bytes | spill 262144 bytes" } });

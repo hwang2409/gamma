@@ -162,7 +162,7 @@ try {
       const sends = calls.filter((request) => request.method === "send");
       if (calls.filter((request) => request.method === "slash_run").length !== 1 || sends.length !== 1) throw new Error(`expected one prepare and one send, got ${calls.map((call) => call.method)}`);
       if (sends[0]?.params.input_id !== "opaque-review-input" || "text" in (sends[0]?.params ?? {})) throw new Error("opaque send used the wrong shape");
-      if (fake.sent.at(-1)?.text !== "$review") throw new Error("opaque send did not keep its display text for the user row");
+      if (fake.sent.at(-1)?.text !== "/review") throw new Error("opaque send did not keep its display text for the user row");
       if ((await page.locator("body").innerText()).includes("opaque-review-input")) throw new Error("opaque id reached visible text");
       await page.getByRole("button", { name: "stop" }).waitFor({ timeout: 15_000 });
     });
@@ -200,6 +200,22 @@ try {
     });
     await page.getByRole("button", { name: "stop" }).click();
     await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
+
+    await check("retry after a failed opaque turn restores the command instead of sending its text", async () => {
+      await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
+      const start = fake.requests.length;
+      await submit(page, "/review fail this turn");
+      const retry = page.locator(".turn-retry");
+      await retry.waitFor({ timeout: 15_000 }).catch(async () => { throw new Error(`failed opaque turn showed no retry; body=${await page.locator("body").innerText()}`); });
+      const before = fake.requests.length;
+      await retry.click();
+      await page.waitForTimeout(500);
+      const textSends = fake.requests.slice(start).filter((request) => request.method === "send" && "text" in request.params);
+      if (textSends.length) throw new Error(`retry sent slash text: ${JSON.stringify(textSends.map((request) => request.params.text))}`);
+      if (fake.requests.slice(before).some((request) => ["send", "steer", "send_images", "slash_run"].includes(request.method))) throw new Error("retry reached zeta without the user submitting");
+      if ((await field(page).inputValue()).trim() !== "/review fail this turn") throw new Error(`retry did not restore the command draft: ${JSON.stringify(await field(page).inputValue())}`);
+      await field(page).fill("");
+    });
 
     await field(page).waitFor();
     await check("active turn blocks slash_run and retains the slash draft", async () => {

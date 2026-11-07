@@ -6,7 +6,8 @@ import { chromium, type Browser } from "playwright";
 import { createClient, webSocketTransport } from "@fulcrum/zeta";
 import { OwnedResources } from "./owned-resources";
 
-const gamma = "/Users/henry/me/fun/gamma/.worktrees/parity-g3";
+// This checkout, from the script location, so the gate runs from any gamma worktree or main.
+const gamma = new URL("..", import.meta.url).pathname;
 const zeta = "/Users/henry/me/fun/zeta";
 const requiredWorktree = `${zeta}/.worktrees/parity-g3-proof`;
 const worktree = process.env.ZETA_PROOF_WORKTREE;

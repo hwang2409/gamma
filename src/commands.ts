@@ -122,11 +122,9 @@ export function createCommandController(
   }
 
   async function prepareComposerInput(text: string): Promise<ComposerAction> {
-    // Zeta tests/test_slash.py:1126-1133: // sends one literal leading slash.
-    if (text.startsWith("//")) return { kind: "send", text: text.slice(1) };
-    const normalized = text.trimStart();
-    if (!normalized.startsWith("/")) return { kind: "send", text };
+    if (!isSlashCommandText(text)) return directSend(text);
     if (!capabilities.requests.has("slash_run")) return unavailableReceipt();
+    const normalized = text.trimStart();
     return slashAction(await runSlashCommand(client, sessionId, normalized), normalized);
   }
 
@@ -154,11 +152,20 @@ export function createCommandController(
   return { prepareComposerInput, completions, refreshCatalog };
 }
 
+/** True when text is a command for slash preparation: a first-token `/` that is not the `//` literal escape. */
+export function isSlashCommandText(text: string): boolean {
+  return !text.startsWith("//") && text.trimStart().startsWith("/");
+}
+
+function directSend(text: string): ComposerAction {
+  // Zeta tests/test_slash.py:1126-1133: // sends one literal leading slash.
+  return { kind: "send", text: text.startsWith("//") ? text.slice(1) : text };
+}
+
 export function createUnavailableCommandController(): CommandController {
   return {
     async prepareComposerInput(text) {
-      if (text.startsWith("//")) return { kind: "send", text: text.slice(1) };
-      return text.trimStart().startsWith("/") ? unavailableReceipt() : { kind: "send", text };
+      return isSlashCommandText(text) ? unavailableReceipt() : directSend(text);
     },
     async completions() { return []; },
     async refreshCatalog() {},

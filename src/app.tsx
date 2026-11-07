@@ -15,7 +15,7 @@ import { nextRunModel, RunSettings, SettingsMenu, useVimSetting, VimToggle } fro
 import { createRunStateStore, hasPendingDelivery, workspaceRunState, type DraftRunId, type EntryId, type RunId, type RunStateStore } from "./run-state";
 import { artifactContentUrl, hostBindings, useArtifacts } from "./host-client";
 import type { Artifact } from "./host/types";
-import { createCommandController, createUnavailableCommandController, type ClientActionName, type ComposerAction } from "./commands";
+import { createCommandController, createUnavailableCommandController, isSlashCommandText, type ClientActionName, type ComposerAction } from "./commands";
 import { createReceiptStore, type ReceiptStore } from "./receipts";
 
 const highlight = createHighlighter();
@@ -357,12 +357,19 @@ function DockComposer({ readOnly, blockedReason, running, vim, commands, onSubmi
 }
 
 
-function useDockRetry(agent: ReturnType<typeof useAgentPhase>, client: ZetaClient | null, deliveries: DeliveryManager, runId: string, lastPrompt: string | null, onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>) {
+/**
+ * Retry for a failed turn. Zeta echoes an opaque command's typed line (`/review x`) as the user message, so a slash-led
+ * prompt goes back into the draft for the preparation seam instead of reaching `send {text}`.
+ */
+function useDockRetry(agent: ReturnType<typeof useAgentPhase>, client: ZetaClient | null, deliveries: DeliveryManager, runState: RunStateStore, runId: string, lastPrompt: string | null, onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>) {
   const failed = agent.kind === "failed" && client && lastPrompt ? lastPrompt : null;
   useEffect(() => {
-    onRetryTurn(failed && client ? () => () => void deliveries.submit(runId, failed, false).catch(() => {}) : null);
+    const retry = failed && (isSlashCommandText(failed)
+      ? () => { runState.restoreDraft(runId, failed); document.querySelector<HTMLTextAreaElement>('.dock textarea[aria-label="message"]')?.focus(); }
+      : () => void deliveries.submit(runId, failed, false).catch(() => {}));
+    onRetryTurn(retry ? () => retry : null);
     return () => onRetryTurn(null);
-  }, [failed, client, deliveries, runId, onRetryTurn]);
+  }, [failed, deliveries, runState, runId, onRetryTurn]);
 }
 
 function dockReadOnlyReason(displayed: string | null, active: string | null) {
@@ -392,21 +399,6 @@ function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, ru
   const starting = record.lifecycle.kind === "creating";
   const pendingDelivery = hasPendingDelivery(record);
   const sessionId = blank || starting || view.attached !== open?.id ? null : open.id;
-  const choice = useMemo<{ model?: string; provider?: string }>(() => {
-    const preferred = record.model.choice === "explicit" ? record.model.model : undefined;
-    const local = nextRunModel();
-    return preferred ? { model: preferred, ...(local.model === preferred && local.provider ? { provider: local.provider } : {}) } : {};
-  }, [record.model]);
-  const ensureSession = useCallback(async () => {
-    const canonical = runState.canonical(runId);
-    if (!canonical.startsWith("draft:")) return canonical;
-    const target = connection.client;
-    if (!target) throw new Error("not connected to zeta serve");
-    const id = await runs.create(runId, choice.model && target.features.includes("new_session_settings") ? { ...choice, approval_mode: yolo ? "allow" : "ask" } : choice);
-    onCreated(runId, id);
-    if (!choice.model || !target.features.includes("new_session_settings")) await deliveries.changeSettings(id, { ...(choice.model ? { model: choice.model } : {}), approval_mode: yolo ? "allow" : "ask" });
-    return id;
-  }, [choice, connection, deliveries, onCreated, runId, runState, runs, yolo]);
   const commands = useMemo(() => client && sessionId
     ? createCommandController(sessionId, (method, params) => client.request(method, params), { features: new Set(client.features), requests: commandRequests(client) })
     : createUnavailableCommandController(), [client, sessionId]);
@@ -428,7 +420,7 @@ function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, ru
       return;
     }
     if (action.kind === "send-input") {
-      const id = await ensureSession();
+      const id = runState.canonical(runId);
       const result = await deliveries.submitOpaque(id, action.inputId, action.displayText, sourceText, deliveryId);
       if (images.length) receipts.set(runState.canonical(id), { text: "attachments are still attached and were not sent.", tone: "quiet" });
       onAccepted();
@@ -438,14 +430,17 @@ function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, ru
       const current = runState.get(runId).text;
       if (current.startsWith(sourceText)) runState.edit(runId, { text: action.text + current.slice(sourceText.length) });
     }
+    const preferred = record.model.choice === "explicit" ? record.model.model : undefined;
+    const local = nextRunModel();
+    const choice = preferred ? { model: preferred, ...(local.model === preferred && local.provider ? { provider: local.provider } : {}) } : {};
     const result = await submitRun({ text: action.text, images, steer, deliveryId, connection, runs, deliveries, choice, yolo, runId, onCreated });
     onAccepted();
     return result;
-  }, [choice, connection, deliveries, ensureSession, onAccepted, onCreated, receipts, runId, runState, runs, yolo]);
+  }, [connection, deliveries, onAccepted, onCreated, receipts, record.model, runId, runState, runs, yolo]);
   const onStop = useCallback(async () => { await deliveries.stop(runId); await runs.refreshStatus(); }, [deliveries, runId, runs]);
   const lastPrompt = useLastPrompt();
 
-  useDockRetry(agent, client, deliveries, runId, lastPrompt, onRetryTurn);
+  useDockRetry(agent, client, deliveries, runState, runId, lastPrompt, onRetryTurn);
 
   const failure = present.openError;
   const problem = (state.phase !== "connected" && state.phase !== "connecting" && state.phase !== "dropped") || Boolean(failure);

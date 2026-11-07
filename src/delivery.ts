@@ -100,26 +100,28 @@ function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: Del
       if (settled) runs.dispatch({ type: "DELIVERY_STATUS", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, status: settled });
     } catch { /* A reconnect or later turn end queries durable truth again. */ }
   };
+  /** An opaque command input: exactly one `send {input_id}`, never resent after an uncertain outcome. */
+  const handleOpaqueDelivery = async (effect: Extract<WorkspaceEffect, { type: "deliver" }>, delivery: import("./run-state").PendingDelivery, target: ZetaClient | null) => {
+    const inputId = opaqueInputs.get(effect.operationId);
+    opaqueInputs.delete(effect.operationId);
+    if (!target || !inputId) { const error = unavailable(); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, failed: true }); return finish(effect.operationId, error); }
+    try {
+      const result = await target.request("send", { input_id: inputId, ...(delivery.attemptId ? { delivery_id: delivery.attemptId } : {}) }, { timeoutMs: 15_000, intent: delivery.id }) as Accepted;
+      if (result.accepted === false) throw Object.assign(refusal(result), { code: -1 });
+      runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, queued: Boolean(delivery.attemptId) });
+      return finish(effect.operationId);
+    } catch (error) {
+      const uncertain = typeof code(error) !== "number";
+      if (!uncertain || !delivery.attemptId) runs.restoreDraft(effect.runId, delivery.text);
+      runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, ...(uncertain && delivery.attemptId ? { queued: true } : { failed: true }) });
+      return finish(effect.operationId, uncertain && !delivery.attemptId ? new Error("outcome unknown; this command was not retried") : error);
+    }
+  };
   const handleDelivery = async (effect: Extract<WorkspaceEffect, { type: "deliver" }>) => {
     const delivery = runs.get(effect.runId).deliveries.get(effect.intentId);
     if (!delivery || delivery.operationId !== effect.operationId) return;
     const target = client();
-    if (delivery.method === "opaque") {
-      const inputId = opaqueInputs.get(effect.operationId);
-      opaqueInputs.delete(effect.operationId);
-      if (!target || !inputId) { const error = unavailable(); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, failed: true }); return finish(effect.operationId, error); }
-      try {
-        const result = await target.request("send", { input_id: inputId, ...(delivery.attemptId ? { delivery_id: delivery.attemptId } : {}) }, { timeoutMs: 15_000, intent: delivery.id }) as Accepted;
-        if (result.accepted === false) throw Object.assign(refusal(result), { code: -1 });
-        runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, queued: Boolean(delivery.attemptId) });
-        return finish(effect.operationId);
-      } catch (error) {
-        const uncertain = typeof code(error) !== "number";
-        if (!uncertain || !delivery.attemptId) runs.restoreDraft(effect.runId, delivery.text);
-        runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, ...(uncertain && delivery.attemptId ? { queued: true } : { failed: true }) });
-        return finish(effect.operationId, uncertain && !delivery.attemptId ? new Error("outcome unknown; this command was not retried") : error);
-      }
-    }
+    if (delivery.method === "opaque") return handleOpaqueDelivery(effect, delivery, target);
     if (!target) { const error = unavailable(); if (delivery.state !== "retrying") runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, failed: true }); return finish(effect.operationId, error); }
     const attemptId = delivery.state === "retrying" ? `web-${crypto.randomUUID()}` : delivery.attemptId;
     try {
