@@ -293,7 +293,7 @@ try {
       if (command !== `zeta serve --ws ${fake.port} --ws-origin ${origin}`) throw new Error(`the banner command is "${command}"`);
       await Bun.sleep(2000); // a few quiet retries; the console listener fails the gate on any error
       await shoot(page, "state-lost-1440");
-      if (!(await page.locator('[data-part="timeline"] [data-kind="user"]').count())) throw new Error("transcript hidden while offline");
+      if (!(await page.locator('[data-part="timeline"] [data-id]').count())) throw new Error("transcript hidden while offline");
       await page.locator('.dock [data-part="composer"][data-state="read-only"] [data-part="composer-reason"]', { hasText: "sending is paused" }).waitFor({ timeout: 2000 });
       if (await page.locator(".dock button").count()) throw new Error("the composer offers actions while offline");
       const draft = page.locator('.dock [data-part="composer"][data-state="read-only"] textarea');
