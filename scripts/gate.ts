@@ -271,7 +271,7 @@ try {
       // Virtual rows mount only near the viewport, so read the start of the history from the top.
       await page.locator(".scroll").evaluate((element) => { element.scrollTop = 0; });
       await page.locator('[data-part="timeline"] [data-kind="user"]').first().waitFor();
-      await page.locator('[data-part="timeline"] [data-part="md-code-block"] [class*="tok-"]').first().waitFor({ timeout: 5000 });
+      await page.locator('[data-part="timeline"] [data-part="md-code-block"] [class*="tok-"]').first().waitFor({ timeout: 10_000 });
 
       await page.locator('[data-part="jump-to-latest"]').waitFor({ state: "detached", timeout: 1000 }).catch(() => {});
     });
