@@ -32,7 +32,6 @@ probe.stop(true);
 let server: ChildProcess | undefined;
 const startZeta = async () => {
   await rm(join(home, "run", "serve.ws.json"), { force: true });
-  // stderr carries the connect url with the token, so it is discarded, never printed.
   server = spawn(zeta, ["serve", "--ws", String(wsPort), "--ws-origin", origin], { env: { ...process.env, ZETA_HOME: home }, stdio: "ignore", detached: true });
   for (let i = 0; i < 100; i++) {
     if (await readFile(join(home, "run", "serve.ws.json"), "utf8").then(() => true, () => false)) return;
