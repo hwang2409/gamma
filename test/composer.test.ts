@@ -8,6 +8,12 @@ const storage = () => {
   return { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
 };
 
+test("unactivated snapshots stay referentially stable for React", () => {
+  const state = createRunStateStore(1, storage());
+  expect(state.get("draft:unmounted")).toBe(state.get("draft:unmounted"));
+  state.dispose();
+});
+
 test("run state preserves follow-up text when an old run accepts after navigation", () => {
   const store = createRunStateStore(1, storage());
   store.activate("run-a");
