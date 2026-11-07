@@ -124,6 +124,7 @@ try {
     await check("auth-and-stopped-read-only-reasons", async () => {
       const { context, page } = await fresh(browser, "/?run=s-reconnect");
       try {
+        await page.getByRole("log", { name: "run activity" }).waitFor();
         await fake.wrongToken(); fake.drop();
         await page.getByText(/controller credential refused/i).waitFor({ timeout: 10_000 });
         await page.screenshot({ path: join(shots, "auth-failed-reason-1440.png") });
