@@ -303,7 +303,7 @@ test("an active owner is reported as busy without a resume request", async () =>
 test("a busy server is reported as busy and the selection stays", async () => {
   let resumeCalls = 0;
   const fake = await server(handlers(null, { resume: () => { resumeCalls++; throw { code: -32004, message: "a turn is already running" }; } }));
-  const view = createSessions(source(fake.client));
+  const view = harness(source(fake.client));
   await tick();
   view.select("a");
   await waitFor(() => present(view).openError !== null);
