@@ -114,7 +114,7 @@ try {
           await page.screenshot({ path: join(shots, `b2-yolo-${theme}-${width}.png`) }); await page.keyboard.press("Escape");
           await send(page, "long turn for new run dialog");
           await waitUntil(() => fake.sent.length === 1, "the dialog turn did not reach zeta");
-          await page.locator('.dock [data-part="composer"][data-state="steer"]').waitFor();
+          await page.getByRole("button", { name: "steer the running turn" }).waitFor();
           await page.locator('button.new-run:not([disabled])').click();
           await page.locator(".empty-run").waitFor();
           if (!new URL(page.url()).searchParams.get("run")?.startsWith("draft:")) throw new Error("new run did not get a draft URL");
