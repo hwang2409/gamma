@@ -171,14 +171,18 @@ button:active:not(:disabled) { transform: scale(0.97); }
 /* Command results are run-local and stay separate from the transcript. */
 .command-receipt { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 6px; padding: 8px 10px; border: 1px solid var(--fulcrum-border); border-left: var(--rail) solid var(--fulcrum-muted); background: var(--fulcrum-bg); font-size: 12px; }
 .command-receipt[data-tone="error"] { border-left-color: var(--fulcrum-danger); color: var(--fulcrum-danger); }
+.command-receipt-label { flex: none; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
 .command-receipt-text { flex: 1; min-width: 0; max-height: min(10dvh, 80px); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .command-receipt .ghost { flex: none; min-width: 36px; min-height: 36px; }
 
 /* The composer: fulcrum's parts, plus gamma's tray, footer tools, and vim mode. */
 .dock [data-part="composer"] { position: relative; }
 .command-listbox { display: grid; max-height: min(32dvh, 260px); overflow-y: auto; border-bottom: 1px solid var(--fulcrum-border); background: var(--fulcrum-bg); }
-.dock .command-option { display: grid; grid-template-columns: minmax(10ch, auto) minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 40px; padding: 6px var(--inset); border: 0; border-left: var(--rail) solid transparent; background: transparent; color: var(--fulcrum-fg); text-align: left; }
-.dock .command-option[aria-selected="true"], .dock .command-option:hover { border-left-color: var(--fulcrum-accent); background: var(--fulcrum-surface); }
+.dock .command-option { display: grid; grid-template-columns: minmax(10ch, auto) minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 40px; padding: 6px var(--inset); border: 0; background: transparent; color: var(--fulcrum-fg); text-align: left; }
+/* Hover is a faint fill only; the active row, the one Enter or Tab accepts, has the surface fill, an accent bar, and full-color text. */
+.dock .command-option:hover { background: color-mix(in srgb, var(--fulcrum-surface) 50%, var(--fulcrum-bg)); }
+.dock .command-option[aria-selected="true"] { background: var(--fulcrum-surface); box-shadow: inset 4px 0 var(--fulcrum-accent); }
+.dock .command-option[aria-selected="true"] :is(.command-description, .command-source) { color: var(--fulcrum-fg); }
 .command-name { font-weight: 700; }
 .command-description { min-width: 0; overflow: hidden; color: var(--fulcrum-muted); text-overflow: ellipsis; white-space: nowrap; }
 .command-source { color: var(--fulcrum-muted); font-size: 11px; }

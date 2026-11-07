@@ -71,3 +71,30 @@ test("pointer acceptance uses the chosen row without changing focus itself", asy
   expect(model.choose(1)).toEqual({ value: "/story ", caret: 7 });
   expect(model.getSnapshot().open).toBe(false);
 });
+
+test("escape stays closed when a select event repeats the same one-shot input", async () => {
+  const model = await opened("/st");
+  expect(model.key("Escape")).toEqual({ handled: true });
+  model.select("/st", 3, 3);
+  await Promise.resolve();
+  expect(model.getSnapshot().open).toBe(false);
+  model.update("/sta", 4, 4);
+  await Promise.resolve();
+  expect(model.getSnapshot().open).toBe(true);
+});
+
+test("shift+tab and shift+enter keep their normal meaning and never accept", async () => {
+  for (const key of ["Tab", "Enter"]) {
+    const model = await opened("/st");
+    expect(model.key(key, false, true)).toEqual({ handled: false });
+    expect(model.getSnapshot().open).toBe(false);
+  }
+});
+
+test("a repeated select event keeps the active row", async () => {
+  const model = await opened("/st");
+  model.key("ArrowDown");
+  model.select("/st", 3, 3);
+  await Promise.resolve();
+  expect(model.getSnapshot()).toEqual({ open: true, rows, activeIndex: 1 });
+});

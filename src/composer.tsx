@@ -242,7 +242,7 @@ export function GammaComposer({ state, reason, blockedReason, vim: vimOn, comman
     requestAnimationFrame(() => { draft.input.current?.focus({ preventScroll: true }); draft.input.current?.setSelectionRange(accepted.caret, accepted.caret); });
   };
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    const choice = completions.key(event.key, event.nativeEvent.isComposing || event.keyCode === 229);
+    const choice = completions.key(event.key, event.nativeEvent.isComposing || event.keyCode === 229, event.shiftKey || event.altKey || event.ctrlKey || event.metaKey);
     if (choice.handled) { event.preventDefault(); applyCompletion(choice.accepted); return; }
     composerKeyDown(event, { steer: submission.steer, normal: draft.normal, vimOn, text: draft.text, vim: draft.vim, draft: draft.current, apply: draft.apply, submit: submission.submit, stop: submission.stop });
   };
@@ -256,7 +256,7 @@ export function GammaComposer({ state, reason, blockedReason, vim: vimOn, comman
 
   const message = submission.error ?? (submission.stopping ? "stopping" : submission.sending ? (submission.steer ? "steering" : "sending") : blockedReason ?? "");
   return <ComposerBody
-    field={{ id, state, vimOn, vim: draft.vim, text: draft.text, input: draft.input, completion, listboxId: `${id}-commands`, onKeyDown, onChange: (value, start, end) => { draft.setText(value); completions.update(value, start, end); }, onSelect: (value, start, end) => completions.update(value, start, end), onAccept: (index) => applyCompletion(completions.choose(index)) }}
+    field={{ id, state, vimOn, vim: draft.vim, text: draft.text, input: draft.input, completion, listboxId: `${id}-commands`, onKeyDown, onChange: (value, start, end) => { draft.setText(value); completions.update(value, start, end); }, onSelect: (value, start, end) => completions.select(value, start, end), onAccept: (index) => applyCompletion(completions.choose(index)) }}
     attachments={{ images: attachments.images, error: attachments.attachError, dragging: attachments.dragging, files: attachments.files, onPaste: attachments.onPaste, onImageOpen, onRemove: attachments.remove, onFiles: attachments.addFiles, setDragging: attachments.setDragging }}
     submission={{ steer: submission.steer, sending: submission.sending, stopping: submission.stopping, error: submission.error, message, canSubmit: submission.canSubmit, onSubmit: onFormSubmit, onStop: onStop ? submission.stop : undefined, onStopRef: stopRef }}
     footer={footer}

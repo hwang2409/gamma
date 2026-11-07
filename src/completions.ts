@@ -19,6 +19,8 @@ export class CompletionModel {
   private caret = 0;
   private token?: CompletionToken;
   private state = CLOSED;
+  /** Value and selection of the last update; kept across Escape so a repeated select event does not reopen. */
+  private input?: string;
   private readonly listeners = new Set<() => void>();
 
   constructor(private readonly controller: CommandController) {}
@@ -34,7 +36,13 @@ export class CompletionModel {
     for (const listener of this.listeners) listener();
   }
 
+  /** A select event: it often repeats the last input, which must keep the active row and keep an Escape-closed menu closed. */
+  select(value: string, selectionStart: number, selectionEnd = selectionStart) {
+    if (`${selectionStart}:${selectionEnd}:${value}` !== this.input) this.update(value, selectionStart, selectionEnd);
+  }
+
   update(value: string, selectionStart: number, selectionEnd = selectionStart) {
+    this.input = `${selectionStart}:${selectionEnd}:${value}`;
     this.value = value;
     this.caret = selectionStart;
     this.token = selectionStart === selectionEnd ? findCommandCompletionToken(value.slice(0, selectionStart)) : undefined;
@@ -71,9 +79,11 @@ export class CompletionModel {
     return accepted;
   }
 
-  key(key: string, isComposing = false): CompletionKeyResult {
+  /** `modified`: Shift, Alt, Ctrl, or Meta is held; then Tab and Enter keep their normal meaning and close the menu. */
+  key(key: string, isComposing = false, modified = false): CompletionKeyResult {
     if (isComposing || !this.state.open) return { handled: false };
-    if (key === "Escape") { this.close(); return { handled: true }; }
+    if (key === "Escape") { const input = this.input; this.close(); this.input = input; return { handled: true }; }
+    if ((key === "Tab" || key === "Enter") && modified) { this.close(); return { handled: false }; }
     if (key === "ArrowUp" || key === "ArrowDown") {
       const delta = key === "ArrowDown" ? 1 : -1;
       const count = this.state.rows.length;
@@ -89,6 +99,7 @@ export class CompletionModel {
   }
 
   close() {
+    this.input = undefined;
     this.sequence++;
     this.setState(CLOSED);
   }

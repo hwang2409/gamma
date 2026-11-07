@@ -124,6 +124,81 @@ try {
       await field(page).press("Escape");
     });
 
+    await check("one escape closes the menu after one-shot input; modified tab and enter never accept", async () => {
+      const listbox = page.getByRole("listbox", { name: "command suggestions" });
+      await field(page).fill("");
+      await field(page).focus();
+      await page.keyboard.insertText("/st");
+      await listbox.waitFor();
+      await field(page).press("Escape");
+      await page.waitForTimeout(300);
+      if (await field(page).getAttribute("aria-expanded") !== "false") throw new Error("first escape after one-shot input left the menu open");
+      for (const key of ["Shift+Enter", "Shift+Tab"]) {
+        await field(page).fill(""); await field(page).fill("/st"); await listbox.waitFor();
+        await field(page).press(key);
+        const value = await field(page).inputValue();
+        if (value.startsWith("/status")) throw new Error(`${key} accepted the active command: ${JSON.stringify(value)}`);
+        if (key === "Shift+Tab" && await field(page).evaluate((node) => node === document.activeElement)) throw new Error("shift+tab did not move focus back");
+        await field(page).focus();
+      }
+      await field(page).fill("");
+    });
+
+    await check("active option has a visible accent bar distinct from hover in every theme", async () => {
+      const fixShots = process.env.WEB_FIX_SHOTS ?? shots;
+      await mkdir(fixShots, { recursive: true });
+      await field(page).fill("/");
+      await page.getByRole("listbox", { name: "command suggestions" }).waitFor();
+      await field(page).press("ArrowDown");
+      await page.locator('[role="option"][aria-selected="true"]').nth(0).waitFor();
+      for (const width of [1440, 390]) for (const theme of themes) {
+        await page.setViewportSize({ width, height: width === 1440 ? 900 : 844 });
+        await page.evaluate((name) => { document.documentElement.dataset.fulcrumTheme = name; }, theme);
+        await page.getByRole("option").nth(2).hover();
+        await page.screenshot({ path: join(fixShots, `menu-${theme}-${width}.png`) });
+        const audit = await page.evaluate(() => {
+          // Computed colors may be color(srgb …) or oklch(…); a canvas pixel resolves any of them to sRGB bytes.
+          const context = document.createElement("canvas").getContext("2d", { willReadFrequently: true })!;
+          const parse = (value: string) => { context.clearRect(0, 0, 1, 1); context.fillStyle = "#000"; context.fillStyle = value; context.fillRect(0, 0, 1, 1); return [...context.getImageData(0, 0, 1, 1).data.slice(0, 3)]; };
+          const luminance = (rgb: number[]) => { const parts = rgb.map((part) => { const channel = part / 255; return channel <= .03928 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4; }); return .2126 * parts[0]! + .7152 * parts[1]! + .0722 * parts[2]!; };
+          const ratio = (a: string, b: string) => { const x = luminance(parse(a)), y = luminance(parse(b)); return (Math.max(x, y) + .05) / (Math.min(x, y) + .05); };
+          const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+          const active = options.find((option) => option.getAttribute("aria-selected") === "true")!;
+          const hovered = options[2]!;
+          const bar = (element: HTMLElement) => { const shadow = getComputedStyle(element).boxShadow; const match = shadow.match(/^(.*\)) (\d+(?:\.\d+)?)px 0px 0px (?:0px )?inset$/); return match ? { color: match[1]!, width: Number(match[2]) } : null; };
+          const listboxBackground = getComputedStyle(document.querySelector('[role="listbox"]')!).backgroundColor;
+          const activeBar = bar(active);
+          return {
+            activeIndex: options.indexOf(active), activeBar, hoveredBar: bar(hovered), hoveredSelected: hovered.getAttribute("aria-selected") === "true",
+            barContrast: activeBar ? ratio(activeBar.color, getComputedStyle(active).backgroundColor) : 0,
+            sameBackground: getComputedStyle(active).backgroundColor === getComputedStyle(hovered).backgroundColor,
+            fillContrast: ratio(getComputedStyle(active).backgroundColor, listboxBackground),
+            textContrast: Math.min(...[...active.querySelectorAll("span")].map((span) => ratio(getComputedStyle(span).color, getComputedStyle(active).backgroundColor))),
+          };
+        });
+        if (audit.activeIndex !== 1 || audit.hoveredSelected || !audit.activeBar || audit.activeBar.width < 3 || audit.barContrast < 3 || audit.hoveredBar || audit.sameBackground || audit.textContrast < 4.5) throw new Error(`${theme} at ${width}px: ${JSON.stringify(audit)}`);
+      }
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.evaluate(() => { delete document.documentElement.dataset.fulcrumTheme; });
+      await field(page).press("Escape");
+      await field(page).fill("");
+    });
+
+    await check("error receipts carry a text label and keyboard dismiss returns focus to the composer", async () => {
+      await submit(page, "/does-not-exist");
+      await page.locator('.command-receipt[data-tone="error"] .command-receipt-label', { hasText: "error" }).waitFor({ timeout: 5_000 }).catch(() => { throw new Error("error receipt has no text label"); });
+      const dismiss = page.getByRole("button", { name: "dismiss command result" });
+      await dismiss.focus();
+      await dismiss.press("Enter");
+      await page.locator(".command-receipt").waitFor({ state: "detached", timeout: 5_000 });
+      if (!(await field(page).evaluate((node) => node === document.activeElement))) throw new Error(`dismiss left focus on ${await page.evaluate(() => document.activeElement?.tagName)}`);
+      await submit(page, "/mcp");
+      await page.locator('.command-receipt[data-tone="quiet"]').waitFor();
+      if (await page.locator(".command-receipt .command-receipt-label").count()) throw new Error("quiet receipt shows the error label");
+      await page.getByRole("button", { name: "dismiss command result" }).click();
+      await field(page).fill("");
+    });
+
     await check("long receipt and listbox fit every theme without squeezing the transcript", async () => {
       fake.setLongStatus(true);
       await submit(page, "/status");

@@ -319,10 +319,14 @@ function StatusLine({ phase }: { phase: RunPhase }) {
   );
 }
 
+function focusComposer() {
+  document.querySelector<HTMLTextAreaElement>('.dock textarea[aria-label="message"]')?.focus();
+}
+
 function CommandReceiptLine({ store, runId }: { store: ReceiptStore; runId: string }) {
   const receipt = useSyncExternalStore(store.subscribe, () => store.get(runId));
   if (!receipt) return null;
-  return <div className="command-receipt" data-tone={receipt.tone} role={receipt.tone === "error" ? "alert" : "status"}><span className="command-receipt-text">{receipt.text}</span><button type="button" className="ghost" aria-label="dismiss command result" onClick={() => store.dismiss(runId)}>dismiss</button></div>;
+  return <div className="command-receipt" data-tone={receipt.tone} role={receipt.tone === "error" ? "alert" : "status"}>{receipt.tone === "error" ? <span className="command-receipt-label">error</span> : null}<span className="command-receipt-text">{receipt.text}</span><button type="button" className="ghost" aria-label="dismiss command result" onClick={() => { store.dismiss(runId); focusComposer(); }}>dismiss</button></div>;
 }
 
 async function submitRun({ text, images, steer, deliveryId, connection, runs, deliveries, choice, yolo, runId, onCreated }: { text: string; images: readonly import("./image-queue").QueuedImage[]; steer: boolean; deliveryId: string; connection: Connection; runs: SessionManager; deliveries: DeliveryManager; choice: { model?: string; provider?: string }; yolo: boolean; runId: string; onCreated(from: string, sessionId: string): void }) {
@@ -365,7 +369,7 @@ function useDockRetry(agent: ReturnType<typeof useAgentPhase>, client: ZetaClien
   const failed = agent.kind === "failed" && client && lastPrompt ? lastPrompt : null;
   useEffect(() => {
     const retry = failed && (isSlashCommandText(failed)
-      ? () => { runState.restoreDraft(runId, failed); document.querySelector<HTMLTextAreaElement>('.dock textarea[aria-label="message"]')?.focus(); }
+      ? () => { runState.restoreDraft(runId, failed); focusComposer(); }
       : () => void deliveries.submit(runId, failed, false).catch(() => {}));
     onRetryTurn(retry ? () => retry : null);
     return () => onRetryTurn(null);
