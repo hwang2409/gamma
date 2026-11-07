@@ -217,8 +217,11 @@ try {
       // A stopped server (not a blip): the banner and the offline composer resize the scroll box while it waits.
       await fake.stop();
       await page.getByText(/connection lost|reconnecting/).first().waitFor({ timeout: 3000 });
-      // A drop keeps the reader where they were: still pinned to the bottom, the pending approval still in view.
-      await page.locator('.dock [data-part="composer"][data-state="read-only"]').waitFor({ timeout: 3000 });
+      // A drop keeps the reader where they were and the draft editable, but blocks sending.
+      const offlineField = page.locator('.dock textarea[aria-label="message"]');
+      await offlineField.waitFor({ timeout: 3000 });
+      if (await offlineField.evaluate((node) => (node as HTMLTextAreaElement).readOnly)) throw new Error("the outage made the draft read-only");
+      if (!(await page.getByRole("button", { name: "send message" }).isDisabled())) throw new Error("sending stayed enabled while offline");
       await settle(page);
       await page.waitForTimeout(500);
       const kept = await page.locator(".scroll").evaluate((element) => {
@@ -286,11 +289,11 @@ try {
       await Bun.sleep(2000); // a few quiet retries; the console listener fails the gate on any error
       await shoot(page, "state-lost-1440");
       if (!(await page.locator('[data-part="timeline"] [data-kind="user"]').count())) throw new Error("transcript hidden while offline");
-      await page.locator('.dock [data-part="composer"][data-state="read-only"]').waitFor({ timeout: 2000 });
+      const draft = page.locator('.dock textarea[aria-label="message"]');
+      await draft.waitFor({ timeout: 2000 });
       if (await page.locator(".status-line").count()) throw new Error("the stopped server shows again in the dock");
-      if (await page.locator(".dock button").count()) throw new Error("the composer offers actions while offline");
-      const draft = page.locator('.dock [data-part="composer"][data-state="read-only"] textarea');
-      if (!(await draft.count()) || (await draft.inputValue()) !== "draft kept across disconnect" || !(await draft.evaluate((node) => (node as HTMLTextAreaElement).readOnly))) throw new Error("the read-only composer does not show the draft, read-only");
+      if ((await draft.inputValue()) !== "draft kept across disconnect" || await draft.evaluate((node) => (node as HTMLTextAreaElement).readOnly)) throw new Error("the offline composer did not keep an editable draft");
+      if (!(await page.getByRole("button", { name: "send message" }).isDisabled())) throw new Error("sending stayed enabled while offline");
       await fake.start();
       await page.getByRole("button", { name: "retry now" }).click();
       await ready(page);
