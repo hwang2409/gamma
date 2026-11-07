@@ -5,6 +5,7 @@ import { Approval, Code, Fallback, FileBlock, HighlightContext, ImageBlock, Mess
 import { createRunStore } from "@fulcrum/core";
 import type { ZetaClient } from "@fulcrum/zeta";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type Dispatch, type ReactNode, type SetStateAction } from "react";
+import { createPortal } from "react-dom";
 import { createConnection, serveCommand, type Connection, type ConnectionState } from "./connection";
 import { createDeliveryManager, stopTurn, type DeliveryManager } from "./delivery";
 import { createSessionManager, sessionTitle, type OpenRun, type RunState, type SessionManager, type SessionMeta } from "./session";
@@ -176,6 +177,7 @@ export function App() {
   const shownSettings = selectedRecord.settings.error ? selectedRecord.settings.loaded : selectedRecord.settings.pending ? selectedRecord.settings.desired : selectedRecord.settings.loaded ?? selectedRecord.settings.desired;
   const yolo = shownSettings?.approval_mode === "allow";
   const [retryTurn, setRetryTurn] = useState<(() => void) | null>(null);
+  const [followRequest, setFollowRequest] = useState(0);
   const [viewer, setViewer] = useState<any>(null);
   const viewerOpener = useRef<HTMLElement | null>(null);
   const openViewer = useCallback((block: any) => { viewerOpener.current = document.activeElement as HTMLElement | null; setViewer(block); }, []);
@@ -223,8 +225,8 @@ export function App() {
               </header>
               <main className="main">
                 {landedNotice ? <div className="landed-notice" role="status">your message started run {landedNotice.runId} <button type="button" className="ghost" onClick={() => { runState.dismissNotice(); selectRun(landedNotice.runId); }}>open</button><button type="button" className="ghost" onClick={() => runState.dismissNotice()}>dismiss</button></div> : null}
-                <Body state={state} view={view} connection={connection} runs={runs} onNewRun={newRun} onSelectRun={selectRun} />
-                <Dock key={browserEntry.run} runId={browserEntry.run} runState={runState} onCreated={onCreated} deliveries={deliveries} state={state} view={view} connection={connection} runs={runs} vim={vim} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />
+                <Body state={state} view={view} connection={connection} runs={runs} onNewRun={newRun} onSelectRun={selectRun} followRequest={followRequest} />
+                <Dock key={browserEntry.run} runId={browserEntry.run} runState={runState} onCreated={onCreated} onAccepted={() => setFollowRequest((request) => request + 1)} deliveries={deliveries} state={state} view={view} connection={connection} runs={runs} vim={vim} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />
                 {viewer ? <Inspector value={viewer} onClose={closeViewer} /> : null}
               </main>
             </div>
@@ -365,8 +367,8 @@ function dockBlockedReason(state: ConnectionState, present: RunState, open: Open
   return present.opening || open?.stale || (open?.syncing && !running) ? "sending is paused until the run opens" : null;
 }
 
-function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, runState, runId, onCreated, deliveries }: {
-  state: ConnectionState; view: RunState; connection: Connection; runs: SessionManager; vim: boolean; onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>; onImageOpen(block: any): void; runState: RunStateStore; runId: string; onCreated(from: string, sessionId: string): void; deliveries: DeliveryManager;
+function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, runState, runId, onCreated, onAccepted, deliveries }: {
+  state: ConnectionState; view: RunState; connection: Connection; runs: SessionManager; vim: boolean; onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>; onImageOpen(block: any): void; runState: RunStateStore; runId: string; onCreated(from: string, sessionId: string): void; onAccepted(): void; deliveries: DeliveryManager;
 }) {
   const present = view;
   const open = present.open;
@@ -385,8 +387,10 @@ function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, ru
     const preferred = record.model.choice === "explicit" ? record.model.model : undefined;
     const local = nextRunModel();
     const choice = preferred ? { model: preferred, ...(local.model === preferred && local.provider ? { provider: local.provider } : {}) } : {};
-    return submitRun({ text, images, steer, deliveryId, connection, runs, deliveries, choice, yolo, runId, onCreated });
-  }, [connection, runs, deliveries, yolo, runId, onCreated, record.model]);
+    const result = await submitRun({ text, images, steer, deliveryId, connection, runs, deliveries, choice, yolo, runId, onCreated });
+    onAccepted();
+    return result;
+  }, [connection, runs, deliveries, yolo, runId, onCreated, onAccepted, record.model]);
   const onStop = useCallback(async () => { await deliveries.stop(runId); await runs.refreshStatus(); }, [deliveries, runId, runs]);
   const lastPrompt = useLastPrompt();
 
@@ -411,17 +415,17 @@ function useLastPrompt() {
   }, [store]));
 }
 
-function OpenBody({ state, connection, present, runs }: { state: ConnectionState; connection: Connection; present: RunState; runs: SessionManager }) {
+function OpenBody({ state, connection, present, runs, followRequest }: { state: ConnectionState; connection: Connection; present: RunState; runs: SessionManager; followRequest: number }) {
   const open = present.open!;
   const failed = present.openError;
   const offline = state.phase !== "connected";
-  return <><>{offline && (state.phase !== "connecting" || state.lastFailure) && state.phase !== "dropped" ? <ConnectionNotice state={state} connection={connection} compact /> : null}</><>{!open.history.complete ? <p className="note" data-tone="busy" role="status">loading earlier messages… {open.history.messages.toLocaleString("en")} loaded</p> : null}</><>{open.syncing ? <p className="note" data-tone="busy" role="status">live updates paused while this run is busy; it will catch up</p> : null}</><>{failed ? <div className="note" data-tone={failed.busy ? "busy" : "danger"} role="alert"><span>{failed.busy ? `this run waits while ${present.active ?? "another run"} has the active zeta turn` : `could not reopen this run: ${failed.message}`}</span> <button type="button" className="ghost" onClick={() => runs.dismissOpenError(failed.id)}>dismiss</button> <button type="button" className="ghost" onClick={() => runs.retryOpen(failed.id)}>try again</button></div> : null}</><Run client={offline ? null : connection.client} open={open} readOnly={Boolean(failed)} /></>;
+  return <><>{offline && (state.phase !== "connecting" || state.lastFailure) && state.phase !== "dropped" ? <ConnectionNotice state={state} connection={connection} compact /> : null}</><>{!open.history.complete ? <p className="note" data-tone="busy" role="status">loading earlier messages… {open.history.messages.toLocaleString("en")} loaded</p> : null}</><>{open.syncing ? <p className="note" data-tone="busy" role="status">live updates paused while this run is busy; it will catch up</p> : null}</><>{failed ? <div className="note" data-tone={failed.busy ? "busy" : "danger"} role="alert"><span>{failed.busy ? `this run waits while ${present.active ?? "another run"} has the active zeta turn` : `could not reopen this run: ${failed.message}`}</span> <button type="button" className="ghost" onClick={() => runs.dismissOpenError(failed.id)}>dismiss</button> <button type="button" className="ghost" onClick={() => runs.retryOpen(failed.id)}>try again</button></div> : null}</><Run client={offline ? null : connection.client} open={open} readOnly={Boolean(failed)} followRequest={followRequest} /></>;
 }
-function Body({ state, view, connection, runs, onNewRun, onSelectRun }: { state: ConnectionState; view: RunState; connection: Connection; runs: SessionManager; onNewRun(): void; onSelectRun(id: string): void }) {
+function Body({ state, view, connection, runs, onNewRun, onSelectRun, followRequest }: { state: ConnectionState; view: RunState; connection: Connection; runs: SessionManager; onNewRun(): void; onSelectRun(id: string): void; followRequest: number }) {
   const present = view;
   const offline = state.phase !== "connected";
   const ownerActions = present.active ? <div className="actions"><button type="button" className="primary" onClick={() => onSelectRun(present.active!)}>go to running run</button><button type="button" className="ghost" onClick={() => connection.client && void stopTurn(connection.client)}>stop running run</button></div> : null;
-  if (present.open) return <OpenBody state={state} connection={connection} present={present} runs={runs} />;
+  if (present.open) return <OpenBody state={state} connection={connection} present={present} runs={runs} followRequest={followRequest} />;
   if (offline && (state.phase !== "connecting" || state.lastFailure) && state.phase !== "dropped") return <div className="scroll"><ConnectionNotice state={state} connection={connection} /></div>;
   if (present.selected && !present.openError && view.session?.session_id !== present.selected) return <div className="scroll"><Panel title="opening the run" tone="busy"><p>{present.active ? `this run waits while ${present.active} has the active zeta turn` : `loading history${present.opening?.messages ? ` · ${present.opening.messages.toLocaleString("en")} messages` : ""}`}</p>{ownerActions}</Panel></div>;
   if (present.openError) { const failure = present.openError; return <div className="scroll"><Panel title={failure.busy ? "another run is active" : "could not open this run"} tone={failure.busy ? "warn" : "danger"}><p className="mono">{failure.busy ? `this run waits while ${present.active ?? "another run"} has the active zeta turn` : failure.message}</p>{ownerActions}<div className="actions"><button type="button" className="primary" onClick={() => runs.retryOpen(failure.id)}>try again</button><button type="button" className="ghost" onClick={onNewRun}>new run</button></div></Panel></div>; }
@@ -429,8 +433,9 @@ function Body({ state, view, connection, runs, onNewRun, onSelectRun }: { state:
   return <div className="scroll"><div className="empty-run" role="note"><h2>start a conversation</h2><p>write below to start. zeta creates the run when you send the first message.</p></div></div>;
 }
 
-function Run({ client, open, readOnly }: { client: ZetaClient | null; open: OpenRun; readOnly: boolean }) {
+function Run({ client, open, readOnly, followRequest }: { client: ZetaClient | null; open: OpenRun; readOnly: boolean; followRequest: number }) {
   const scroll = useRef<HTMLDivElement>(null);
+  const [jumpLane, setJumpLane] = useState<HTMLDivElement | null>(null);
   const artifacts = useArtifacts(open.id, open.lease.store);
   const [viewer, setViewer] = useState<any>(null);
   const viewerOpener = useRef<HTMLElement | null>(null);
@@ -456,10 +461,11 @@ function Run({ client, open, readOnly }: { client: ZetaClient | null; open: Open
       <ImageViewer.Provider value={openViewer}>
         <Artifacts.Provider value={artifacts}>
           <div ref={scroll} className="scroll" tabIndex={-1} data-stale={open.stale || undefined} data-run-ready={readOnly ? undefined : "true"}>
-            <Timeline renderers={renderers} virtual scrollRef={scroll} aria-label="run activity" />
+            <Timeline renderers={renderers} virtual scrollRef={scroll} renderJumpToLatest={(control) => jumpLane ? createPortal(control, jumpLane) : null} followRequest={followRequest} aria-label="run activity" />
             <ArtifactList anchor={null} />
             <EmptyRun />
           </div>
+          <div ref={setJumpLane} className="jump-lane" aria-live="polite" />
         </Artifacts.Provider>
       </ImageViewer.Provider>
       {viewer ? <Inspector value={viewer} onClose={closeViewer} /> : null}
