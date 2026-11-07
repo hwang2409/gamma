@@ -27,7 +27,7 @@ const rows: Array<[string, string]> = [];
 const check = async (name: string, run: () => Promise<void>) => { try { await run(); rows.push([name, "pass"]); } catch (error) { rows.push([name, `fail: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}`]); } };
 const ready = (page: Page) => page.locator('.dock form[data-part="composer"]').waitFor({ timeout: 10_000 });
 const settle = (page: Page) => page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-const field = (page: Page) => page.getByRole("textbox", { name: "message" });
+const field = (page: Page) => page.getByRole("combobox", { name: "message" });
 const userRow = (page: Page, text: string) => page.locator('[data-part="timeline"] [data-kind="user"]', { hasText: text });
 /** A real png: a colored disc on white, so a thumbnail that loads is visible. */
 async function png(browser: Browser, color: string) {

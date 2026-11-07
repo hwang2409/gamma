@@ -171,8 +171,8 @@ button:active:not(:disabled) { transform: scale(0.97); }
 /* Command results are run-local and stay separate from the transcript. */
 .command-receipt { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 6px; padding: 8px 10px; border: 1px solid var(--fulcrum-border); border-left: var(--rail) solid var(--fulcrum-muted); background: var(--fulcrum-bg); font-size: 12px; }
 .command-receipt[data-tone="error"] { border-left-color: var(--fulcrum-danger); color: var(--fulcrum-danger); }
-.command-receipt-text { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.command-receipt .ghost { flex: none; min-height: 28px; }
+.command-receipt-text { flex: 1; min-width: 0; max-height: min(10dvh, 80px); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.command-receipt .ghost { flex: none; min-width: 36px; min-height: 36px; }
 
 /* The composer: fulcrum's parts, plus gamma's tray, footer tools, and vim mode. */
 .dock [data-part="composer"] { position: relative; }
@@ -265,6 +265,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .inspector-body td { border: 1px solid var(--fulcrum-border); padding: 5px 8px; white-space: pre-wrap; }
 .inspector-body pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 600px) {
+  .dock .command-receipt .ghost { min-width: 44px; min-height: 44px; }
   .dock .command-option { grid-template-columns: minmax(0, 1fr) auto; min-height: 44px; }
   .command-description { grid-column: 1 / -1; white-space: normal; }
   .inspector-backdrop { padding: 0; }

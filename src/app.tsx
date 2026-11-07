@@ -28,7 +28,7 @@ type Decide = (requestId: string) => Promise<unknown>;
 const Decisions = createContext<{ approve?: Decide; always?: Decide; deny?: Decide; disabledReason?: string } | null>(null);
 function ZetaApproval({ id }: { id: string }) {
   const decide = useContext(Decisions);
-  return <Approval id={id} onApprove={decide?.approve} onApproveAlways={decide?.always} approveAlwaysLabel="approve always" onDeny={decide?.deny} disabledReason={decide?.disabledReason} />;
+  return <Approval id={id} onApprove={decide?.approve} onApproveAlways={decide?.always} approveAlwaysLabel="always allow" onDeny={decide?.deny} disabledReason={decide?.disabledReason} />;
 }
 // The intents of steers a stop dropped: zeta never gave them to the agent, so their rows must not look delivered.
 const DeliveryStates = createContext<ReadonlyMap<string, import("./run-state").PendingDelivery>>(new Map());
@@ -229,7 +229,7 @@ export function App() {
               <main className="main">
                 {landedNotice ? <div className="landed-notice" role="status">your message started run {landedNotice.runId} <button type="button" className="ghost" onClick={() => { runState.dismissNotice(); selectRun(landedNotice.runId); }}>open</button><button type="button" className="ghost" onClick={() => runState.dismissNotice()}>dismiss</button></div> : null}
                 <Body state={state} view={view} connection={connection} runs={runs} onNewRun={newRun} onSelectRun={selectRun} followRequest={followRequest} />
-                <Dock key={browserEntry.run} runId={browserEntry.run} runState={runState} onCreated={onCreated} onAccepted={() => setFollowRequest((request) => request + 1)} onNewRun={newRun} deliveries={deliveries} receipts={receipts} state={state} view={view} connection={connection} runs={runs} vim={vim} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />
+                <Dock key={browserEntry.run} runId={browserEntry.run} runState={runState} onCreated={onCreated} onAccepted={() => setFollowRequest((request) => request + 1)} deliveries={deliveries} receipts={receipts} state={state} view={view} connection={connection} runs={runs} vim={vim} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />
                 {viewer ? <Inspector value={viewer} onClose={closeViewer} /> : null}
               </main>
             </div>
@@ -376,8 +376,8 @@ function dockBlockedReason(state: ConnectionState, present: RunState, open: Open
   return present.opening || open?.stale || (open?.syncing && !running) ? "sending is paused until the run opens" : null;
 }
 
-function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, onNewRun, runState, runId, onCreated, onAccepted, deliveries, receipts }: {
-  state: ConnectionState; view: RunState; connection: Connection; runs: SessionManager; vim: boolean; onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>; onImageOpen(block: any): void; onNewRun(): void; runState: RunStateStore; runId: string; onCreated(from: string, sessionId: string): void; onAccepted(): void; deliveries: DeliveryManager; receipts: ReceiptStore;
+function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, runState, runId, onCreated, onAccepted, deliveries, receipts }: {
+  state: ConnectionState; view: RunState; connection: Connection; runs: SessionManager; vim: boolean; onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>; onImageOpen(block: any): void; runState: RunStateStore; runId: string; onCreated(from: string, sessionId: string): void; onAccepted(): void; deliveries: DeliveryManager; receipts: ReceiptStore;
 }) {
   const present = view;
   const open = present.open;
@@ -407,44 +407,30 @@ function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, on
     if (!choice.model || !target.features.includes("new_session_settings")) await deliveries.changeSettings(id, { ...(choice.model ? { model: choice.model } : {}), approval_mode: yolo ? "allow" : "ask" });
     return id;
   }, [choice, connection, deliveries, onCreated, runId, runState, runs, yolo]);
-  const commands = useMemo(() => {
-    const unavailable = createUnavailableCommandController();
-    const connected = (id: string) => client ? createCommandController(id, (method, params) => client.request(method, params), { features: new Set(client.features), requests: commandRequests(client) }) : unavailable;
-    if (client && sessionId) return connected(sessionId);
-    return {
-      ...unavailable,
-      async prepareComposerInput(text: string) {
-        if (!text.startsWith("//") && text.trimStart().startsWith("/") && client) return connected(await ensureSession()).prepareComposerInput(text);
-        return unavailable.prepareComposerInput(text);
-      },
-    };
-  }, [client, ensureSession, sessionId]);
+  const commands = useMemo(() => client && sessionId
+    ? createCommandController(sessionId, (method, params) => client.request(method, params), { features: new Set(client.features), requests: commandRequests(client) })
+    : createUnavailableCommandController(), [client, sessionId]);
 
   const onSubmit: Submit = useCallback(async (action, images, { steer, deliveryId, sourceText }) => {
-    const setReceipt = (text: string, tone: "quiet" | "error") => receipts.set(runState.canonical(runId), { text: images.length ? `${text}\nattachments were not sent` : text, tone });
+    const setReceipt = (text: string, tone: "quiet" | "error") => receipts.set(runState.canonical(runId), { text: images.length ? `${text}\nattachments are still attached and were not sent.` : text, tone });
     const consume = () => runState.consumeDraft(runId, sourceText);
+    const unavailableClientAction = (name: string) => async () => setReceipt(`/${name} is not available in gamma yet`, "error");
     const clientActions: Record<ClientActionName, () => Promise<void>> = {
-      new_session: async () => { consume(); onNewRun(); },
-      rename_session: async () => setReceipt("use the run title control to rename this run", "quiet"),
-      approve: async () => setReceipt("use the approval controls in the transcript", "quiet"),
-      always: async () => setReceipt("use approve always on the approval row", "quiet"),
-      deny: async () => setReceipt("use deny on the approval row", "quiet"),
-      theme: async () => setReceipt("use theme in settings", "quiet"),
-      branch_view: async () => setReceipt("branch view is not available in gamma yet", "error"),
-      model: async () => setReceipt("use the model control below", "quiet"),
-      vim: async () => setReceipt("use vim mode in settings", "quiet"),
-      paste: async () => setReceipt("use attach to choose a file", "quiet"),
-      accounts: async () => setReceipt("account management is not available in gamma yet", "error"),
+      new_session: unavailableClientAction("new"), rename_session: unavailableClientAction("name"),
+      approve: unavailableClientAction("approve"), always: unavailableClientAction("always"), deny: unavailableClientAction("deny"),
+      theme: unavailableClientAction("theme"), branch_view: unavailableClientAction("tree"), model: unavailableClientAction("model"),
+      vim: unavailableClientAction("vim"), paste: unavailableClientAction("paste"), accounts: unavailableClientAction("accounts"),
     };
     if (action.kind === "receipt") { setReceipt(action.text, action.tone); if (!action.retain) consume(); return; }
     if (action.kind === "client-action") {
-      try { await clientActions[action.name](); if (action.name !== "new_session") consume(); }
+      try { await clientActions[action.name](); consume(); }
       catch (error) { setReceipt(error instanceof Error ? error.message : String(error), "error"); }
       return;
     }
     if (action.kind === "send-input") {
       const id = await ensureSession();
       const result = await deliveries.submitOpaque(id, action.inputId, action.displayText, sourceText, deliveryId);
+      if (images.length) receipts.set(runState.canonical(id), { text: "attachments are still attached and were not sent.", tone: "quiet" });
       onAccepted();
       return result;
     }
@@ -455,7 +441,7 @@ function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, on
     const result = await submitRun({ text: action.text, images, steer, deliveryId, connection, runs, deliveries, choice, yolo, runId, onCreated });
     onAccepted();
     return result;
-  }, [choice, connection, deliveries, ensureSession, onAccepted, onCreated, onNewRun, receipts, runId, runState, runs, yolo]);
+  }, [choice, connection, deliveries, ensureSession, onAccepted, onCreated, receipts, runId, runState, runs, yolo]);
   const onStop = useCallback(async () => { await deliveries.stop(runId); await runs.refreshStatus(); }, [deliveries, runId, runs]);
   const lastPrompt = useLastPrompt();
 
@@ -509,7 +495,7 @@ function Run({ client, open, readOnly, followRequest }: { client: ZetaClient | n
     if (!client || open.stale || readOnly) return { disabledReason: readOnly ? "opening the run — decisions are paused" : "reconnecting — decisions are disabled until the server confirms this run" };
     const decide = (method: "approve" | "deny", always = false): Decide => async (request_id) => {
       try {
-        const result = await client.request(method, { request_id, ...(always ? { always: true } : {}) }, { timeoutMs: 15_000 });
+        const result = await client.request(method, { request_id, ...(always ? { scope: "always_tool" } : {}) }, { timeoutMs: 15_000 });
         // The decision response is durable. End the reopened snapshot row even if its live approval_end was quarantined.
         open.lease.store.dispatch({ type: "approval_end", request_id, data: { decision: method === "approve" ? "allow" : "deny" } });
         return result;

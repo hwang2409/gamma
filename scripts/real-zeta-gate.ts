@@ -1,0 +1,163 @@
+import { spawn, type ChildProcess } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import { chromium, type Browser } from "playwright";
+import { createClient, webSocketTransport } from "@fulcrum/zeta";
+import { OwnedResources } from "./owned-resources";
+
+const gamma = "/Users/henry/me/fun/gamma/.worktrees/parity-g3";
+const zeta = "/Users/henry/me/fun/zeta";
+const requiredWorktree = `${zeta}/.worktrees/parity-g3-proof`;
+const worktree = process.env.ZETA_PROOF_WORKTREE;
+const ref = process.env.ZETA_PROOF_REF;
+const portText = process.env.WEB_REAL_ZETA_GATE_PORT ?? "4189";
+if (worktree !== requiredWorktree) throw new Error(`ZETA_PROOF_WORKTREE must be ${requiredWorktree}`);
+if (!ref || !/^[0-9a-f]{40}$/.test(ref)) throw new Error("ZETA_PROOF_REF must be an exact 40-character sha");
+if (!/^\d+$/.test(portText)) throw new Error("WEB_REAL_ZETA_GATE_PORT must be an integer");
+const appPort = Number(portText);
+if (appPort < 1 || appPort > 65_535 || appPort === 5190 || appPort === 8765) throw new Error("WEB_REAL_ZETA_GATE_PORT is outside the allowed disposable range");
+if (await stat(worktree).then(() => true, () => false)) throw new Error(`proof worktree already exists: ${worktree}`);
+const portProbe = Bun.listen({ hostname: "127.0.0.1", port: appPort, socket: { open() {}, data() {}, close() {} } });
+portProbe.stop(true);
+const origin = `http://127.0.0.1:${appPort}`;
+const resources = new OwnedResources();
+let browser: Browser | null = null;
+const logs = new Map<ChildProcess, string[]>();
+
+const child = (command: string, args: string[], options: Parameters<typeof spawn>[2] = {}) => {
+  const process = resources.child(spawn(command, args, { ...options, stdio: ["ignore", "pipe", "pipe"] }));
+  const lines: string[] = []; logs.set(process, lines);
+  process.stdout?.on("data", (data) => lines.push(String(data)));
+  process.stderr?.on("data", (data) => lines.push(String(data)));
+  return process;
+};
+const waitExit = (process: ChildProcess, label: string) => new Promise<void>((resolve, reject) => {
+  process.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`${label} exited ${code}: ${(logs.get(process) ?? []).join("").slice(-4000)}`)));
+  process.once("error", reject);
+});
+const run = async (command: string, args: string[], label: string, cwd = gamma, env = process.env) => {
+  const process = child(command, args, { cwd, env }); await waitExit(process, label); return (logs.get(process) ?? []).join("");
+};
+const waitFile = async (path: string, owner?: ChildProcess) => {
+  for (let attempt = 0; attempt < 300; attempt++) {
+    const text = await readFile(path, "utf8").catch(() => "");
+    if (text) return text;
+    if (owner?.exitCode !== null) throw new Error(`owner exited ${owner.exitCode} before ${path}: ${(logs.get(owner) ?? []).join("").slice(-4000)}`);
+    await Bun.sleep(100);
+  }
+  throw new Error(`timed out waiting for ${path}: ${(owner ? logs.get(owner) : [])?.join("").slice(-4000)}`);
+};
+
+try {
+  await run("git", ["-C", zeta, "worktree", "add", "--detach", worktree, ref], "git worktree add");
+  resources.createdWorktree(worktree);
+  const actual = (await Bun.file(join(worktree, ".git")).text()).trim();
+  if (!actual) throw new Error("detached proof worktree has no git marker");
+  const actualSha = (await run("git", ["rev-parse", "HEAD"], "verify proof sha", worktree)).trim();
+  if (actualSha !== ref) throw new Error(`proof worktree is ${actualSha}, expected ${ref}`);
+  await run("uv", ["sync", "--frozen"], "uv sync", worktree);
+  await run("uv", ["build"], "uv build", worktree);
+
+  const scratch = join(homedir(), ".zeta", "scratch", "gamma");
+  await mkdir(scratch, { recursive: true });
+  const temp = await mkdtemp(join(scratch, "parity-g3-real-")); resources.createdTemp(temp);
+  const zetaHome = join(temp, "zeta-home");
+  const gammaHome = join(temp, "gamma-home");
+  const cwd = join(temp, "cwd");
+  const control = join(temp, "control.json");
+  const skill = join(zetaHome, "skills", "review", "SKILL.md");
+  await Promise.all([mkdir(dirname(skill), { recursive: true }), mkdir(gammaHome), mkdir(cwd)]);
+  await writeFile(skill, "---\nname: review\ndescription: run the private real proof\nkeywords: [review]\n---\n\nREAL_ZETA_HIDDEN_SKILL_TEXT_7d91\n", "utf8");
+
+  const python = child("uv", ["run", "--project", worktree, "python", join(gamma, "scripts", "real-zeta-server.py")], {
+    cwd: worktree,
+    env: { ...process.env, PYTHONPATH: worktree, ZETA_HOME: zetaHome, ZETA_PROOF_CWD: cwd, ZETA_PROOF_CONTROL: control, ZETA_PROOF_ORIGIN: origin },
+  });
+  const discovery = JSON.parse(await waitFile(control, python)) as { port: number; token: string };
+  if (python.exitCode !== null) throw new Error(`real zeta exited during startup: ${(logs.get(python) ?? []).join("")}`);
+
+  const transport = await webSocketTransport(`ws://127.0.0.1:${discovery.port}/`, ["zeta.v1", `zeta.bearer.${discovery.token}`]);
+  const seed = createClient(transport);
+  await seed.hello(["model_input_ids", "delivery_id"], "controller");
+  const created = await seed.request("new_session", {}) as { session: { session_id: string } };
+  transport.close();
+  await Bun.sleep(250);
+
+  const vite = child("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(appPort), "--strictPort"], {
+    cwd: gamma,
+    env: { ...process.env, ZETA_HOME: zetaHome, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin },
+  });
+  for (let attempt = 0; attempt < 200; attempt++) {
+    if (vite.exitCode !== null) throw new Error(`vite exited during startup: ${(logs.get(vite) ?? []).join("")}`);
+    if (await fetch(origin).then((response) => response.ok, () => false)) break;
+    await Bun.sleep(100);
+    if (attempt === 199) throw new Error("vite did not start");
+  }
+
+  browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1024, height: 800 } });
+  const errors: string[] = [];
+  const frames: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
+  page.on("websocket", (socket) => {
+    socket.on("framesent", (event) => frames.push(String(event.payload)));
+    socket.on("framereceived", (event) => frames.push(String(event.payload)));
+  });
+  await page.goto(`${origin}/?run=${created.session.session_id}`);
+  const field = page.getByRole("combobox", { name: "message" });
+  await field.waitFor({ timeout: 20_000 }).catch(async () => { throw new Error(`composer did not open; browser=${errors.join(" | ")}; body=${await page.locator("body").innerText()}; vite=${(logs.get(vite) ?? []).join("").slice(-3000)}; zeta=${(logs.get(python) ?? []).join("").slice(-3000)}`); });
+  const submit = async (text: string) => { await field.fill(text); await field.press("Enter"); if ((await field.inputValue()).trim() === text) await field.press("Enter"); };
+
+  for (let attempt = 0; attempt < 200 && !frames.some((frame) => frame.includes('"name":"review"')); attempt++) await Bun.sleep(100);
+  const review = page.getByRole("option", { name: /review/ });
+  for (let attempt = 0; attempt < 20 && !(await review.isVisible().catch(() => false)); attempt++) {
+    await field.fill("");
+    await field.fill("/rev");
+    await Bun.sleep(250);
+  }
+  await review.waitFor({ timeout: 5_000 });
+  await field.fill("");
+  await field.press("Escape");
+  await submit("/status");
+  await page.locator(".command-receipt").waitFor({ timeout: 30_000 }).catch(async () => { throw new Error(`status receipt missing; value=${await field.inputValue()}; body=${await page.locator("body").innerText()}; frames=${frames.join("\n").slice(-6000)}`); });
+  await page.getByRole("button", { name: "dismiss command result" }).click();
+  if (!frames.some((frame) => frame.includes('"model_input_ids"'))) throw new Error("hello did not echo model_input_ids");
+  if (!frames.some((frame) => frame.includes('"name":"review"'))) throw new Error("slash_list omitted the private review skill");
+
+  await field.fill("");
+  const before = frames.length;
+  await field.fill("/review real proof");
+  await field.press("Escape");
+  await field.press("Enter");
+  for (let attempt = 0; attempt < 300 && !frames.slice(before).some((frame) => frame.includes('"event":"approval_request"')); attempt++) await Bun.sleep(100);
+  const scroll = page.locator(".scroll:visible");
+  await scroll.hover();
+  await page.mouse.wheel(0, -2_000);
+  const jump = page.getByText(/^jump to approval:/);
+  await jump.waitFor({ timeout: 30_000 });
+  await jump.focus();
+  await jump.press("Enter");
+  const approval = page.getByRole("button", { name: "always allow" });
+  await approval.waitFor({ timeout: 5_000 }).catch(async () => { throw new Error(`approval did not render; body=${await page.locator("body").innerText()}; frames=${frames.slice(before).join("\n").slice(-6000)}; zeta=${(logs.get(python) ?? []).join("").slice(-4000)}`); });
+  const proofFrames = frames.slice(before);
+  if (proofFrames.some((frame) => frame.includes("REAL_ZETA_HIDDEN_SKILL_TEXT_7d91")) || (await page.locator("body").innerText()).includes("REAL_ZETA_HIDDEN_SKILL_TEXT_7d91")) throw new Error("hidden skill text escaped onto the wire or DOM");
+  const sends = proofFrames.map((frame) => { try { return JSON.parse(frame); } catch { return null; } }).filter((frame) => frame?.method === "send");
+  if (sends.length !== 1 || typeof sends[0]?.params?.input_id !== "string" || "text" in sends[0].params) throw new Error(`opaque proof sent the wrong shape: ${JSON.stringify(sends)}`);
+  if ((await page.locator("body").innerText()).includes(sends[0].params.input_id)) throw new Error("opaque id reached the DOM");
+
+  await approval.click();
+  await approval.waitFor({ state: "detached", timeout: 20_000 });
+  const approvals = frames.map((frame) => { try { return JSON.parse(frame); } catch { return null; } }).filter((frame) => frame?.method === "approve");
+  if (approvals.length !== 1 || approvals[0].params?.scope !== "always_tool") throw new Error(`wrong approval scope: ${JSON.stringify(approvals)}`);
+  if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
+  console.log(`real zeta gate passed: ${ref}; model_input_ids, slash_list, /status, opaque send, hidden-text, approval always_tool`);
+} finally {
+  await browser?.close().catch(() => {});
+  await resources.cleanup(
+    (path) => rm(path, { recursive: true, force: true }),
+    async (path) => { await run("git", ["-C", zeta, "worktree", "remove", "--force", path], "git worktree remove"); },
+  );
+  console.log("real zeta cleanup passed: recorded children closed; private temp root and detached proof worktree removed");
+}

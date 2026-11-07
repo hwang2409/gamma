@@ -8,6 +8,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ServerWebSocket } from "bun";
+import { completeSlashCatalog, defaultSlashCatalog } from "./fake-slash-catalog";
 
 type Json = Record<string, unknown>;
 export type Mode = "ok" | "busy" | "incompatible" | "slow" | "slow-catalog" | "broken-session";
@@ -257,6 +258,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   let observerToken = crypto.randomUUID();
   let mode: Mode = "ok";
   let liveEnabled = live;
+  let modelInputIds = true;
+  let longStatus = false;
   let currentHistoryMode = historyMode;
   let allowed = origins;
   let active: string | null = ACTIVE;
@@ -379,7 +382,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           if (mode === "slow") await wait(helloDelay);
           if (!sockets.has(socket)) return;
           if (socket.data.role === "controller") controller = socket;
-          const features = (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || name === "model_input_ids" || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings)) ?? [];
+          const features = (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (name === "model_input_ids" && modelInputIds) || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings)) ?? [];
           const reconnect = features.includes("approval_reconnect");
           if (reconnect) reconnectControllers.add(socket as object);
           reply({ result: { protocol_version: "1.2", server: "fake-zeta", capabilities: { features, requests: ["slash_list", "slash_run", ...(settingsEnabled ? ["model_catalog", "session_settings", "set_settings", "send_images", ...(advertiseNewSessionSettings ? ["new_session_settings"] : [])] : [])] } } });
@@ -466,16 +469,18 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           if (method !== "model_catalog" && (typeof params.session_id !== "string" || !params.session_id)) return reply({ error: { code: -32602, message: "session_id must be a nonempty string" } });
           if (method !== "model_catalog" && params.session_id !== active) return reply({ error: { code: -32003, message: "session is not active" } });
         }
-        if (method === "slash_list") return reply({ result: { commands: [
-          { name: "status", description: "show session status", kind: "builtin", source: "builtin", client_only: false, unavailable: null },
-          { name: "review", description: "review this change", kind: "skill", source: "project", client_only: false, unavailable: null },
-          { name: "release", description: "prepare a release", kind: "skill", source: "home", client_only: false, unavailable: null },
-        ], notices: [] } });
+        if (method === "slash_list") return reply({ result: { commands: params.include_unavailable === true ? completeSlashCatalog : defaultSlashCatalog, notices: [] } });
         if (method === "slash_run") {
           const command = String(params.text ?? "").trim();
-          if (command === "/status") return reply({ result: { kind: "output", text: "fake status\nready" } });
+          if (command === "/status") return reply({ result: { kind: "output", text: longStatus ? `fake status\nready\n${Array.from({ length: 80 }, (_, index) => `status detail ${index + 1}`).join("\n")}` : "fake status\nready" } });
           if (command === "/review") return reply({ result: { kind: "model_input", input_id: "opaque-review-input", display_text: "$review" } });
-          return reply({ result: { kind: "unknown", name: command.slice(1).split(/\s/, 1)[0] } });
+          if (command === "/malformed") return reply({ result: { unexpected: true } });
+          if (command === "/legacy-output") return reply({ result: { kind: "text", text: "legacy output" } });
+          if (command === "/mcp" || command === "/mcp status") return reply({ result: { kind: "output", text: "mcp: 0 mounted, 0 failed\nmcp limits: deadline 300s | wire 67108864 bytes | spill 262144 bytes" } });
+          if (command === "/help") return reply({ result: { kind: "output", text: `built-in commands:\n${defaultSlashCatalog.filter((entry) => entry.kind === "builtin").map((entry) => `  /${entry.name} — ${entry.description}`).join("\n")}\ncustom commands:\n  none\nskills (use /name or $name; $name also works inline):\n  none` } });
+          const name = command.slice(1).split(/\s/, 1)[0] ?? "";
+          if (completeSlashCatalog.some((entry) => entry.name === name && entry.unavailable === "requires_tui")) return reply({ result: { kind: "client_only", name } });
+          return reply({ result: { kind: "unknown", name } });
         }
         if (method === "model_catalog") return reply({ result: { models: ["claude-sonnet-5", "claude-opus-4-6", "gpt-5.1-codex"], providers: { "claude-sonnet-5": "claude", "claude-opus-4-6": "claude", "gpt-5.1-codex": "codex" } } });
         const failure = failures.get(method)?.shift();
@@ -551,6 +556,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     async wrongToken() { await write({ port: server.port, controller_token: "stale-token", observer_token: observerToken, pid: process.pid, origins: allowed }); },
     setMode(next: Mode) { mode = next; },
     setSettingsEnabled(value: boolean) { settingsEnabled = value; },
+    setModelInputIds(value: boolean) { modelInputIds = value; },
+    setLongStatus(value: boolean) { longStatus = value; },
     setNewSessionSettings(value: boolean) { advertiseNewSessionSettings = value; },
     setOpenDelay(ms: number) { openDelay = ms; },
     delayNext(method: string, ms: number) { nextDelays.set(method, [...(nextDelays.get(method) ?? []), ms]); },
