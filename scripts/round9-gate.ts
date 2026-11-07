@@ -64,7 +64,7 @@ try {
     await check("resumed-model-beats-next-run-preference", async () => {
       const { context, page } = await fresh(browser, "/?run=s-reconnect", 390, { "gamma-model": "claude-sonnet-5" });
       try {
-        await page.getByRole("button", { name: "model: gpt-5.1-codex" }).waitFor({ timeout: 10_000 });
+        await page.getByRole("button", { name: "model: default (gpt-5.1-codex)" }).waitFor({ timeout: 10_000 });
         if (await page.getByRole("button", { name: /model: claude-sonnet-5/ }).count()) throw new Error("browser preference replaced resumed session settings");
         await page.screenshot({ path: join(shots, "major-resumed-session-model-390.png") });
       } finally { await close(context); }
