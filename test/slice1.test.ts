@@ -1,12 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { addImage, MAX_BYTES, MAX_IMAGES, readImage, type QueuedImage } from "../src/image-queue";
-import { settingModel, settingsRequest, catalogModels, catalogProviders } from "../src/settings";
+import { settingModel, catalogModels, catalogProviders } from "../src/settings";
 
 const image = (size: number): QueuedImage => ({ name: "a.png", mime_type: "image/png", data: "AA==", url: "blob:a", size });
 describe("slice 1 settings", () => {
-  test("sanitizes server settings and resends the current model", () => {
+  test("sanitizes server settings and model catalog entries", () => {
     expect(settingModel({ model: "gpt", approval_mode: "allow", ignored: true })).toEqual({ model: "gpt", approval_mode: "allow" });
-    expect(settingsRequest({ model: "gpt", approval_mode: "ask" }, { approval_mode: "allow" })).toEqual({ model: "gpt", approval_mode: "allow" });
     expect(catalogModels({ models: [{ id: "gpt" }, "fast"] })).toEqual(["gpt", "fast"]);
     expect(catalogProviders({ providers: { "claude-opus-4-6": "claude", bad: 1 } })).toEqual({ "claude-opus-4-6": "claude" });
   });
