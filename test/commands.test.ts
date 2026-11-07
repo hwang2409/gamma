@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createCommandController, findCommandCompletionToken, mapUnavailableSlashResult, type CommandCapabilities, type CommandRequest } from "../src/commands";
+import { createCommandController, createUnavailableCommandController, findCommandCompletionToken, mapUnavailableSlashResult, type CommandCapabilities, type CommandRequest } from "../src/commands";
 
 type Frame = { method: string; params: Record<string, unknown> };
 
@@ -135,6 +135,10 @@ test("an old server hides completion and blocks slash text", async () => {
   expect(await controller.completions("/st")).toEqual([]);
   expect(await controller.prepareComposerInput("/status")).toEqual({ kind: "receipt", text: "not available in this server version", tone: "error", retain: true });
   expect(frames).toEqual([]);
+});
+
+test("the no-capability adapter leaves slash with no listbox rows", async () => {
+  expect(await createUnavailableCommandController().completions("/", 1)).toEqual([]);
 });
 
 test("autocomplete filters and ranks slash and skill rows and exposes source badges", async () => {

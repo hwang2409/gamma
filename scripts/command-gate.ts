@@ -51,7 +51,7 @@ try {
     await check("fresh draft blocks slash but double slash starts a direct turn", async () => {
       const start = fake.requests.length;
       await submit(page, "/status");
-      await page.getByText("not available in this server version", { exact: true }).waitFor();
+      await page.getByText("commands need an open run; send a message first or open a run", { exact: true }).waitFor();
       if (fake.requests.slice(start).some((request) => ["new_session", "slash_run", "send"].includes(request.method))) throw new Error("fresh slash reached zeta");
       if ((await field(page).inputValue()).trim() !== "/status") throw new Error("fresh slash did not retain its draft");
       await field(page).fill("");
@@ -82,6 +82,26 @@ try {
       await page.getByLabel("remove one.png").click();
     });
 
+    await check("preparation rejection and timeout stay with the originating run and retain attachments", async () => {
+      const image = join(gammaHome, "prepare.png");
+      await writeFile(image, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
+      await page.locator('input[type="file"]').setInputFiles(image);
+      for (const message of ["slash rejected", "request timed out"]) {
+        fake.failNext("slash_run", message);
+        await submit(page, "/status");
+        const receipt = page.locator('.command-receipt[data-tone="error"] .command-receipt-text');
+        await receipt.getByText(message, { exact: false }).waitFor({ timeout: 5_000 });
+        await receipt.getByText("attachments are still attached and were not sent.", { exact: false }).waitFor();
+        if ((await field(page).inputValue()).trim() !== "/status") throw new Error(`${message} did not retain the command draft`);
+      }
+      await page.getByRole("button", { name: "new run" }).click();
+      if (await page.locator(".command-receipt").count()) throw new Error("preparation receipt leaked into another run");
+      await page.goBack();
+      await page.locator('.command-receipt[data-tone="error"] .command-receipt-text', { hasText: "request timed out" }).waitFor({ timeout: 5_000 });
+      await page.getByLabel("remove prepare.png").click();
+      await field(page).fill("");
+    });
+
     await check("shared registry frames keep runnable and unavailable commands distinct", async () => {
       if (defaultSlashCatalog.length !== 15 || completeSlashCatalog.length !== 39 || completeSlashCatalog.filter((entry) => entry.unavailable === "requires_tui").length !== 24) throw new Error("fake slash catalogs drifted from Zeta 2ff56774");
       if (defaultSlashCatalog.some((entry) => ["approve", "always", "deny", "restart", "permissions"].includes(entry.name))) throw new Error("default catalog exposed TUI-only commands");
@@ -95,6 +115,18 @@ try {
       await receipt("/mcp", "mcp: 0 mounted, 0 failed");
       await receipt("/mcp status", "mcp: 0 mounted, 0 failed");
       await receipt("/legacy-output", "legacy output");
+      for (const [command, output] of [["/accounts", "no accounts"], ["/model", "model: gpt-5.1-codex (open Settings to switch)"], ["/vim off", "vim mode: off"]] as const) {
+        const start = fake.requests.length;
+        await field(page).fill(command);
+        await field(page).press("Escape");
+        await field(page).press("Enter");
+        await page.locator(".command-receipt-text", { hasText: output }).waitFor({ timeout: 10_000 });
+        await page.getByRole("button", { name: "dismiss command result" }).click();
+        await page.locator(".command-receipt").waitFor({ state: "detached" });
+        const calls = fake.requests.slice(start);
+        const slash = calls.filter((request) => request.method === "slash_run");
+        if (slash.length !== 1 || slash[0]?.params.text !== command) throw new Error(`${command} sent wrong requests: ${JSON.stringify(calls)}`);
+      }
       await receipt("/approve", "/approve is not available in gamma yet");
       await submit(page, "/help");
       const help = page.locator(".command-receipt-text");
@@ -118,6 +150,15 @@ try {
       const pointerValue = await field(page).inputValue();
       const pointerFocus = await field(page).evaluate((node) => node === document.activeElement);
       if (pointerValue !== "/status " || !pointerFocus) throw new Error(`pointer acceptance has value ${JSON.stringify(pointerValue)} and focus ${pointerFocus}`);
+      await page.setViewportSize({ width: 390, height: 844 });
+      await field(page).fill("/"); await listbox.waitFor();
+      const mobile = await listbox.locator('[role="option"]').evaluateAll((nodes) => nodes.map((node) => {
+        const row = node.getBoundingClientRect();
+        const description = node.querySelector<HTMLElement>(".command-description")!;
+        return { height: row.height, clipped: description.scrollWidth > description.clientWidth, ellipsis: getComputedStyle(description).textOverflow, label: node.getAttribute("aria-label"), description: description.innerText };
+      }).sort((a, b) => Number(b.clipped) - Number(a.clipped))[0]);
+      if (!mobile || mobile.height > 56 || !mobile.clipped || mobile.ellipsis !== "ellipsis" || !mobile.label?.includes(mobile.description)) throw new Error(`mobile command row is not one accessible row: ${JSON.stringify(mobile)}`);
+      await page.setViewportSize({ width: 1440, height: 900 });
       await field(page).fill("/st"); await listbox.waitFor();
       const imeRequests = fake.requests.length;
       await field(page).evaluate((node) => node.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true })));
@@ -177,9 +218,10 @@ try {
             sameBackground: getComputedStyle(active).backgroundColor === getComputedStyle(hovered).backgroundColor,
             fillContrast: ratio(getComputedStyle(active).backgroundColor, listboxBackground),
             textContrast: Math.min(...[...active.querySelectorAll("span")].map((span) => ratio(getComputedStyle(span).color, getComputedStyle(active).backgroundColor))),
+            hoverDecoration: getComputedStyle(hovered).textDecorationLine,
           };
         });
-        if (audit.activeIndex !== 1 || audit.hoveredSelected || !audit.activeBar || audit.activeBar.width < 3 || audit.barContrast < 3 || audit.hoveredBar || audit.sameBackground || audit.textContrast < 4.5) throw new Error(`${theme} at ${width}px: ${JSON.stringify(audit)}`);
+        if (audit.activeIndex !== 1 || audit.hoveredSelected || !audit.activeBar || audit.activeBar.width < 3 || audit.barContrast < 3 || audit.hoveredBar || audit.sameBackground || audit.textContrast < 4.5 || audit.hoverDecoration !== "none") throw new Error(`${theme} at ${width}px: ${JSON.stringify(audit)}`);
       }
       await page.setViewportSize({ width: 1440, height: 900 });
       await page.evaluate(() => { delete document.documentElement.dataset.fulcrumTheme; });
@@ -190,16 +232,36 @@ try {
     await check("error receipts carry a text label and keyboard dismiss returns focus to the composer", async () => {
       await submit(page, "/does-not-exist");
       await page.locator('.command-receipt[data-tone="error"] .command-receipt-label', { hasText: "error" }).waitFor({ timeout: 5_000 }).catch(() => { throw new Error("error receipt has no text label"); });
+      const liveRegion = await page.locator('.command-receipt[data-tone="error"]').evaluate((receipt) => ({ receiptRole: receipt.getAttribute("role"), textRole: receipt.querySelector(".command-receipt-text")?.getAttribute("role"), dismissRole: receipt.querySelector("button")?.getAttribute("role") }));
+      if (liveRegion.receiptRole || liveRegion.textRole !== "alert" || liveRegion.dismissRole) throw new Error(`receipt live region includes the wrong node: ${JSON.stringify(liveRegion)}`);
       const dismiss = page.getByRole("button", { name: "dismiss command result" });
       await dismiss.focus();
       await dismiss.press("Enter");
       await page.locator(".command-receipt").waitFor({ state: "detached", timeout: 5_000 });
       if (!(await field(page).evaluate((node) => node === document.activeElement))) throw new Error(`dismiss left focus on ${await page.evaluate(() => document.activeElement?.tagName)}`);
       await submit(page, "/mcp");
-      await page.locator('.command-receipt[data-tone="quiet"]').waitFor();
+      const quiet = page.locator('.command-receipt[data-tone="quiet"]');
+      await quiet.waitFor();
+      const quietLiveRegion = await quiet.evaluate((receipt) => ({ receiptRole: receipt.getAttribute("role"), textRole: receipt.querySelector(".command-receipt-text")?.getAttribute("role"), dismissInside: Boolean(receipt.querySelector('.command-receipt-text button')) }));
+      if (quietLiveRegion.receiptRole || quietLiveRegion.textRole !== "status" || quietLiveRegion.dismissInside) throw new Error(`quiet receipt live region includes the wrong node: ${JSON.stringify(quietLiveRegion)}`);
       if (await page.locator(".command-receipt .command-receipt-label").count()) throw new Error("quiet receipt shows the error label");
       await page.getByRole("button", { name: "dismiss command result" }).click();
       await field(page).fill("");
+    });
+
+    await check("an identical replacement receipt starts at the top", async () => {
+      fake.setLongStatus(true);
+      await submit(page, "/status");
+      const receiptText = page.locator(".command-receipt-text");
+      await receiptText.getByText("status detail 80", { exact: false }).waitFor();
+      await receiptText.evaluate((node) => { node.scrollTop = node.scrollHeight; });
+      const before = requests("slash_run").length;
+      await submit(page, "/status");
+      for (let attempt = 0; attempt < 100 && requests("slash_run").length === before; attempt++) await Bun.sleep(25);
+      await page.waitForTimeout(50);
+      if (await receiptText.evaluate((node) => node.scrollTop) !== 0) throw new Error("same-text receipt kept its old scroll position");
+      fake.setLongStatus(false);
+      await page.getByRole("button", { name: "dismiss command result" }).click();
     });
 
     await check("long receipt and listbox fit every theme without squeezing the transcript", async () => {
@@ -287,6 +349,7 @@ try {
       await submit(page, "/review fail this turn");
       const retry = page.locator(".turn-retry");
       await retry.waitFor({ timeout: 15_000 }).catch(async () => { throw new Error(`failed opaque turn showed no retry; body=${await page.locator("body").innerText()}`); });
+      if ((await retry.innerText()).trim() !== "edit and retry") throw new Error(`command retry label was ${JSON.stringify(await retry.innerText())}`);
       const before = fake.requests.length;
       await retry.click();
       await page.waitForTimeout(500);
@@ -295,6 +358,32 @@ try {
       if (fake.requests.slice(before).some((request) => ["send", "steer", "send_images", "slash_run"].includes(request.method))) throw new Error("retry reached zeta without the user submitting");
       if ((await field(page).inputValue()).trim() !== "/review fail this turn") throw new Error(`retry did not restore the command draft: ${JSON.stringify(await field(page).inputValue())}`);
       await field(page).fill("");
+    });
+
+    await check("ordinary retry resends immediately while literal slash retry round-trips through the draft", async () => {
+      const retry = page.locator(".turn-retry");
+      await submit(page, "//fail this turn");
+      await page.waitForFunction(() => document.querySelector<HTMLButtonElement>(".turn-retry")?.innerText.trim() === "edit and retry", undefined, { timeout: 15_000 }).catch(async () => { throw new Error(`literal retry label was ${JSON.stringify(await retry.innerText())}; sent=${JSON.stringify(fake.sent.slice(-4))}`); });
+      await retry.click();
+      if ((await field(page).inputValue()).trim() !== "//fail this turn") throw new Error(`literal retry restored ${JSON.stringify(await field(page).inputValue())}`);
+      const resubmit = fake.requests.length;
+      await field(page).press("Enter");
+      for (let attempt = 0; attempt < 100 && !fake.requests.slice(resubmit).some((request) => request.method === "send"); attempt++) await Bun.sleep(25);
+      const calls = fake.requests.slice(resubmit);
+      if (calls.filter((request) => request.method === "send" && request.params.text === "/fail this turn").length !== 1 || calls.some((request) => request.method === "slash_run")) throw new Error(`literal retry used wrong flow: ${JSON.stringify(calls)}`);
+      for (let attempt = 0; attempt < 100 && !fake.running; attempt++) await Bun.sleep(25);
+      for (let attempt = 0; attempt < 600 && fake.running; attempt++) await Bun.sleep(25);
+      if (fake.running) throw new Error("literal retry turn did not finish");
+      await page.waitForFunction(() => document.querySelector<HTMLButtonElement>(".turn-retry")?.innerText.trim() === "edit and retry", undefined, { timeout: 15_000 });
+
+      await submit(page, "fail this turn");
+      await page.waitForFunction(() => document.querySelector<HTMLButtonElement>(".turn-retry")?.innerText.trim() === "retry", undefined, { timeout: 15_000 }).catch(async () => { throw new Error(`ordinary retry label was ${JSON.stringify(await retry.innerText())}`); });
+      const ordinaryStart = requests("send").length;
+      await retry.click();
+      for (let attempt = 0; attempt < 100 && requests("send").length === ordinaryStart; attempt++) await Bun.sleep(25);
+      if (requests("send").length !== ordinaryStart + 1) throw new Error("ordinary retry did not immediately send once");
+      for (let attempt = 0; attempt < 600 && fake.running; attempt++) await Bun.sleep(25);
+      if (fake.running) throw new Error("ordinary retry turn did not finish");
     });
 
     await field(page).waitFor();
@@ -336,11 +425,17 @@ try {
     });
 
     await check("approve always reaches zeta with persistence", async () => {
+      await page.goto(`${origin}/?run=s-themes`);
+      await waitReady(page);
+      await page.getByText("approved", { exact: true }).waitFor({ timeout: 10_000 }).catch(async () => { throw new Error(`ordinary approval wording missing; body=${await page.locator("body").innerText()}`); });
+      if (await page.getByText("always allowed for this session", { exact: true }).count()) throw new Error("ordinary approval used the session-wide wording");
       fake.setLive(true);
       await page.goto(`${origin}/?run=${ACTIVE}`);
-      await page.getByRole("button", { name: "always allow" }).waitFor({ timeout: 15_000 });
-      await page.getByRole("button", { name: "always allow" }).click();
+      await waitReady(page);
+      await page.getByRole("button", { name: "always allow", exact: true }).waitFor({ timeout: 15_000 });
+      await page.getByRole("button", { name: "always allow", exact: true }).click();
       await page.waitForFunction(() => document.querySelector('[data-part="approval-actions"]') === null, undefined, { timeout: 10_000 }).catch(() => {});
+      await page.getByText("always allowed for this session", { exact: true }).waitFor({ timeout: 5_000 }).catch(async () => { throw new Error(`always-allowed decided wording missing; approval=${await page.locator(".gamma-approval").evaluateAll((nodes) => nodes.map((node) => node.outerHTML).join(" | "))}`); });
       const decision = fake.decisions.at(-1);
       if (decision?.method !== "approve" || decision.scope !== "always_tool" || "always" in decision) throw new Error(`wrong decision: ${JSON.stringify(decision)}`);
     });

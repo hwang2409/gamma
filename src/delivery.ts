@@ -81,7 +81,7 @@ type RunId = import("./run-state").RunId;
 type DeliveryRecord = { delivery: ReturnType<typeof createDelivery>; store?: DeliveryStore; unsubscribe?: () => void };
 
 /** The small effect seam: reducer effects enter; owner- and operation-tagged results return through RunStateStore.dispatch. */
-function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: DeliveryRunStore, record: (runId: string) => DeliveryRecord, finish: (operationId: OperationId, error?: unknown) => void, opaqueInputs: Map<OperationId, string>, abortSession?: (runId: string) => Promise<unknown>) {
+function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: DeliveryRunStore, record: (runId: string) => DeliveryRecord, finish: (operationId: OperationId, error?: unknown) => void, opaqueInputs: Map<OperationId, string>, abortSession?: (runId: string) => Promise<unknown>, commandFailure?: (runId: string, text: string) => void) {
   const unavailable = () => new Error("not connected to zeta serve");
   const handleAbort = async (effect: Extract<WorkspaceEffect, { type: "abort" }>) => {
     const target = client();
@@ -97,7 +97,10 @@ function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: Del
       const result = await target.request("delivery_status", { delivery_id: delivery.attemptId }, { timeoutMs: 15_000 }) as { status?: string; outcome?: string };
       const status = result.status === "evicted" ? result.outcome : result.status;
       const settled = status === "delivered" ? "delivered" : status === "dropped" || (delivery.method === "opaque" && (status === "unknown" || status === "not_delivered")) ? "dropped" : null;
-      if (settled) runs.dispatch({ type: "DELIVERY_STATUS", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, status: settled });
+      if (settled) {
+        runs.dispatch({ type: "DELIVERY_STATUS", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, status: settled });
+        if (settled === "dropped" && delivery.method === "opaque") commandFailure?.(effect.runId, "outcome unknown; this command was not retried");
+      }
     } catch { /* A reconnect or later turn end queries durable truth again. */ }
   };
   /** An opaque command input: exactly one `send {input_id}`, never resent after an uncertain outcome. */
@@ -113,8 +116,10 @@ function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: Del
     } catch (error) {
       const uncertain = typeof code(error) !== "number";
       if (!uncertain || !delivery.attemptId) runs.restoreDraft(effect.runId, delivery.text);
+      const failure = uncertain ? "outcome unknown; this command was not retried" : error instanceof Error ? error.message : String(error);
+      commandFailure?.(effect.runId, failure);
       runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, ...(uncertain && delivery.attemptId ? { queued: true } : { failed: true }) });
-      return finish(effect.operationId, uncertain && !delivery.attemptId ? new Error("outcome unknown; this command was not retried") : error);
+      return finish(effect.operationId, uncertain && !delivery.attemptId ? new Error(failure) : error);
     }
   };
   const handleDelivery = async (effect: Extract<WorkspaceEffect, { type: "deliver" }>) => {
@@ -164,7 +169,7 @@ function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: Del
 }
 
 /** Coordinates UI bindings and reducer commands; all zeta calls are in the effect executor above. */
-export function createDeliveryManager(client: () => ZetaClient | null, runs: DeliveryRunStore, executeSession: (effects: readonly WorkspaceEffect[]) => void = () => {}, abortSession?: (runId: string) => Promise<unknown>) {
+export function createDeliveryManager(client: () => ZetaClient | null, runs: DeliveryRunStore, executeSession: (effects: readonly WorkspaceEffect[]) => void = () => {}, abortSession?: (runId: string) => Promise<unknown>, commandFailure?: (runId: string, text: string) => void) {
   const records = new Map<string, DeliveryRecord>();
   const pending = new Map<string, { resolve(value?: unknown): void; reject(error: unknown): void }>();
   const opaqueInputs = new Map<OperationId, string>();
@@ -178,7 +183,7 @@ export function createDeliveryManager(client: () => ZetaClient | null, runs: Del
     const waiter = pending.get(operationId); if (!waiter) return;
     pending.delete(operationId); error === undefined ? waiter.resolve() : waiter.reject(error);
   };
-  const executor = createDeliveryEffectExecutor(client, runs, record, finish, opaqueInputs, abortSession);
+  const executor = createDeliveryEffectExecutor(client, runs, record, finish, opaqueInputs, abortSession, commandFailure);
   const operation = (start: (operationId: OperationId) => void) => { const operationId = crypto.randomUUID() as OperationId; const result = new Promise<void>((resolve, reject) => pending.set(operationId, { resolve, reject })); start(operationId); return result; };
   runs.setEffectExecutor((effects) => { executor.execute(effects); executeSession(effects); });
   return {

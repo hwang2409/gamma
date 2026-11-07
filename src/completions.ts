@@ -69,7 +69,7 @@ export class CompletionModel {
     if (!this.state.open || !row || !this.token || !this.sameToken(this.token)) return;
     const before = this.value.slice(0, this.token.start);
     const after = this.value.slice(this.caret);
-    const insert = `${row.trigger}${row.name}${row.trigger === "$" || !/^\s/.test(after) ? " " : ""}`;
+    const insert = `${row.trigger}${row.name}${!/^\s/.test(after) ? " " : ""}`;
     return { value: before + insert + after, caret: before.length + insert.length };
   }
 

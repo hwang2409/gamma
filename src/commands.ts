@@ -162,10 +162,10 @@ function directSend(text: string): ComposerAction {
   return { kind: "send", text: text.startsWith("//") ? text.slice(1) : text };
 }
 
-export function createUnavailableCommandController(): CommandController {
+export function createUnavailableCommandController(message = "not available in this server version"): CommandController {
   return {
     async prepareComposerInput(text) {
-      return isSlashCommandText(text) ? unavailableReceipt() : directSend(text);
+      return isSlashCommandText(text) ? { kind: "receipt", text: message, tone: "error", retain: true } : directSend(text);
     },
     async completions() { return []; },
     async refreshCatalog() {},

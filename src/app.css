@@ -180,10 +180,13 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .command-listbox { display: grid; max-height: min(32dvh, 260px); overflow-y: auto; border-bottom: 1px solid var(--fulcrum-border); background: var(--fulcrum-bg); }
 .dock .command-option { display: grid; grid-template-columns: minmax(10ch, auto) minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 40px; padding: 6px var(--inset); border: 0; background: transparent; color: var(--fulcrum-fg); text-align: left; }
 /* Hover is a faint fill only; the active row, the one Enter or Tab accepts, has the surface fill, an accent bar, and full-color text. */
-.dock .command-option:hover { background: color-mix(in srgb, var(--fulcrum-surface) 50%, var(--fulcrum-bg)); }
+.dock .command-option:hover { background: color-mix(in srgb, var(--fulcrum-surface) 50%, var(--fulcrum-bg)); text-decoration: none; }
 .dock .command-option[aria-selected="true"] { background: var(--fulcrum-surface); box-shadow: inset 4px 0 var(--fulcrum-accent); }
 .dock .command-option[aria-selected="true"] :is(.command-description, .command-source) { color: var(--fulcrum-fg); }
 .command-name { font-weight: 700; }
+.gamma-tool { position: relative; }
+.gamma-tool.always-allowed [data-part="tool-status"] { visibility: hidden; }
+.approval-session-decision { position: absolute; inset-block-start: 12px; inset-inline-end: 12px; color: var(--fulcrum-muted); font-size: 0.85em; }
 .command-description { min-width: 0; overflow: hidden; color: var(--fulcrum-muted); text-overflow: ellipsis; white-space: nowrap; }
 .command-source { color: var(--fulcrum-muted); font-size: 11px; }
 .dock [data-part="composer"][data-state="idle"]:not(:focus-within) { border-color: color-mix(in srgb, var(--fulcrum-accent) 45%, var(--fulcrum-border)); border-left-color: var(--fulcrum-accent); }
@@ -270,8 +273,8 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .inspector-body pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 600px) {
   .dock .command-receipt .ghost { min-width: 44px; min-height: 44px; }
-  .dock .command-option { grid-template-columns: minmax(0, 1fr) auto; min-height: 44px; }
-  .command-description { grid-column: 1 / -1; white-space: normal; }
+  .dock .command-option { grid-template-columns: minmax(8ch, auto) minmax(0, 1fr) auto; min-height: 44px; }
+  .command-description { grid-column: auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .inspector-backdrop { padding: 0; }
   .artifacts { padding-inline-start: 8px; }
   .undelivered:not([data-empty]) { min-height: 3.2em; }

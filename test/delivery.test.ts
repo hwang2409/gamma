@@ -148,19 +148,46 @@ test("uncertain opaque delivery persists display intent and reconciles without r
   manager.dispose(); state.dispose();
 });
 
-test("definitive opaque rejection restores display text and requires fresh preparation", async () => {
+test("definitive opaque rejection restores display text and writes a run-local receipt", async () => {
   const calls: Array<[string, Record<string, unknown>]> = [];
+  const receipts: Array<[string, string]> = [];
   const rejected = Object.assign(new Error("turn already active"), { code: -32004 });
   const client = { features: ["delivery_id"], request: async (method: string, params: Record<string, unknown>) => { calls.push([method, params]); throw rejected; } } as any;
   const state = createRunStateStore(8, undefined, memoryStorage(), { id: "e" as any, run: "s" as any });
-  state.activate("s"); state.edit("s", { text: "/review change" });
-  const manager = createDeliveryManager(() => client, state);
+  state.activate("s"); state.edit("s", { text: "/review change\nkeep this draft" });
+  const manager = createDeliveryManager(() => client, state, undefined, undefined, (runId, text) => receipts.push([runId, text]));
   await expect(manager.submitOpaque("s", "opaque-1", "/review change", "/review change", "delivery-1")).rejects.toThrow("turn already active");
-  expect(state.get("s").text).toBe("/review change");
+  expect(state.get("s").text).toBe("/review change\nkeep this draft");
+  expect(receipts).toEqual([["s", "turn already active"]]);
   expect(state.get("s").deliveries.size).toBe(0);
   expect(calls).toHaveLength(1);
-  await expect(manager.submitOpaque("s", "opaque-2", "/review change", "/review change", "delivery-2")).rejects.toThrow();
-  expect(calls[1]?.[1]).toEqual({ input_id: "opaque-2", delivery_id: "delivery-2" });
+  manager.dispose(); state.dispose();
+});
+
+test.each(["dropped", "unknown"])("reconciled opaque %s restores with a newline and writes the unknown-outcome receipt", async (status) => {
+  const saved = memoryStorage();
+  const calls: Array<[string, Record<string, unknown>]> = [];
+  const receipts: Array<[string, string]> = [];
+  let uncertain = true;
+  const client = { features: ["delivery_id"], request: async (method: string, params: Record<string, unknown>) => {
+    calls.push([method, params]);
+    if (uncertain) throw new Error("timeout");
+    return { status };
+  } } as any;
+  let state = createRunStateStore(8, undefined, saved, { id: "e" as any, run: "s" as any });
+  state.activate("s"); state.edit("s", { text: "/review change" });
+  let manager = createDeliveryManager(() => client, state);
+  await expect(manager.submitOpaque("s", "opaque-1", "/review change", "/review change", "delivery-1")).rejects.toThrow("timeout");
+  manager.dispose(); state.dispose();
+
+  uncertain = false;
+  state = createRunStateStore(8, undefined, saved, { id: "e2" as any, run: "s" as any });
+  state.activate("s"); state.edit("s", { text: "keep this draft" });
+  manager = createDeliveryManager(() => client, state, undefined, undefined, (runId, text) => receipts.push([runId, text]));
+  manager.reconcile("s"); await Bun.sleep(0);
+  expect(state.get("s").text).toBe("/review change\nkeep this draft");
+  expect(receipts).toEqual([["s", "outcome unknown; this command was not retried"]]);
+  expect(calls.at(-1)).toEqual(["delivery_status", { delivery_id: "delivery-1" }]);
   manager.dispose(); state.dispose();
 });
 
