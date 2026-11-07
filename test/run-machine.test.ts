@@ -1,0 +1,67 @@
+import { expect, test } from "bun:test";
+import { reduceWorkspace, selectedRun, type DraftRunId, type EntryId, type OperationId, type SessionId, type WorkspaceEvent, type WorkspaceState } from "../src/run-state";
+
+const draft = (id: number) => `draft:${id}` as DraftRunId;
+const session = (id: number) => `s-${id}` as SessionId;
+const entry = (id: number) => `e-${id}` as EntryId;
+const operation = (id: number) => `o-${id}` as OperationId;
+const initial = (): WorkspaceState => ({ entry: { id: entry(0), run: draft(0) }, runs: new Map(), aliases: new Map(), attachment: { kind: "detached" } });
+
+class Reference {
+  selected: string = draft(0);
+  entry = entry(0);
+  aliases = new Map<string, string>();
+  lifecycle = new Map<string, { kind: string; operation?: string }>();
+  attached: string | null = null;
+  turn: string | null = null;
+  canonical(id: string) { return this.aliases.get(id) ?? id; }
+  apply(event: WorkspaceEvent) {
+    switch (event.type) {
+      case "NEW_RUN": this.entry = event.entryId; this.selected = event.runId; this.lifecycle.set(event.runId, { kind: "draft" }); break;
+      case "NAVIGATED": this.entry = event.entryId; this.selected = this.canonical(event.runId); if (!this.lifecycle.has(this.selected)) this.lifecycle.set(this.selected, { kind: this.selected.startsWith("draft:") ? "draft" : "opening" }); break;
+      case "FIRST_SEND": if ((this.lifecycle.get(event.runId)?.kind ?? "draft") === "draft") this.lifecycle.set(event.runId, { kind: "creating", operation: event.operationId }); break;
+      case "NEW_SESSION_OK": if (this.lifecycle.get(event.runId)?.operation === event.operationId) { const old = this.lifecycle.get(event.runId)!; this.lifecycle.delete(event.runId); this.lifecycle.set(event.sessionId, { ...old, kind: "opening" }); this.aliases.set(event.runId, event.sessionId); if (this.selected === event.runId) this.selected = event.sessionId; } break;
+      case "NEW_SESSION_FAIL": if (this.lifecycle.get(event.runId)?.operation === event.operationId) this.lifecycle.set(event.runId, { kind: "failed" }); break;
+      case "STATUS": this.attached = event.sessionId ?? null; this.turn = event.sessionId ? event.turn : null; break;
+      case "RESUME_OK": this.attached = event.runId; this.turn = "idle"; this.lifecycle.set(event.runId, { kind: "opening", operation: event.operationId }); break;
+      case "RESUME_BUSY": this.lifecycle.set(event.runId, { kind: "opening", operation: event.operationId }); break;
+      case "RESUME_FAIL": if (this.lifecycle.get(event.runId)?.operation === event.operationId) this.lifecycle.set(event.runId, { kind: "failed" }); break;
+      case "FIRST_PAGE": if (!event.operationId || !this.lifecycle.get(event.runId)?.operation || this.lifecycle.get(event.runId)?.operation === event.operationId) this.lifecycle.set(event.runId, { kind: "open" }); break;
+      case "TURN_START": if (this.attached === event.runId) this.turn = event.turn ?? "running"; break;
+      case "TURN_END": if (this.attached === event.runId) this.turn = "idle"; break;
+      case "DISCONNECT": this.attached = null; this.turn = null; break;
+      default: break;
+    }
+  }
+}
+
+const random = (seed: number) => () => { seed = Math.imul(seed ^ seed >>> 15, 1 | seed); seed ^= seed + Math.imul(seed ^ seed >>> 7, 61 | seed); return ((seed ^ seed >>> 14) >>> 0) / 4294967296; };
+
+test("workspace reducer matches an independent model across navigation, activity, and stale completions", () => {
+  const names = ["NEW_RUN", "NAVIGATED", "FIRST_SEND", "NEW_SESSION_OK", "NEW_SESSION_FAIL", "STATUS", "RESUME_OK", "RESUME_BUSY", "RESUME_FAIL", "FIRST_PAGE", "TURN_START", "TURN_END", "DELIVERY_ACK", "DELIVERY_STATUS", "STOP", "DISCONNECT", "RECONNECT", "SETTINGS_OK", "SETTINGS_FAIL"] as const;
+  for (let seed = 0; seed < 100; seed++) {
+    const next = random(seed + 1); let state = initial(); const reference = new Reference(); const prefix: WorkspaceEvent[] = [];
+    for (let step = 0; step < 500; step++) {
+      const n = Math.floor(next() * 8); const d = draft(n); const s = session(n); const op = operation(Math.floor(next() * 20));
+      const name = names[Math.floor(next() * names.length)]!;
+      const event = ({
+        NEW_RUN: { type: "NEW_RUN", entryId: entry(step + 1), runId: draft(step + 100) }, NAVIGATED: { type: "NAVIGATED", entryId: entry(step + 1), runId: next() < .35 ? d : s }, FIRST_SEND: { type: "FIRST_SEND", runId: d, operationId: op }, NEW_SESSION_OK: { type: "NEW_SESSION_OK", runId: d, sessionId: s, operationId: op }, NEW_SESSION_FAIL: { type: "NEW_SESSION_FAIL", runId: d, operationId: op, error: "create failed" }, STATUS: { type: "STATUS", ...(next() < .2 ? {} : { sessionId: s }), turn: next() < .6 ? "idle" : "running" }, RESUME_OK: { type: "RESUME_OK", runId: s, operationId: op }, RESUME_BUSY: { type: "RESUME_BUSY", runId: s, owner: session((n + 1) % 8), operationId: op }, RESUME_FAIL: { type: "RESUME_FAIL", runId: s, operationId: op, error: "open failed" }, FIRST_PAGE: { type: "FIRST_PAGE", runId: s, operationId: op, transcript: `history ${n}` }, TURN_START: { type: "TURN_START", runId: s, turn: "running" }, TURN_END: { type: "TURN_END", runId: s }, DELIVERY_ACK: { type: "DELIVERY_ACK", runId: s, intentId: `i-${n}`, queued: next() < .5 }, DELIVERY_STATUS: { type: "DELIVERY_STATUS", runId: s, intentId: `i-${n}`, status: next() < .5 ? "delivered" : "dropped" }, STOP: { type: "STOP", runId: s }, DISCONNECT: { type: "DISCONNECT" }, RECONNECT: { type: "RECONNECT" }, SETTINGS_OK: { type: "SETTINGS_OK", runId: s, operationId: op, model: "m" }, SETTINGS_FAIL: { type: "SETTINGS_FAIL", runId: s, operationId: op, error: "settings failed" },
+      } as const)[name] as WorkspaceEvent;
+      prefix.push(event); reference.apply(event); const result = reduceWorkspace(state, event); state = result.state;
+      try {
+        expect(state.entry.run).toBe(reference.selected);
+        expect(selectedRun(state)?.id ?? state.entry.run).toBe(reference.selected);
+        const attached = state.attachment.kind === "attached" ? state.attachment.sessionId : null;
+        expect(attached).toBe(reference.attached);
+        if (state.attachment.kind === "attached") expect(state.attachment.turn).toBe(reference.turn);
+        for (const effect of result.effects) {
+          if (effect.type === "history-replace-current") expect(effect.entryId).toBe(state.entry.id);
+          if (effect.type === "resume" || effect.type === "new-session") expect(state.attachment.kind !== "attached" || state.attachment.turn === "idle").toBeTrue();
+          if (effect.type === "load-settings" || effect.type === "set-settings") expect(state.attachment.kind === "attached" && state.attachment.sessionId === effect.runId).toBeTrue();
+        }
+        const owners = new Set<string>();
+        for (const [runId, record] of state.runs) for (const intent of record.deliveries.keys()) { expect(owners.has(intent)).toBeFalse(); owners.add(intent); expect(runId).toBe(record.id); }
+      } catch (error) { throw new Error(`seed ${seed}, step ${step}\n${JSON.stringify(prefix, null, 2)}\n${String(error)}`); }
+    }
+  }
+});

@@ -7,7 +7,7 @@ import type { ZetaClient } from "@fulcrum/zeta";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { createConnection, serveCommand, type Connection, type ConnectionState } from "./connection";
 import { createDelivery, stopTurn } from "./delivery";
-import { createRun, sessionPresentation, sessionTitle, transitionRun, type OpenRun, type RunControl, type RunState, type SessionMeta } from "./session";
+import { createRun, sessionTitle, type OpenRun, type RunControl, type RunState, type SessionMeta } from "./session";
 import { ThemePicker, useTheme } from "./theme";
 import { GammaComposer, type Submit } from "./composer";
 import { nextRunModel, RunSettings, SettingsMenu, useVimSetting, VimToggle } from "./controls";
@@ -117,64 +117,55 @@ function useCountdown(at: number | null) {
 }
 
 const RUN = "gamma-run";
-/** The run to resume: `?run=` first (a shared link), else the one this browser had open. */
-const initialRun = () => {
-  const id = new URLSearchParams(location.search).get("run") ?? localStorage.getItem(RUN);
-  if (id) rememberRun(id, false, id); // a run reopened from storage is in the url too, so the address can be shared
-  return id;
-};
-const rememberRun = (id: string | null, push = false, composerScope = id ?? "blank:0") => {
+type BrowserEntry = { gammaEntryId: string; run: string };
+const draftId = () => `draft:${crypto.randomUUID()}`;
+const entryId = () => crypto.randomUUID();
+const writeEntry = (entry: BrowserEntry, mode: "push" | "replace") => {
   const url = new URL(location.href);
-  if (id) { url.searchParams.set("run", id); localStorage.setItem(RUN, id); }
-  else { url.searchParams.delete("run"); localStorage.removeItem(RUN); }
-  history[push ? "pushState" : "replaceState"]({ ...history.state, gammaComposerScope: composerScope }, "", url);
+  url.searchParams.set("run", entry.run);
+  localStorage.setItem(RUN, entry.run);
+  history[mode === "push" ? "pushState" : "replaceState"]({ ...history.state, ...entry }, "", url);
+};
+const initialEntry = (): BrowserEntry => {
+  const state = history.state as Partial<BrowserEntry> | null;
+  const run = new URLSearchParams(location.search).get("run") ?? localStorage.getItem(RUN) ?? draftId();
+  const entry = { gammaEntryId: typeof state?.gammaEntryId === "string" ? state.gammaEntryId : entryId(), run };
+  writeEntry(entry, "replace");
+  return entry;
 };
 
 export function App() {
   const [theme, setTheme] = useTheme();
   const [vim, setVim] = useVimSetting();
   const connection = useMemo(() => createConnection({ origin: location.origin }), []);
-  const selected = useMemo(initialRun, []);
+  const firstEntry = useMemo(initialEntry, []);
   const runState = useMemo(() => createRunStateStore(), []);
-  const scopeSequence = useRef(0);
-  const [composerScope, setComposerScope] = useState(() => selected ?? "blank:0");
-  const [dockIdentity, setDockIdentity] = useState(composerScope);
-  const composerScopeRef = useRef(composerScope);
-  const navigationScope = useRef<string | null>(null);
-  const creating = useRef<{ defaultModel: boolean } | null>(null);
-  const pushSelection = useRef(false);
-  const runs = useMemo(() => createRun(connection, { selected, onSelect: (id) => {
-    let scope: string;
-    if (id && creating.current) {
-      runState.promote(composerScopeRef.current, id);
-      scope = id;
-    } else {
-      scope = navigationScope.current ?? id ?? `blank:${++scopeSequence.current}`;
-      navigationScope.current = null;
-      setDockIdentity(scope);
-    }
-    composerScopeRef.current = scope;
-    setComposerScope(scope);
-    const nextModel = nextRunModel().model;
-    runState.activate(scope, id ? { choice: "explicit", model: "" } : nextModel ? { choice: "explicit", model: nextModel } : { choice: "default" });
-    rememberRun(id, pushSelection.current, scope);
-    pushSelection.current = false;
-  }, bindings: hostBindings }), [connection, selected, runState]);
+  const [browserEntry, setBrowserEntry] = useState(firstEntry);
+  const browserEntryRef = useRef(browserEntry);
+  browserEntryRef.current = browserEntry;
+  const selectedSession = firstEntry.run.startsWith("draft:") ? null : firstEntry.run;
+  const runs = useMemo(() => createRun(connection, { selected: selectedSession, bindings: hostBindings }), [connection, selectedSession]);
   useEffect(() => {
-    const nextModel = nextRunModel().model;
-    runState.activate(composerScopeRef.current, selected ? { choice: "explicit", model: "" } : nextModel ? { choice: "explicit", model: nextModel } : { choice: "default" });
+    const activate = (id: string) => {
+      const nextModel = nextRunModel().model;
+      runState.activate(id, id.startsWith("draft:") ? nextModel ? { choice: "explicit", model: nextModel } : { choice: "default" } : { choice: "explicit", model: "" });
+    };
+    activate(firstEntry.run);
     const pop = (event: PopStateEvent) => {
-      const id = new URLSearchParams(location.search).get("run");
-      const scope = (event.state as { gammaComposerScope?: unknown } | null)?.gammaComposerScope;
-      navigationScope.current = typeof scope === "string" ? scope : id;
-      if (id) runs.select(id); else runs.reset();
+      const raw = new URLSearchParams(location.search).get("run") ?? draftId();
+      const canonical = runState.canonical(raw);
+      const state = event.state as Partial<BrowserEntry> | null;
+      const next = { gammaEntryId: typeof state?.gammaEntryId === "string" ? state.gammaEntryId : entryId(), run: canonical };
+      if (canonical !== raw || !state?.gammaEntryId) writeEntry(next, "replace");
+      setBrowserEntry(next); activate(canonical);
+      if (canonical.startsWith("draft:")) runs.reset(); else runs.select(canonical);
     };
     addEventListener("popstate", pop);
     return () => { removeEventListener("popstate", pop); runState.dispose(); runs.dispose(); connection.stop(); };
-  }, [connection, runState, runs]);
+  }, [connection, firstEntry.run, runState, runs]);
   const state = useExternal(connection);
   const view = useExternal(runs);
-  const open = sessionPresentation(view.transition).open;
+  const open = view.open;
   // A new run remounts the dock (a fresh draft and delivery state) over a fresh empty store.
   const [epoch, setEpoch] = useState(0);
   const blank = useMemo(() => createRunStore(), [epoch]);
@@ -185,8 +176,6 @@ export function App() {
   const viewerOpener = useRef<HTMLElement | null>(null);
   const openViewer = useCallback((block: any) => { viewerOpener.current = document.activeElement as HTMLElement | null; setViewer(block); }, []);
   const closeViewer = useCallback(() => { setViewer(null); requestAnimationFrame(() => viewerOpener.current?.focus()); }, []);
-  const [newRunConfirm, setNewRunConfirm] = useState(false);
-  const newRunButton = useRef<HTMLButtonElement>(null);
   const [undeliveredByRun, setUndeliveredByRun] = useState<ReadonlyMap<string, ReadonlySet<string>>>(() => new Map());
   const [waitingByRun, setWaitingByRun] = useState<ReadonlyMap<string, ReadonlySet<string>>>(() => new Map());
   const onWaitingDelivery = useCallback((scope: string, intent: string, waiting: boolean) => setWaitingByRun((current) => {
@@ -204,27 +193,25 @@ export function App() {
       return next;
     });
   }, []);
-  const undelivered = undeliveredByRun.get(composerScope) ?? new Set<string>();
-  const waitingDeliveries = waitingByRun.get(composerScope) ?? new Set<string>();
-  const newRun = useCallback(async () => {
-    if (store.getState().agent === "running") {
-      setNewRunConfirm(true);
-      return;
-    }
-    pushSelection.current = true;
-    runs.reset();
-    setYolo(false);
-    setEpoch((value) => value + 1);
+  const undelivered = undeliveredByRun.get(browserEntry.run) ?? new Set<string>();
+  const waitingDeliveries = waitingByRun.get(browserEntry.run) ?? new Set<string>();
+  const newRun = useCallback(() => {
+    const next = { gammaEntryId: entryId(), run: draftId() };
+    writeEntry(next, "push"); setBrowserEntry(next); runState.activate(next.run, nextRunModel().model ? { choice: "explicit", model: nextRunModel().model! } : { choice: "default" });
+    runs.reset(); setYolo(false); setEpoch((value) => value + 1);
     requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('.dock textarea[aria-label="message"]')?.focus());
-  }, [runs, store]);
-  const confirmNewRun = useCallback(async () => {
-    setNewRunConfirm(false);
-    if (connection.client) await stopTurn(connection.client).catch(() => {});
-    pushSelection.current = true;
-    runs.reset();
-    setYolo(false);
-    setEpoch((value) => value + 1);
-  }, [connection, newRun]);
+  }, [runState, runs]);
+  const onCreated = useCallback((from: string, sessionId: string) => {
+    runState.promote(from, sessionId);
+    const current = browserEntryRef.current;
+    if (current.run !== from) return;
+    const next = { ...current, run: sessionId };
+    writeEntry(next, "replace"); setBrowserEntry(next);
+  }, [runState]);
+  const selectRun = useCallback((id: string) => {
+    const next = { gammaEntryId: entryId(), run: id };
+    writeEntry(next, "push"); setBrowserEntry(next); runState.activate(id, { choice: "explicit", model: "" }); runs.select(id);
+  }, [runState, runs]);
   const client = state.phase === "connected" ? connection.client : null;
 
   return (
@@ -237,18 +224,17 @@ export function App() {
             <div className="app">
               <header className="topbar">
                 <span className="brand"><span className="brand-mark" aria-hidden="true" /><span className="brand-name">gamma</span></span>
-                <RunTitle session={view.session} blank={!sessionPresentation(view.transition).selected} />
+                <RunTitle session={view.session} blank={!view.selected} />
                 <YoloIndicator className="topbar-yolo" />
-                <button ref={newRunButton} type="button" className="ghost new-run" aria-label="new run" onClick={() => void newRun()} disabled={!sessionPresentation(view.transition).selected}><span className="new-run-label">new run</span><span className="new-run-short" aria-hidden="true">+</span></button>
+                <button type="button" className="ghost new-run" aria-label="new run" onClick={() => void newRun()}><span className="new-run-label">new run</span><span className="new-run-short" aria-hidden="true">+</span></button>
                 <SettingsMenu>
                   <ThemePicker theme={theme} onChange={setTheme} />
                   <VimToggle on={vim} onChange={setVim} />
                 </SettingsMenu>
               </header>
               <main className="main">
-                <Body state={state} view={view} connection={connection} runs={runs} onNewRun={() => void newRun()} />
-                <Dock key={dockIdentity} runId={composerScope} runState={runState} onCreating={(value) => { creating.current = value; }} state={state} view={view} connection={connection} runs={runs} vim={vim} onUndelivered={onUndelivered} onWaitingDelivery={onWaitingDelivery} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />
-                {newRunConfirm ? <ConfirmDialog title="stop the running turn?" confirm="stop and start new run" onConfirm={confirmNewRun} onCancel={() => { setNewRunConfirm(false); newRunButton.current?.focus(); }} /> : null}
+                <Body state={state} view={view} connection={connection} runs={runs} onNewRun={newRun} onSelectRun={selectRun} />
+                <Dock key={browserEntry.run} runId={browserEntry.run} runState={runState} onCreated={onCreated} state={state} view={view} connection={connection} runs={runs} vim={vim} onUndelivered={onUndelivered} onWaitingDelivery={onWaitingDelivery} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />
                 {viewer ? <Inspector value={viewer} onClose={closeViewer} /> : null}
               </main>
             </div>
@@ -344,25 +330,26 @@ function StatusLine({ phase }: { phase: RunPhase }) {
   );
 }
 
-async function submitRun({ text, images, steer, deliveryId, connection, runs, delivery, yolo, onCreating }: { text: string; images: readonly import("./image-queue").QueuedImage[]; steer: boolean; deliveryId: string; connection: Connection; runs: RunControl; delivery: ReturnType<typeof createDelivery>; yolo: boolean; onCreating(value: { defaultModel: boolean } | null): void }) {
+async function submitRun({ text, images, steer, deliveryId, connection, runs, delivery, yolo, runId, onCreated }: { text: string; images: readonly import("./image-queue").QueuedImage[]; steer: boolean; deliveryId: string; connection: Connection; runs: RunControl; delivery: ReturnType<typeof createDelivery>; yolo: boolean; runId: string; onCreated(from: string, sessionId: string): void }) {
   const target = connection.client;
   if (!target) throw new Error("not connected to zeta serve");
-  if (!transitionRun(runs.state.transition)) {
+  if (!runs.state.open) {
     const choice = nextRunModel();
-    onCreating({ defaultModel: !choice.model });
-    try { await runs.create(choice.model && target.features.includes("new_session_settings") ? { ...choice, approval_mode: yolo ? "allow" : "ask" } : choice); }
+    let sessionId: string;
+    try { sessionId = await runs.create(choice.model && target.features.includes("new_session_settings") ? { ...choice, approval_mode: yolo ? "allow" : "ask" } : choice); }
     catch (cause) {
-      if ((cause as { code?: unknown }).code === -32004) throw new Error("another client has a turn running in zeta; wait for it to finish, then send again");
+      if ((cause as { code?: unknown }).code === -32004) throw new Error("another run has the active zeta turn; wait for it to finish, then send again");
       throw cause;
-    } finally { onCreating(null); }
-    if (!choice.model || !target.features.includes("new_session_settings")) await applyFirstTurnSettings(target, transitionRun(runs.state.transition)!.id, choice, yolo);
+    }
+    onCreated(runId, sessionId);
+    if (!choice.model || !target.features.includes("new_session_settings")) await applyFirstTurnSettings(target, sessionId, choice, yolo);
   }
-  const id = transitionRun(runs.state.transition)!.id;
+  const id = runs.state.open!.id;
   if (!images.length) return delivery.submit(target, text, steer, deliveryId);
   return target.request("send_images", { session_id: id, delivery_id: deliveryId, text, images: images.map(({ name, mime_type, data }) => ({ name, mime_type, data })) }, { timeoutMs: 30_000 });
 }
 
-function dockPhase(state: ConnectionState, present: ReturnType<typeof sessionPresentation>, open: OpenRun | null, agent: ReturnType<typeof useAgentPhase>, starting: boolean): RunPhase {
+function dockPhase(state: ConnectionState, present: RunState, open: OpenRun | null, agent: ReturnType<typeof useAgentPhase>, starting: boolean): RunPhase {
   if (state.phase === "connecting" || state.phase === "dropped") return { kind: state.phase === "connecting" && !state.lost ? "connecting" : "reconnecting" };
   if ((present.opening || open?.stale) && !starting) return { kind: open?.stale ? "reconnecting" : "opening" };
   if (agent.kind === "approval") return { kind: "approval" };
@@ -380,7 +367,7 @@ function useDockDelivery(runs: RunControl, scope: string, running: boolean, clie
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
   const provisional = useRef(new Map<string, unknown>());
-  const activeStore = transitionRun(runs.state.transition)?.lease.store;
+  const activeStore = runs.state.open?.lease.store;
   const storeRef = useRef(activeStore);
   storeRef.current = activeStore;
   const delivery = useMemo(() => createDelivery(undefined, (event) => {
@@ -430,17 +417,17 @@ function dockReadOnlyReason(displayed: string | null, active: string | null) {
   return active && displayed !== active ? "this run is read-only while another run has the active zeta turn; stop it or wait" : null;
 }
 
-function dockBlockedReason(state: ConnectionState, present: ReturnType<typeof sessionPresentation>, open: OpenRun | null) {
+function dockBlockedReason(state: ConnectionState, present: RunState, open: OpenRun | null) {
   if (state.phase === "not_running") return "sending is paused until zeta serve runs again";
   if (state.phase !== "connected") return "sending is paused until zeta reconnects";
   if (present.openError) return "sending is paused until the run opens";
   return present.opening || open?.stale ? "sending is paused until the run opens" : null;
 }
 
-function Dock({ state, view, connection, runs, vim, onUndelivered, onWaitingDelivery, onRetryTurn, onImageOpen, runState, runId, onCreating }: {
-  state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; vim: boolean; onUndelivered(scope: string, intents: string[]): void; onWaitingDelivery(scope: string, intent: string, waiting: boolean): void; onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>; onImageOpen(block: any): void; runState: RunStateStore; runId: string; onCreating(value: { defaultModel: boolean } | null): void;
+function Dock({ state, view, connection, runs, vim, onUndelivered, onWaitingDelivery, onRetryTurn, onImageOpen, runState, runId, onCreated }: {
+  state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; vim: boolean; onUndelivered(scope: string, intents: string[]): void; onWaitingDelivery(scope: string, intent: string, waiting: boolean): void; onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>; onImageOpen(block: any): void; runState: RunStateStore; runId: string; onCreated(from: string, sessionId: string): void;
 }) {
-  const present = sessionPresentation(view.transition);
+  const present = view;
   const open = present.open;
   const blank = !present.selected;
   const client = state.phase === "connected" ? connection.client : null;
@@ -455,22 +442,19 @@ function Dock({ state, view, connection, runs, vim, onUndelivered, onWaitingDeli
 
   const onSubmit: Submit = useCallback(async (text, images, { steer, deliveryId }) => {
     setStarting(true);
-    try { return await submitRun({ text, images, steer, deliveryId, connection, runs, delivery, yolo, onCreating }); }
+    try { return await submitRun({ text, images, steer, deliveryId, connection, runs, delivery, yolo, runId, onCreated }); }
     finally { setStarting(false); }
-  }, [connection, runs, delivery, yolo, onCreating]);
+  }, [connection, runs, delivery, yolo, runId, onCreated]);
   const onStop = useCallback(() => (client ? delivery.stop(client) : Promise.reject(new Error("not connected to zeta serve"))), [client, delivery]);
   const lastPrompt = useLastPrompt();
 
   useDockRetry(agent, client, delivery, lastPrompt, onRetryTurn);
 
   const failure = present.openError;
-  useEffect(() => {
-    if (failure?.busy && view.active === null && state.phase === "connected") runs.select(failure.id);
-  }, [failure, runs, state.phase, view.active]);
   const problem = (state.phase !== "connected" && state.phase !== "connecting" && state.phase !== "dropped") || Boolean(failure);
   const phase = dockPhase(state, present, open, agent, starting);
-  const readOnly = dockReadOnlyReason(open?.id ?? null, view.active);
-  const blockedReason = starting ? null : dockBlockedReason(state, present, open);
+  const readOnly = blank ? null : dockReadOnlyReason(open?.id ?? null, view.active);
+  const blockedReason = starting ? null : view.active && blank ? `sending waits for the active run ${view.active}` : dockBlockedReason(state, present, open);
   const sessionId = blank || starting ? null : open?.id ?? null;
   return <div className="dock"><>{problem ? null : <StatusLine phase={phase} />}</><DockComposer readOnly={readOnly} blockedReason={blockedReason} running={running} vim={vim} onSubmit={onSubmit} onStop={onStop} onImageOpen={onImageOpen} client={client} sessionId={sessionId} createdWithDefault={record.model.choice === "default"} yolo={yolo} onYolo={setYolo} runState={runState} runId={runId} /></div>;
 }
@@ -485,19 +469,21 @@ function useLastPrompt() {
   }, [store]));
 }
 
-function OpenBody({ state, connection, present, runs }: { state: ConnectionState; connection: Connection; present: ReturnType<typeof sessionPresentation>; runs: RunControl }) {
+function OpenBody({ state, connection, present, runs }: { state: ConnectionState; connection: Connection; present: RunState; runs: RunControl }) {
   const open = present.open!;
   const failed = present.openError;
   const offline = state.phase !== "connected";
-  return <><>{offline && (state.phase !== "connecting" || state.lastFailure) && state.phase !== "dropped" ? <ConnectionNotice state={state} connection={connection} compact /> : null}</><>{!open.history.complete ? <p className="note" data-tone="busy" role="status">loading earlier messages… {open.history.messages.toLocaleString("en")} loaded</p> : null}</><>{open.syncing ? <p className="note" data-tone="busy" role="status">live updates paused while this run is busy; it will catch up</p> : null}</><>{failed && !(failed.busy && failed.restored) ? <div className="note" data-tone="danger" role="alert"><span>could not reopen this run: {failed.message}</span> <button type="button" className="ghost" onClick={() => runs.dismissOpenError()}>dismiss</button> <button type="button" className="ghost" onClick={() => runs.select(failed.id)}>try again</button></div> : null}</><Run client={offline ? null : connection.client} open={open} readOnly={Boolean(present.opening || (failed && !failed.restored))} /></>;
+  return <><>{offline && (state.phase !== "connecting" || state.lastFailure) && state.phase !== "dropped" ? <ConnectionNotice state={state} connection={connection} compact /> : null}</><>{!open.history.complete ? <p className="note" data-tone="busy" role="status">loading earlier messages… {open.history.messages.toLocaleString("en")} loaded</p> : null}</><>{open.syncing ? <p className="note" data-tone="busy" role="status">live updates paused while this run is busy; it will catch up</p> : null}</><>{failed ? <div className="note" data-tone="danger" role="alert"><span>could not reopen this run: {failed.message}</span> <button type="button" className="ghost" onClick={() => runs.dismissOpenError()}>dismiss</button> <button type="button" className="ghost" onClick={() => runs.select(failed.id)}>try again</button></div> : null}</><Run client={offline ? null : connection.client} open={open} readOnly={Boolean(present.opening || failed)} /></>;
 }
-function Body({ state, view, connection, runs, onNewRun }: { state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; onNewRun(): void }) {
-  const present = sessionPresentation(view.transition);
+function Body({ state, view, connection, runs, onNewRun, onSelectRun }: { state: ConnectionState; view: RunState; connection: Connection; runs: RunControl; onNewRun(): void; onSelectRun(id: string): void }) {
+  const present = view;
   const offline = state.phase !== "connected";
+  const ownerActions = present.active ? <div className="actions"><button type="button" className="primary" onClick={() => onSelectRun(present.active!)}>go to running run</button><button type="button" className="ghost" onClick={() => connection.client && void stopTurn(connection.client)}>stop running run</button></div> : null;
   if (present.open) return <OpenBody state={state} connection={connection} present={present} runs={runs} />;
   if (offline && (state.phase !== "connecting" || state.lastFailure) && state.phase !== "dropped") return <div className="scroll"><ConnectionNotice state={state} connection={connection} /></div>;
-  if (present.selected && !present.openError && view.session?.session_id !== present.selected) return <div className="scroll"><Panel title="opening the run" tone="busy"><p>loading history{present.opening?.messages ? ` · ${present.opening.messages.toLocaleString("en")} messages` : ""}</p></Panel></div>;
-  if (present.openError) { const failure = present.openError; return <div className="scroll"><Panel title={failure.busy ? "zeta is busy with another run" : "could not open this run"} tone={failure.busy ? "warn" : "danger"}><p className="mono">{failure.busy ? "zeta serve opens a run only when no turn runs. wait for the running turn to end, then try again." : failure.message}</p><div className="actions"><button type="button" className="primary" onClick={() => runs.select(failure.id)}>try again</button><button type="button" className="ghost" onClick={onNewRun}>new run</button></div></Panel></div>; }
+  if (present.selected && !present.openError && view.session?.session_id !== present.selected) return <div className="scroll"><Panel title="opening the run" tone="busy"><p>{present.active ? `this run waits while ${present.active} has the active zeta turn` : `loading history${present.opening?.messages ? ` · ${present.opening.messages.toLocaleString("en")} messages` : ""}`}</p>{ownerActions}</Panel></div>;
+  if (present.openError) { const failure = present.openError; return <div className="scroll"><Panel title={failure.busy ? "another run is active" : "could not open this run"} tone={failure.busy ? "warn" : "danger"}><p className="mono">{failure.busy ? `this run waits while ${present.active ?? "another run"} has the active zeta turn` : failure.message}</p>{ownerActions}<div className="actions"><button type="button" className="primary" onClick={() => runs.select(failure.id)}>try again</button><button type="button" className="ghost" onClick={onNewRun}>new run</button></div></Panel></div>; }
+  if (present.active) return <div className="scroll"><Panel title="new run waits for the running run" tone="warn"><p>you can type now. send becomes available when {present.active} finishes.</p>{ownerActions}</Panel></div>;
   return <div className="scroll"><div className="empty-run" role="note"><h2>start a conversation</h2><p>write below to start. zeta creates the run when you send the first message.</p></div></div>;
 }
 

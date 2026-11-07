@@ -40,6 +40,31 @@ async function rectInside(page: Page, selector: string) {
   const rect = await page.locator(selector).boundingBox();
   if (!rect || rect.x < 0 || rect.x + rect.width > page.viewportSize()!.width) throw new Error(`${selector} is outside viewport: ${JSON.stringify(rect)}`);
 }
+async function uncachedNavigationSequence(browser: Awaited<ReturnType<typeof chromium.launch>>, width: number) {
+  const { context, page } = await fresh(browser, width, "/?run=s-reconnect");
+  try {
+    const field = page.locator('.dock textarea[aria-label="message"]');
+    await field.fill("active run marker");
+    await page.getByRole("button", { name: "send message" }).click();
+    await page.getByRole("button", { name: "stop the running turn" }).waitFor();
+    await page.evaluate(() => {
+      const url = new URL(location.href);
+      url.searchParams.set("run", "s-themes");
+      history.pushState({ gammaComposerScope: "s-themes" }, "", url);
+      dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
+    });
+    await page.waitForURL(/run=s-themes/);
+    if (await page.getByRole("log", { name: "run activity" }).getByText("active run marker", { exact: true }).count())
+      throw new Error("uncached target showed the active run transcript");
+    if (await page.getByRole("button", { name: "stop the running turn" }).count())
+      throw new Error("uncached target exposed the active run stop control");
+  } finally {
+    const stop = page.getByRole("button", { name: "stop the running turn" });
+    if (await stop.count()) await stop.click().catch(() => {});
+    await context.close(); fake.drop(); await Bun.sleep(500);
+  }
+}
+
 async function navigationSequence(browser: Awaited<ReturnType<typeof chromium.launch>>, width: number) {
   const { context, page } = await fresh(browser, width);
   try {
@@ -94,6 +119,8 @@ try {
   for (let attempt = 0; ; attempt++) { if (vite.exitCode !== null) throw new Error("vite exited"); if (await fetch(origin).then((r) => r.ok, () => false)) break; if (attempt > 300) throw new Error("vite did not start"); await Bun.sleep(100); }
   const browser = await chromium.launch();
   try {
+    await check("uncached-run-follows-url-at-1440", () => uncachedNavigationSequence(browser, 1440));
+    await check("uncached-run-follows-url-at-390", () => uncachedNavigationSequence(browser, 390));
     await check("displayed-run-follows-url-at-1440", () => navigationSequence(browser, 1440));
     await check("displayed-run-follows-url-at-390", () => navigationSequence(browser, 390));
     await check("narrow-popovers-stay-in-viewport", async () => {

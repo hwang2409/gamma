@@ -209,87 +209,29 @@ export async function openSession(
 export const isBusyError = (error: unknown) => (error as { code?: unknown } | null)?.code === -32004;
 
 export type OpenRun = { id: string; lease: SessionLease; stale: boolean; history: { messages: number; complete: boolean }; syncing: boolean };
-export type OpenFailure = { id: string; message: string; busy: boolean; restored?: boolean };
-export type SessionTransition =
-  | { kind: "idle"; selected: string | null }
-  | { kind: "opening"; to: string; messages: number }
-  | { kind: "open"; run: OpenRun }
-  | { kind: "replacing"; from: OpenRun; to: string; messages: number }
-  | { kind: "failed"; run: OpenRun | null; to: string; error: OpenFailure };
-
-export const transitionRun = (transition: SessionTransition): OpenRun | null =>
-  transition.kind === "open" ? transition.run : transition.kind === "replacing" ? transition.from : transition.kind === "failed" ? transition.run : null;
-export const transitionSelected = (transition: SessionTransition): string | null => {
-  if (transition.kind === "idle") return transition.selected;
-  if (transition.kind === "open") return transition.run.id;
-  if (transition.kind === "failed" && transition.error.restored && transition.run) return transition.run.id;
-  return transition.kind === "replacing" || transition.kind === "opening" || transition.kind === "failed" ? transition.to : null;
-};
-
-type TransitionEvent =
-  | { type: "start"; id: string }
-  | { type: "progress"; id: string; messages: number }
-  | { type: "opened"; run: OpenRun }
-  | { type: "updated"; run: OpenRun }
-  | { type: "failed"; id: string; error: OpenFailure }
-  | { type: "stale" }
-  | { type: "dismiss" };
-
-export function reduceSessionTransition(transition: SessionTransition, event: TransitionEvent): SessionTransition {
-  const run = transitionRun(transition);
-  switch (event.type) {
-    case "start": return run ? { kind: "replacing", from: run, to: event.id, messages: 0 } : { kind: "opening", to: event.id, messages: 0 };
-    case "opened":
-    case "updated": return { kind: "open", run: event.run };
-    case "failed": return { kind: "failed", run, to: event.id, error: event.error };
-    case "stale": return run ? { kind: "open", run: { ...run, stale: true } } : transition;
-    case "dismiss": return run ? { kind: "open", run } : { kind: "idle", selected: transitionSelected(transition) };
-    case "progress": {
-      if (transition.kind === "opening" && transition.to === event.id) return { ...transition, messages: event.messages };
-      if (transition.kind === "replacing" && transition.to === event.id) return { ...transition, messages: event.messages };
-      return transition;
-    }
-  }
-}
-
-export const sessionPresentation = (transition: SessionTransition) => {
-  const run = transitionRun(transition);
-  const opening = transition.kind === "opening" ? { id: transition.to, messages: transition.messages }
-    : transition.kind === "replacing" ? { id: transition.to, messages: transition.messages } : null;
-  return {
-    selected: transitionSelected(transition),
-    open: run,
-    opening,
-    openError: transition.kind === "failed" ? transition.error : null,
-  };
-};
-
+export type OpenFailure = { id: string; message: string; busy: boolean };
 export type RunState = {
-  transition: SessionTransition;
-  /** zeta's metadata for the run on screen: its title, model, and cwd. Null for a blank run. */
+  selected: string | null;
+  open: OpenRun | null;
+  opening: { id: string; messages: number } | null;
+  openError: OpenFailure | null;
   session: SessionMeta | null;
-  /** The run that owns zeta's active turn. This is independent from the run selected by the URL. */
+  /** The attached run that owns zeta's active turn, independent from the selected URL. */
   active: string | null;
+  attached: string | null;
 };
 
 type Source = { readonly client: ZetaClient | null; subscribe(listener: () => void): () => void };
-
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
-/**
- * The one run the page shows, over a connection. On every connect it reopens the selected run; with none selected the
- * page is a blank run until `create`, and the server's own session is never opened on its own. The newest open wins;
- * leases of abandoned opens are released.
- */
+/** Owns cached session leases while exposing only the exact URL-selected run. */
 export function createRun(connection: Source, { selected = null, onSelect, bindings }: { selected?: string | null; onSelect?: (id: string | null) => void; bindings?: HostBindings } = {}) {
-  let state: RunState = { transition: { kind: "idle", selected }, session: null, active: null };
+  let state: RunState = { selected, open: null, opening: selected ? { id: selected, messages: 0 } : null, openError: null, session: null, active: null, attached: null };
   const cachedRuns = new Map<string, OpenRun>();
   const cachedSessions = new Map<string, SessionMeta>();
   const listeners = new Set<() => void>();
   const set = (patch: Partial<RunState>) => { state = { ...state, ...patch }; listeners.forEach((listener) => listener()); };
-  const transition = (event: TransitionEvent) => set({ transition: reduceSessionTransition(state.transition, event) });
   let client: ZetaClient | null = null;
-  let attached: string | null = null;
   let activeSubscription = () => {};
   let openGeneration = 0;
   let openAbort: AbortController | null = null;
@@ -301,123 +243,95 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
     activeSubscription = run.lease.store.subscribe(update);
     update();
   };
-
-  const prepareCachedOpen = async (target: ZetaClient, id: string, knownStatus: ServerStatus | undefined, signal: AbortSignal) => {
-    const registration = await register(target, id);
-    if (knownStatus) return { knownStatus, registration };
-    const resumed = await target.request("resume", { session_id: id, ...(registration ? { host_commands: [registration.command] } : {}) }, { timeoutMs: 30_000, signal }) as { session?: SessionMeta };
-    const status = await getStatus(target, signal);
-    attached = id;
-    return { knownStatus: status.session ? status : { ...status, session: resumed.session ?? null }, registration };
-  };
-  const restoreAttached = async (target: ZetaClient, id: string | null) => {
-    if (!id) return false;
-    try {
-      const binding = await register(target, id);
-      await target.request("resume", { session_id: id, ...(binding ? { host_commands: [binding.command] } : {}) }, { timeoutMs: 30_000 });
-      attached = id;
-      return true;
-    } catch { return false; }
-  };
-  const trackCompletion = (target: ZetaClient, mine: number, id: string, opened: Awaited<ReturnType<typeof openSession>>, history: () => OpenRun["history"]) => {
-    void opened.complete.then((result) => {
-      if (mine !== openGeneration || !live(target)) return result.lease?.release();
-      if (result.lease) {
-        transitionRun(state.transition)?.lease.release();
-        transition({ type: "updated", run: { id, lease: result.lease, stale: false, history: { ...history(), complete: true }, syncing: result.syncing } });
-        return;
-      }
-      const run = transitionRun(state.transition);
-      if (run?.id === id) transition({ type: "updated", run: { ...run, history: { ...history(), complete: true }, syncing: result.syncing } });
-    }).catch((error) => {
-      if (mine === openGeneration && live(target) && (error as { name?: string }).name !== "AbortError")
-        transition({ type: "failed", id, error: { id, message: message(error), busy: isBusyError(error) } });
-    });
-  };
-
-  const publishOpened = (target: ZetaClient, mine: number, id: string, previous: OpenRun | null, opened: Awaited<ReturnType<typeof openSession>>, history: OpenRun["history"]) => {
-    if (mine !== openGeneration || !live(target)) { opened.lease.release(); return null; }
-    if (previous?.id !== id) previous?.lease.release();
-    const run = { id, lease: opened.lease, stale: false, history, syncing: opened.syncing };
+  const publishSelected = (id: string) => set({
+    selected: id,
+    open: cachedRuns.get(id) ?? null,
+    opening: cachedRuns.has(id) ? null : { id, messages: 0 },
+    openError: null,
+    session: cachedSessions.get(id) ?? null,
+  });
+  const updateCached = (id: string, run: OpenRun) => {
     cachedRuns.set(id, run);
-    if (opened.session) cachedSessions.set(id, opened.session);
-    attached = id;
-    set(opened.session ? { session: opened.session } : {});
-    transition({ type: "opened", run });
-    watchActiveTurn(id, run);
-    return run;
+    if (state.selected === id) set({ open: run, opening: null });
   };
-  const reportOpenFailure = async (target: ZetaClient, mine: number, id: string, previousAttached: string | null, error: unknown) => {
-    if (mine !== openGeneration || !live(target)) return;
-    const busy = isBusyError(error);
-    const previousId = previousAttached !== id ? previousAttached : null;
-    const restored = busy ? previousAttached !== null : await restoreAttached(target, previousId);
-    if (mine !== openGeneration || !live(target)) return;
-    transition({ type: "failed", id, error: { id, message: message(error), busy, ...(restored ? { restored: true } : {}) } });
-  };
-
   const open = async (id: string, knownStatus?: ServerStatus) => {
     const target = client;
     const mine = ++openGeneration;
     openAbort?.abort();
     const abort = new AbortController();
     openAbort = abort;
-    const previous = transitionRun(state.transition);
-    const previousAttached = attached;
-    if (previous) cachedRuns.set(previous.id, previous);
+    publishSelected(id);
     const cached = cachedRuns.get(id);
-    transition({ type: "start", id });
-    if (cached) set({ transition: { kind: "open", run: cached }, session: cachedSessions.get(id) ?? null });
-    if (!target || (cached && attached === id)) return;
+    if (!target || (cached && state.attached === id && !cached.stale)) return;
     try {
-      let registration: Registration | undefined;
-      if (cached) ({ knownStatus, registration } = await prepareCachedOpen(target, id, knownStatus, abort.signal));
+      const registration = await register(target, id);
+      let status = knownStatus;
+      if (cached && !status) {
+        const resumed = await target.request("resume", { session_id: id, ...(registration ? { host_commands: [registration.command] } : {}) }, { timeoutMs: 30_000, signal: abort.signal }) as { session?: SessionMeta };
+        status = await getStatus(target, abort.signal);
+        if (!status.session) status = { ...status, session: resumed.session ?? null };
+      }
       if (mine !== openGeneration || !live(target)) return;
       let history = { messages: 0, complete: false };
       const opened = await openSession(target, id, (messages, complete) => {
         history = { messages, complete };
-        if (mine !== openGeneration) return;
-        transition({ type: "progress", id, messages });
-      }, abort.signal, knownStatus, registration ?? await register(target, id));
-      if (!publishOpened(target, mine, id, previous, opened, history)) return;
-      trackCompletion(target, mine, id, opened, () => history);
-    } catch (error) { await reportOpenFailure(target, mine, id, previousAttached, error); }
-  };
-
-  const markApprovalsReconnecting = (disconnected: ZetaClient | null) => {
-    const run = transitionRun(state.transition);
-    if (!run || !disconnected?.features.includes("approval_reconnect")) return;
-    for (const { id: itemId } of run.lease.store.getOutline()) {
-      const item = run.lease.store.getItem(itemId);
-      if (item?.type === "approval" && !item.ended && item.request.type === "approval_request")
-        run.lease.store.dispatch({ ...item.request, state: "reconnecting", status: "reconnecting…", disabled_reason: "decisions are disabled while disconnected" });
+        if (mine === openGeneration && state.selected === id) set({ opening: { id, messages } });
+      }, abort.signal, status, registration);
+      if (mine !== openGeneration || !live(target)) { opened.lease.release(); return; }
+      const run = { id, lease: opened.lease, stale: false, history, syncing: opened.syncing };
+      const old = cachedRuns.get(id);
+      if (old && old.lease !== run.lease) old.lease.release();
+      if (opened.session) cachedSessions.set(id, opened.session);
+      updateCached(id, run);
+      set({ attached: id, ...(state.selected === id ? { session: opened.session ?? cachedSessions.get(id) ?? null, openError: null } : {}) });
+      watchActiveTurn(id, run);
+      void opened.complete.then((result) => {
+        if (result.lease) {
+          const current = cachedRuns.get(id);
+          if (mine !== openGeneration || !live(target)) return result.lease.release();
+          current?.lease.release();
+          updateCached(id, { ...run, lease: result.lease, history: { ...history, complete: true }, syncing: result.syncing });
+        } else if (cachedRuns.get(id) === run) updateCached(id, { ...run, history: { ...history, complete: true }, syncing: result.syncing });
+      }).catch((error) => {
+        if (mine === openGeneration && live(target) && state.selected === id && (error as { name?: string }).name !== "AbortError")
+          set({ openError: { id, message: message(error), busy: isBusyError(error) } });
+      });
+    } catch (error) {
+      if (mine !== openGeneration || !live(target) || (error as { name?: string }).name === "AbortError") return;
+      set({ open: cachedRuns.get(id) ?? null, opening: null, openError: { id, message: message(error), busy: isBusyError(error) } });
     }
   };
-  const disconnect = (disconnected: ZetaClient | null) => {
+  const disconnect = () => {
     openGeneration++;
     openAbort?.abort();
-    attached = null;
+    const selected = state.selected && cachedRuns.get(state.selected);
+    if (selected && client?.features.includes("approval_reconnect")) {
+      for (const { id: itemId } of selected.lease.store.getOutline()) {
+        const item = selected.lease.store.getItem(itemId);
+        if (item?.type === "approval" && !item.ended && item.request.type === "approval_request")
+          selected.lease.store.dispatch({ ...item.request, state: "reconnecting", status: "reconnecting…", disabled_reason: "decisions are disabled while disconnected" });
+      }
+    }
     activeSubscription();
     activeSubscription = () => {};
-    set({ active: null });
-    markApprovalsReconnecting(disconnected);
-    transition({ type: "stale" });
+    for (const [id, run] of cachedRuns) cachedRuns.set(id, { ...run, stale: true });
+    set({ open: state.selected ? cachedRuns.get(state.selected) ?? null : null, active: null, attached: null });
   };
   const connect = async (target: ZetaClient) => {
-    const id = transitionSelected(state.transition);
-    if (!id) return;
     try {
       const status = await getStatus(target);
-      if (live(target)) await open(id, status);
+      if (!live(target)) return;
+      const owner = status.state === "idle" ? null : status.session?.session_id ?? null;
+      set({ attached: status.session?.session_id ?? null, active: owner });
+      if (state.selected) await open(state.selected, status);
     } catch (error) {
-      if (live(target)) transition({ type: "failed", id, error: { id, message: message(error), busy: isBusyError(error) } });
+      if (live(target) && state.selected) set({ opening: null, openError: { id: state.selected, message: message(error), busy: isBusyError(error) } });
     }
   };
   const onConnection = () => {
     if (connection.client === client) return;
-    const disconnected = client;
+    if (client) disconnect();
     client = connection.client;
-    if (disconnected) disconnect(disconnected);
     if (client) void connect(client);
   };
   const unsubscribe = connection.subscribe(onConnection);
@@ -425,19 +339,13 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
 
   return {
     get state() { return state; },
-    subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    /** Opens `id` again, for a retry after a failed open. */
+    subscribe(listener: () => void) { listeners.add(listener); return () => listeners.delete(listener); },
     select(id: string) {
-      const run = transitionRun(state.transition);
-      if (id === transitionSelected(state.transition) && ((state.transition.kind === "opening" || state.transition.kind === "replacing") || (state.transition.kind === "open" && run?.id === id && !run.stale))) return;
+      if (id === state.selected && (state.opening || (state.open && !state.open.stale))) return;
       onSelect?.(id);
       void open(id);
     },
-    dismissOpenError() { transition({ type: "dismiss" }); },
-    /**
-     * Starts the run with zeta's `new_session` (which makes it the server's own) and opens it. `model` and `provider`
-     * pick the model the first turn uses. Rejects with zeta's error, so the composer keeps the draft and says why.
-     */
+    dismissOpenError() { set({ openError: null }); },
     async create(choice: { model?: string; provider?: string; approval_mode?: "ask" | "allow" } = {}) {
       const target = client;
       if (!target) throw new Error("not connected to zeta serve");
@@ -448,26 +356,21 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
       if (binding) await bindings!.bind(binding.registration_id, session.session_id);
       if (!live(target)) throw new Error("the connection dropped while the run started");
       cachedSessions.set(session.session_id, session);
-      set({ session });
       onSelect?.(session.session_id);
       await open(session.session_id);
-      const failure = state.transition.kind === "failed" ? state.transition.error : null;
-      if (failure) throw new Error(failure.message);
+      if (state.openError?.id === session.session_id) throw new Error(state.openError.message);
       return session.session_id;
     },
-    /** Back to a blank run: the next send starts a new session. */
     reset() {
       openGeneration++;
       openAbort?.abort();
-      transitionRun(state.transition)?.lease.release();
       onSelect?.(null);
-      set({ transition: { kind: "idle", selected: null }, session: null, active: null });
+      set({ selected: null, open: null, opening: null, openError: null, session: null });
     },
     dispose() {
       unsubscribe();
       openGeneration++;
       openAbort?.abort();
-      transitionRun(state.transition)?.lease.release();
       cachedRuns.forEach((run) => run.lease.release());
       cachedRuns.clear();
       activeSubscription();

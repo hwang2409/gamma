@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createClient, type Transport, type ZetaClient } from "@fulcrum/zeta";
-import { createRun, sessionPresentation, sessionTitle, type RunControl, type SessionMeta } from "../src/session";
+import { createRun, sessionTitle, type RunControl, type SessionMeta } from "../src/session";
 
 type Handler = (params: Record<string, unknown>) => unknown;
 
@@ -32,7 +32,7 @@ async function server(handlers: Record<string, Handler>, features: string[] = []
   return { client, calls, event, drop: () => close(1006) };
 }
 
-const present = (view: RunControl) => sessionPresentation(view.state.transition);
+const present = (view: RunControl) => view.state;
 const meta = (id: string, updated: string, extra: Partial<SessionMeta> = {}): SessionMeta => ({ session_id: id, created_at: updated, updated_at: updated, ...extra });
 const sessions = [meta("a", "2026-11-01T10:00:00Z", { name: "alpha" }), meta("b", "2026-11-02T10:00:00Z", { first_message_preview: "fix the build" }), meta("c", "2026-11-03T10:00:00Z", { parent_session_id: "b" })];
 const history: Record<string, unknown[]> = {
@@ -71,7 +71,7 @@ function handlers(active: string | null, extra: Record<string, Handler> = {}): R
   };
 }
 const kinds = (state: ReturnType<typeof createRun>["state"]) => {
-  const store = sessionPresentation(state.transition).open!.lease.store;
+  const store = state.open!.lease.store;
   return store.getOutline().map(({ kind }) => kind);
 };
 
@@ -86,10 +86,10 @@ test("on connect with no run selected it stays blank and never opens the server'
   await tick();
   expect(present(view).open).toBeNull();
   expect(present(view).selected).toBeNull();
-  expect(fake.calls.map(([method]) => method)).toEqual(["hello"]);
+  expect(fake.calls.map(([method]) => method)).toEqual(["hello", "status"]);
 });
 
-test("a failed replacement keeps browser selection while retaining the old active session", async () => {
+test("a failed replacement keeps the requested selection and never presents the old run", async () => {
   const resumed: string[] = [];
   const selected: string[] = [];
   const fake = await server(handlers("b", { resume: (params) => { resumed.push(params.session_id as string); if (params.session_id === "a") { return { session: meta("a", "x") }; } return { session: meta("b", "x") }; }, session_history: (params) => { if (params.session_id === "a") throw { code: -32602, message: "session log is invalid at line 12" }; return { messages: [], next_offset: null }; } }));
@@ -97,9 +97,9 @@ test("a failed replacement keeps browser selection while retaining the old activ
   await tick();
   view.select("a");
   await tick();
-  expect(resumed).toEqual(["a", "b"]);
-  expect(present(view).open?.id).toBe("b");
-  expect(present(view).selected).toBe("b");
+  expect(resumed).toEqual(["a"]);
+  expect(present(view).open).toBeNull();
+  expect(present(view).selected).toBe("a");
   expect(selected).toEqual(["a"]);
   expect(present(view).openError?.message).toBe("session log is invalid at line 12");
 });
@@ -172,7 +172,7 @@ test("selecting another session resumes it, releases the old one, and reports pr
   await tick();
   view.select("a");
   expect(present(view).opening).toEqual({ id: "a", messages: 0 });
-  expect(present(view).open?.id).toBe("b");
+  expect(present(view).open).toBeNull();
   expect(present(view).opening).toEqual({ id: "a", messages: 0 });
   await tick();
   expect(selected).toEqual(["a"]);
@@ -214,14 +214,14 @@ test("the newest selection wins when opens overlap", async () => {
   expect(present(view).selected).toBe("b");
 });
 
-test("a failed replacement keeps the previous run usable", async () => {
+test("a failed replacement shows only the requested run error", async () => {
   const fake = await server(handlers("b", { resume: (params) => { if (params.session_id === "a") throw { code: -32602, message: "session log is invalid at line 12" }; return {}; } }));
   const view = createRun(source(fake.client), { selected: "b" });
   await tick();
   view.select("a");
   await tick();
-  expect(present(view).open?.id).toBe("b");
-  expect(present(view).openError).toEqual({ id: "a", message: "session log is invalid at line 12", busy: false, restored: true });
+  expect(present(view).open).toBeNull();
+  expect(present(view).openError).toEqual({ id: "a", message: "session log is invalid at line 12", busy: false });
   expect(present(view).opening).toBeNull();
 });
 
@@ -244,7 +244,7 @@ test("a busy resume displays the URL-selected cached run and forward restores th
   view.select("a"); await tick();
   expect(present(view).open?.id).toBe("a");
   expect(view.state.session?.session_id).toBe("a");
-  expect(present(view).openError).toMatchObject({ id: "a", busy: true, restored: true });
+  expect(present(view).openError).toMatchObject({ id: "a", busy: true });
   view.select("b"); await tick();
   expect(present(view).open?.id).toBe("b");
   expect(view.state.session?.session_id).toBe("b");
