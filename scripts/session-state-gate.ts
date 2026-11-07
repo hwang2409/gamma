@@ -42,24 +42,28 @@ async function poll(check: () => Promise<boolean>, attempts = 50) {
   return false;
 }
 
-for (const width of [1440, 390]) await check(`approved reloaded owner becomes idle after new-run navigation at ${width}`, async () => {
+for (const width of [1440, 390]) await check(`natural turn end resends a queued steer and keeps the approved run settled at ${width}`, async () => {
   const browser = await chromium.launch({ headless: true });
   const { context, page } = await fresh(browser, width, "/?run=s-reconnect");
   try {
     await page.getByRole("button", { name: "approve" }).waitFor({ timeout: 15_000 });
-    await page.reload();
-    await page.getByRole("button", { name: "approve" }).waitFor({ timeout: 15_000 });
+    await page.locator('.dock textarea[aria-label="message"]').fill("please approve this");
+    await page.getByRole("button", { name: "steer the running turn" }).click();
+    await page.getByRole("status", { name: "message queued" }).waitFor();
+    await page.getByRole("button", { name: "approve" }).click();
+    if (!await poll(() => Promise.resolve(fake.sent.some((item) => item.method === "send" && item.text === "please approve this")), 100)) throw new Error("natural turn end did not resend the dropped steer as a new message");
+    if (await page.getByRole("status", { name: /message (queued|requesting|retrying)/ }).count()) throw new Error("the accepted resend still looked queued");
+    if (await page.locator('[data-part="composer-message"]', { hasText: /sending|steering/ }).count()) throw new Error("the composer still looked like it was sending");
+    if (await page.locator(".status-line").getAttribute("data-state") === "ready") throw new Error("the resent turn was running but the header said ready");
     const owner = page.url();
     await page.getByRole("button", { name: "new run" }).click();
     await page.goBack();
     await page.waitForURL(owner);
-    await page.getByRole("button", { name: "approve" }).click();
-    await waitForIdle();
-    if (!await poll(async () => await page.getByRole("button", { name: "send message" }).count() > 0)) throw new Error("send remained unavailable after zeta finished");
-    if (await page.getByRole("button", { name: "stop the running turn" }).count()) throw new Error("stop remained after zeta finished");
-    if (await page.getByText(/live updates paused/i).count()) throw new Error("snapshot-only notice remained after zeta finished");
-    const status = await page.locator(".status-line").getAttribute("data-state");
-    if (status !== "ready") throw new Error(`status stayed ${status ?? "missing"} after zeta finished`);
+    if (await page.getByRole("button", { name: "approve" }).count()) throw new Error("the completed approval returned after back navigation");
+    await page.reload();
+    await ready(page);
+    if (await page.getByRole("button", { name: "approve" }).count()) throw new Error("the completed approval returned after reload");
+    if (await page.getByRole("status", { name: /message (queued|requesting|retrying)/ }).count()) throw new Error("the delivered steer returned as queued after reload");
   } finally { await context.close(); await browser.close(); fake.setLive(false); fake.setLive(true); fake.drop(); await Bun.sleep(300); await fake.start(); }
 });
 
