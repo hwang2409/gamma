@@ -168,8 +168,24 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .turn-error { display: grid; justify-items: start; gap: 6px; padding: 8px; border: 1px solid var(--fulcrum-danger); border-left-width: var(--rail); }
 .turn-retry { min-height: 30px; padding: 0 10px; font-size: 12px; }
 
+/* Command results are run-local and stay separate from the transcript. */
+.command-receipt { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 6px; padding: 8px 10px; border: 1px solid var(--fulcrum-border); border-left: var(--rail) solid var(--fulcrum-muted); background: var(--fulcrum-bg); font-size: 12px; }
+.command-receipt[data-tone="error"] { border-left-color: var(--fulcrum-danger); color: var(--fulcrum-danger); }
+.command-receipt-label { flex: none; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
+.command-receipt-text { flex: 1; min-width: 0; max-height: min(10dvh, 80px); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.command-receipt .ghost { flex: none; min-width: 36px; min-height: 36px; }
+
 /* The composer: fulcrum's parts, plus gamma's tray, footer tools, and vim mode. */
 .dock [data-part="composer"] { position: relative; }
+.command-listbox { display: grid; max-height: min(32dvh, 260px); overflow-y: auto; border-bottom: 1px solid var(--fulcrum-border); background: var(--fulcrum-bg); }
+.dock .command-option { display: grid; grid-template-columns: minmax(10ch, auto) minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 40px; padding: 6px var(--inset); border: 0; background: transparent; color: var(--fulcrum-fg); text-align: left; }
+/* Hover is a faint fill only; the active row, the one Enter or Tab accepts, has the surface fill, an accent bar, and full-color text. */
+.dock .command-option:hover { background: color-mix(in srgb, var(--fulcrum-surface) 50%, var(--fulcrum-bg)); }
+.dock .command-option[aria-selected="true"] { background: var(--fulcrum-surface); box-shadow: inset 4px 0 var(--fulcrum-accent); }
+.dock .command-option[aria-selected="true"] :is(.command-description, .command-source) { color: var(--fulcrum-fg); }
+.command-name { font-weight: 700; }
+.command-description { min-width: 0; overflow: hidden; color: var(--fulcrum-muted); text-overflow: ellipsis; white-space: nowrap; }
+.command-source { color: var(--fulcrum-muted); font-size: 11px; }
 .dock [data-part="composer"][data-state="idle"]:not(:focus-within) { border-color: color-mix(in srgb, var(--fulcrum-accent) 45%, var(--fulcrum-border)); border-left-color: var(--fulcrum-accent); }
 .dock [data-part="composer"][data-drop="active"] { border: 1px dashed var(--fulcrum-accent); border-left: var(--rail) solid var(--fulcrum-accent); }
 .drop-hint { position: absolute; inset: 0; z-index: 1; display: grid; place-items: center; background: color-mix(in srgb, var(--fulcrum-accent) 12%, var(--fulcrum-bg)); color: var(--fulcrum-fg); font-weight: 700; pointer-events: none; }
@@ -253,6 +269,9 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .inspector-body td { border: 1px solid var(--fulcrum-border); padding: 5px 8px; white-space: pre-wrap; }
 .inspector-body pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 600px) {
+  .dock .command-receipt .ghost { min-width: 44px; min-height: 44px; }
+  .dock .command-option { grid-template-columns: minmax(0, 1fr) auto; min-height: 44px; }
+  .command-description { grid-column: 1 / -1; white-space: normal; }
   .inspector-backdrop { padding: 0; }
   .artifacts { padding-inline-start: 8px; }
   .undelivered:not([data-empty]) { min-height: 3.2em; }

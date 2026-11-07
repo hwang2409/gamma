@@ -238,9 +238,9 @@ try {
       });
       if (!(await page.locator(".scroll[data-stale=true]").count())) throw new Error("old view was not marked stale");
       const staleApproval = page.locator('[data-part="approval"][data-state="reconnecting"]');
-      await staleApproval.getByRole("button", { name: "approve" }).waitFor();
+      await staleApproval.getByRole("button", { name: "approve", exact: true }).waitFor();
       await staleApproval.getByRole("button", { name: "deny" }).waitFor();
-      if (!(await staleApproval.getByRole("button", { name: "approve" }).isDisabled()) || !(await staleApproval.getByRole("button", { name: "deny" }).isDisabled())) throw new Error("reconnecting approval buttons were not disabled");
+      if (!(await staleApproval.getByRole("button", { name: "approve", exact: true }).isDisabled()) || !(await staleApproval.getByRole("button", { name: "deny" }).isDisabled())) throw new Error("reconnecting approval buttons were not disabled");
       await staleApproval.getByText(/decisions are disabled/).waitFor();
       await fake.start();
       // The client's retry backoff grows while the server is down; retry at once, as a user would.
@@ -248,13 +248,13 @@ try {
       await ready(page);
       await page.locator(".notice").waitFor({ state: "detached" });
       const reconnected = page.locator('[data-part="approval"]');
-      await reconnected.getByRole("button", { name: "approve" }).waitFor({ timeout: 5000 });
+      await reconnected.getByRole("button", { name: "approve", exact: true }).waitFor({ timeout: 5000 });
       if (await reconnected.count() !== 1) throw new Error("duplicate approval rows after reconnect");
       await shoot(page, "approval-reconnected-1440");
       await page.setViewportSize({ width: 390, height: 844 });
       await shoot(page, "approval-reconnected-390");
       await page.setViewportSize({ width: 1440, height: 900 });
-      await reconnected.getByRole("button", { name: "approve" }).click();
+      await reconnected.getByRole("button", { name: "approve", exact: true }).click();
       const rebuilt = page.locator('[data-part="tool"]', { has: page.locator('[data-part="tool-approval"]') });
       await rebuilt.waitFor({ timeout: 5000 });
       if (await rebuilt.count() !== 1 || await page.locator('[data-part="approval"]').count()) throw new Error("approval did not fold once after the resumed command");

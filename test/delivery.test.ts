@@ -34,7 +34,7 @@ const ids = () => { let n = 0; return () => `id-${++n}`; };
 const ok = { result: { accepted: true } };
 const memoryStorage = () => {
   const values = new Map<string, string>();
-  return { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
+  return { values, getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
 };
 
 test("fake reconnect history keeps the accepted steer and its terminal delivery status", async () => {
@@ -106,6 +106,77 @@ test("a dropped steer is an error and the retry gets a fresh id; an evicted id r
   reply = { error: { code: -32010, message: "evicted", data: { outcome: "dropped" } } };
   await expect(delivery.submit(client, "again", true)).rejects.toThrow("dropped");
   expect(calls.map(([, params]) => params.delivery_id)).toEqual(["id-1", "id-2", "id-3"]);
+});
+
+test("opaque input sends one input_id frame and never falls back to text or steer", async () => {
+  const calls: Array<[string, Record<string, unknown>]> = [];
+  const client = { features: ["delivery_id"], request: async (method: string, params: Record<string, unknown>) => { calls.push([method, params]); return { accepted: true }; } } as any;
+  const state = createRunStateStore(8, undefined, memoryStorage(), { id: "e" as any, run: "s" as any });
+  state.activate("s");
+  state.edit("s", { text: "/review change" });
+  const manager = createDeliveryManager(() => client, state);
+  await manager.submitOpaque("s", "opaque-secret", "/review change", "/review change", "delivery-1");
+  expect(calls).toEqual([["send", { input_id: "opaque-secret", delivery_id: "delivery-1" }]]);
+  expect(JSON.stringify(state.get("s"))).not.toContain("opaque-secret");
+  manager.dispose(); state.dispose();
+});
+
+test("uncertain opaque delivery persists display intent and reconciles without resending", async () => {
+  const saved = memoryStorage();
+  const calls: Array<[string, Record<string, unknown>]> = [];
+  let uncertain = true;
+  const client = { features: ["delivery_id"], request: async (method: string, params: Record<string, unknown>) => { calls.push([method, params]); if (uncertain) throw new Error("timeout"); return { status: "delivered" }; } } as any;
+  let state = createRunStateStore(8, undefined, saved, { id: "e" as any, run: "s" as any });
+  state.activate("s"); state.edit("s", { text: "/review change" });
+  let manager = createDeliveryManager(() => client, state);
+  await expect(manager.submitOpaque("s", "opaque-secret", "/review change", "/review change", "delivery-1")).rejects.toThrow("timeout");
+  expect(calls).toEqual([["send", { input_id: "opaque-secret", delivery_id: "delivery-1" }]]);
+  expect(JSON.stringify(state.get("s"))).not.toContain("opaque-secret");
+  expect(JSON.stringify([...saved.values])).not.toContain("opaque-secret");
+  expect(JSON.stringify([...saved.values])).toContain("/review change");
+  manager.dispose(); state.dispose();
+  uncertain = false;
+  state = createRunStateStore(8, undefined, saved, { id: "e2" as any, run: "s" as any });
+  state.activate("s");
+  manager = createDeliveryManager(() => client, state);
+  manager.reconcile("s");
+  await Bun.sleep(0);
+  expect(calls).toEqual([
+    ["send", { input_id: "opaque-secret", delivery_id: "delivery-1" }],
+    ["delivery_status", { delivery_id: "delivery-1" }],
+  ]);
+  manager.dispose(); state.dispose();
+});
+
+test("definitive opaque rejection restores display text and requires fresh preparation", async () => {
+  const calls: Array<[string, Record<string, unknown>]> = [];
+  const rejected = Object.assign(new Error("turn already active"), { code: -32004 });
+  const client = { features: ["delivery_id"], request: async (method: string, params: Record<string, unknown>) => { calls.push([method, params]); throw rejected; } } as any;
+  const state = createRunStateStore(8, undefined, memoryStorage(), { id: "e" as any, run: "s" as any });
+  state.activate("s"); state.edit("s", { text: "/review change" });
+  const manager = createDeliveryManager(() => client, state);
+  await expect(manager.submitOpaque("s", "opaque-1", "/review change", "/review change", "delivery-1")).rejects.toThrow("turn already active");
+  expect(state.get("s").text).toBe("/review change");
+  expect(state.get("s").deliveries.size).toBe(0);
+  expect(calls).toHaveLength(1);
+  await expect(manager.submitOpaque("s", "opaque-2", "/review change", "/review change", "delivery-2")).rejects.toThrow();
+  expect(calls[1]?.[1]).toEqual({ input_id: "opaque-2", delivery_id: "delivery-2" });
+  manager.dispose(); state.dispose();
+});
+
+test("opaque uncertainty without delivery_id keeps display text and never retries", async () => {
+  const calls: Array<[string, Record<string, unknown>]> = [];
+  const client = { features: [], request: async (method: string, params: Record<string, unknown>) => { calls.push([method, params]); throw new Error("timeout"); } } as any;
+  const state = createRunStateStore(8, undefined, memoryStorage(), { id: "e" as any, run: "s" as any });
+  state.activate("s"); state.edit("s", { text: "/review change" });
+  const manager = createDeliveryManager(() => client, state);
+  await expect(manager.submitOpaque("s", "opaque-secret", "/review change")).rejects.toThrow("outcome unknown; this command was not retried");
+  expect(calls).toEqual([["send", { input_id: "opaque-secret" }]]);
+  expect(state.get("s").text).toBe("/review change");
+  expect(state.get("s").deliveries.size).toBe(0);
+  manager.reconcile("s"); await Bun.sleep(0);
+  expect(calls).toHaveLength(1);
+  manager.dispose(); state.dispose();
 });
 
 test("stop is a session abort", async () => {

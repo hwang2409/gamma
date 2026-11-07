@@ -1,76 +1,29 @@
-// Provisional path_complete shape from design-serve-capability-registry.md sections 4 (z2) and 5.1; Zeta z2 has not shipped it.
-export type CompletionRequest = {
-  session_id: string;
-  text_before_cursor: string;
-};
-
-export type CompletionEntry = {
-  text: string;
-  start_position: number;
-  display: string;
-  kind: "file" | "directory";
-};
-
-export type CompletionResponse = {
-  entries: CompletionEntry[];
-  truncated: boolean;
-};
+import { findCommandCompletionToken, type CommandController, type CompletionRow, type CompletionToken } from "./commands";
 
 export type CompletionSnapshot = {
   open: boolean;
-  entries: CompletionEntry[];
-  truncated: boolean;
+  rows: readonly CompletionRow[];
   activeIndex: number;
-  error: boolean;
 };
 
 export type CompletionKeyResult = {
   handled: boolean;
-  submitted: boolean;
   accepted?: { value: string; caret: number };
 };
 
-type Token = { start: number; query: string };
-
-// Matches Zeta src/zeta/tui/completion.py:19-20 against text before the caret.
-const PATH_TOKEN = /(?<!\S)@(?:"(?<quoted>[^"\n]*)|(?<unquoted>[^\s]*))$/;
-const CLOSED: CompletionSnapshot = { open: false, entries: [], truncated: false, activeIndex: 0, error: false };
-const MAX_TEXT_BEFORE_CURSOR_BYTES = 4096;
-const UTF8 = new TextEncoder();
-
-function tokenAt(value: string, caret: number): Token | undefined {
-  if (caret < 0 || caret > value.length) return;
-  const match = PATH_TOKEN.exec(value.slice(0, caret));
-  if (!match || match.index === undefined) return;
-  return {
-    start: match.index,
-    query: match.groups?.quoted ?? match.groups?.unquoted ?? "",
-  };
-}
-
-function positionAtCodePointOffset(value: string, caret: number, offset: number): number {
-  const codePoints = Array.from(value.slice(0, caret));
-  return codePoints.slice(0, Math.max(0, codePoints.length + offset)).join("").length;
-}
-
-export function findCompletionToken(value: string, selectionStart: number, selectionEnd = selectionStart): Token | undefined {
-  if (selectionStart !== selectionEnd) return;
-  return tokenAt(value, selectionStart);
-}
+const CLOSED: CompletionSnapshot = { open: false, rows: [], activeIndex: 0 };
 
 export class CompletionModel {
   private sequence = 0;
   private value = "";
   private caret = 0;
-  private token?: Token;
+  private token?: CompletionToken;
   private state = CLOSED;
+  /** Value and selection of the last update; kept across Escape so a repeated select event does not reopen. */
+  private input?: string;
   private readonly listeners = new Set<() => void>();
 
-  constructor(
-    private readonly request: (params: CompletionRequest) => Promise<CompletionResponse>,
-    private readonly sessionId: string,
-    private readonly featureNegotiated: boolean,
-  ) {}
+  constructor(private readonly controller: CommandController) {}
 
   readonly getSnapshot = (): CompletionSnapshot => this.state;
   readonly subscribe = (listener: () => void): (() => void) => {
@@ -78,81 +31,76 @@ export class CompletionModel {
     return () => { this.listeners.delete(listener); };
   };
 
-  get snapshot(): CompletionSnapshot { return this.state; }
-
-  private setState(state: CompletionSnapshot): void {
+  private setState(state: CompletionSnapshot) {
     this.state = state;
     for (const listener of this.listeners) listener();
   }
 
-  update(value: string, selectionStart: number, selectionEnd = selectionStart): void {
+  /** A select event: it often repeats the last input, which must keep the active row and keep an Escape-closed menu closed. */
+  select(value: string, selectionStart: number, selectionEnd = selectionStart) {
+    if (`${selectionStart}:${selectionEnd}:${value}` !== this.input) this.update(value, selectionStart, selectionEnd);
+  }
+
+  update(value: string, selectionStart: number, selectionEnd = selectionStart) {
+    this.input = `${selectionStart}:${selectionEnd}:${value}`;
     this.value = value;
     this.caret = selectionStart;
-    const textBeforeCursor = value.slice(0, selectionStart);
-    this.token = this.featureNegotiated && UTF8.encode(textBeforeCursor).length <= MAX_TEXT_BEFORE_CURSOR_BYTES
-      ? findCompletionToken(value, selectionStart, selectionEnd)
-      : undefined;
+    this.token = selectionStart === selectionEnd ? findCommandCompletionToken(value.slice(0, selectionStart)) : undefined;
     const sequence = ++this.sequence;
-    this.setState({ ...CLOSED });
+    this.setState(CLOSED);
     if (!this.token) return;
-    const { query, start } = this.token;
-    void this.request({ session_id: this.sessionId, text_before_cursor: textBeforeCursor }).then(
-      (response) => {
-        if (!this.isCurrent(sequence, query, start)) return;
-        const entries = response.entries.filter(
-          (entry) => Number.isInteger(entry.start_position) && entry.start_position <= 0,
-        );
-        this.setState({
-          open: entries.length > 0,
-          entries,
-          truncated: response.truncated,
-          activeIndex: 0,
-          error: false,
-        });
+    const token = this.token;
+    void this.controller.completions(value.slice(0, selectionStart)).then(
+      (rows) => {
+        if (sequence !== this.sequence || !this.sameToken(token)) return;
+        this.setState({ open: rows.length > 0, rows, activeIndex: 0 });
       },
-      () => {
-        if (!this.isCurrent(sequence, query, start)) return;
-        this.setState({ ...CLOSED, error: true });
-      },
+      () => { if (sequence === this.sequence) this.setState(CLOSED); },
     );
   }
 
-  private isCurrent(sequence: number, query: string, start: number): boolean {
-    const current = tokenAt(this.value, this.caret);
-    return sequence === this.sequence && this.token?.query === query && current?.start === start;
+  private sameToken(token: CompletionToken) {
+    const current = findCommandCompletionToken(this.value.slice(0, this.caret));
+    return current?.trigger === token.trigger && current.start === token.start && current.prefix === token.prefix;
   }
 
-  accept(): { value: string; caret: number } | undefined {
-    if (!this.state.open || !this.token) return;
-    const entry = this.state.entries[this.state.activeIndex];
-    if (!entry || !tokenAt(this.value, this.caret)) return;
-    const replaceStart = positionAtCodePointOffset(this.value, this.caret, entry.start_position);
-    const value = this.value.slice(0, replaceStart) + entry.text + this.value.slice(this.caret);
-    return { value, caret: replaceStart + entry.text.length };
+  accept(index = this.state.activeIndex): { value: string; caret: number } | undefined {
+    const row = this.state.rows[index];
+    if (!this.state.open || !row || !this.token || !this.sameToken(this.token)) return;
+    const before = this.value.slice(0, this.token.start);
+    const after = this.value.slice(this.caret);
+    const insert = `${row.trigger}${row.name}${row.trigger === "$" || !/^\s/.test(after) ? " " : ""}`;
+    return { value: before + insert + after, caret: before.length + insert.length };
   }
 
-  key(key: "ArrowUp" | "ArrowDown" | "Tab" | "Enter" | "Escape", isComposing = false): CompletionKeyResult {
-    if (isComposing) return { handled: false, submitted: false };
-    if (key === "Escape") {
-      if (!this.state.open) return { handled: false, submitted: false };
-      this.sequence++;
-      this.setState({ ...this.state, open: false });
-      return { handled: true, submitted: false };
-    }
+  choose(index: number) {
+    const accepted = this.accept(index);
+    this.close();
+    return accepted;
+  }
+
+  /** `modified`: Shift, Alt, Ctrl, or Meta is held; then Tab and Enter keep their normal meaning and close the menu. */
+  key(key: string, isComposing = false, modified = false): CompletionKeyResult {
+    if (isComposing || !this.state.open) return { handled: false };
+    if (key === "Escape") { const input = this.input; this.close(); this.input = input; return { handled: true }; }
+    if ((key === "Tab" || key === "Enter") && modified) { this.close(); return { handled: false }; }
     if (key === "ArrowUp" || key === "ArrowDown") {
-      if (!this.state.open) return { handled: false, submitted: false };
       const delta = key === "ArrowDown" ? 1 : -1;
-      const count = this.state.entries.length;
+      const count = this.state.rows.length;
       this.setState({ ...this.state, activeIndex: (this.state.activeIndex + delta + count) % count });
-      return { handled: true, submitted: false };
+      return { handled: true };
     }
-    if (key === "Tab" || (key === "Enter" && this.state.open)) {
-      if (!this.state.open) return { handled: false, submitted: false };
+    if (key === "Tab" || key === "Enter") {
       const accepted = this.accept();
-      this.sequence++;
-      this.setState({ ...this.state, open: false });
-      return { handled: true, submitted: false, accepted };
+      this.close();
+      return { handled: true, accepted };
     }
-    return { handled: false, submitted: key === "Enter" };
+    return { handled: false };
+  }
+
+  close() {
+    this.input = undefined;
+    this.sequence++;
+    this.setState(CLOSED);
   }
 }

@@ -76,7 +76,10 @@ export type Connection = {
   stop(): void;
 };
 
-export const FEATURES = ["list_sessions_paging", "approval_history", "approval_reconnect", "delivery_id", "user_message_event", "user_message_delivery_id", "session_replay_seq", "session_host_commands", "new_session_settings"];
+export const FEATURES = ["list_sessions_paging", "approval_history", "approval_reconnect", "delivery_id", "user_message_event", "user_message_delivery_id", "session_replay_seq", "session_host_commands", "new_session_settings", "model_input_ids"];
+
+const negotiatedRequests = new WeakMap<ZetaClient, ReadonlySet<string>>();
+export const commandRequests = (client: ZetaClient) => negotiatedRequests.get(client) ?? new Set<string>();
 
 async function connectController(discovery: ZetaDiscovery, opened?: (close: () => void) => void) {
   const url = new URL(discovery.url);
@@ -86,7 +89,7 @@ async function connectController(discovery: ZetaDiscovery, opened?: (close: () =
   catch { throw new ZetaError("connect_failed"); }
   opened?.(() => transport.close());
   const client = createClient(transport, undefined, (handshaken, code) => new ZetaError(handshaken ? "closed" : "connect_failed", code));
-  try { await client.hello(FEATURES, "controller"); }
+  try { const hello = await client.hello(FEATURES, "controller"); negotiatedRequests.set(client, new Set(hello.capabilities?.requests ?? [])); }
   catch (error) {
     transport.close();
     const code = (error as { code?: unknown }).code;
