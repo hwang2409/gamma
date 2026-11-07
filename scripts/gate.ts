@@ -277,9 +277,15 @@ try {
     await check("desktop layout, controls, and contrast in all 12 themes", () => auditThemes(page, "1440", 36));
 
     await check("a dropped socket shows 'connection lost', reconnects, and rebuilds without lost or duplicate rows", async () => {
+      // Start with one current controller so this check also catches a late close releasing its replacement.
+      await page.reload();
+      await page.locator(".badge", { hasText: "connected" }).waitFor({ timeout: 10_000 });
+      await page.locator('[data-part="timeline"] [data-kind="user"]').first().waitFor({ timeout: 10_000 });
       await page.locator(".scroll").evaluate((element) => { element.scrollTop = 0; });
       await settle(page);
       await page.locator(".dock textarea").fill("draft kept across disconnect");
+      const staleTimeline = await page.locator('[data-part="timeline"]').elementHandle();
+      if (!staleTimeline) throw new Error("the connected transcript has no timeline");
       await fake.stop();
       await page.getByText("connection lost: zeta serve stopped").waitFor({ timeout: 5000 });
       // The command names the port the page was connected to, not a default.
@@ -299,6 +305,10 @@ try {
       await page.locator(".badge", { hasText: "connected" }).waitFor({ timeout: 10_000 });
       await page.locator(".notice").waitFor({ state: "detached" });
       try {
+        // A replacement virtual timeline starts at the bottom, so wait for its store before inspecting its start.
+        await staleTimeline.waitForElementState("detached", { timeout: 10_000 });
+        const rebuilt = page.locator(".scroll");
+        await rebuilt.evaluate((element) => { element.scrollTop = 0; });
         await page.locator('[data-part="timeline"] [data-kind="user"]').first().waitFor({ timeout: 10_000 });
       } catch {
         const state = await page.locator(".badge, .notice, .panel").allTextContents();
