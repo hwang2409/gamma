@@ -30,30 +30,16 @@ try {
     await page.goto(`${origin}/?run=${LONG}`);
     const scroll = page.locator(".scroll");
     await page.locator('[data-part="timeline"] [data-kind="user"]').last().waitFor({ timeout: 20_000 });
+    await page.locator(".note", { hasText: "loading earlier messages" }).waitFor({ state: "detached", timeout: 20_000 });
     await page.waitForFunction(() => {
       const element = document.querySelector<HTMLElement>(".scroll");
       return element && element.scrollHeight > element.clientHeight * 2;
     });
-
     const transcriptBefore = await scroll.boundingBox();
-    await scroll.evaluate((element) => { element.scrollTop = 0; });
-    const jump = page.getByRole("button", { name: /jump to latest/i });
-    await jump.waitFor({ timeout: 5_000 });
-    const [transcriptAfter, control] = await Promise.all([scroll.boundingBox(), jump.boundingBox()]);
-    if (!transcriptBefore || !transcriptAfter || !control) throw new Error(`${width}: missing layout bounds`);
-    if (transcriptBefore.y !== transcriptAfter.y || transcriptBefore.height !== transcriptAfter.height) throw new Error(`${width}: showing the control shifted the transcript`);
-    if (control.y < transcriptAfter.y + transcriptAfter.height - 0.5) throw new Error(`${width}: control overlaps transcript text`);
-
-    await jump.click();
-    await page.waitForFunction(() => {
-      const element = document.querySelector<HTMLElement>(".scroll");
-      return element && element.scrollHeight - element.clientHeight - element.scrollTop < 2;
-    });
-
-    await scroll.evaluate((element) => { element.scrollTop = 0; });
-    await jump.waitFor();
+    if (!transcriptBefore) throw new Error(`${width}: missing transcript bounds`);
     const composer = page.locator('.dock [data-part="composer"]');
-    await composer.locator("textarea").fill(`follow accepted send at ${width}`);
+    await scroll.evaluate((element) => { element.scrollTop = 0; });
+    await composer.locator("textarea").fill(`use a tool; follow accepted send at ${width}`);
     await composer.locator('[data-part="composer-submit"]').click();
     // Mirrors accepted send/steer replies in zeta tests/test_server_delivery.py:570-601.
     await page.locator('[data-part="timeline"] [data-kind="user"]', { hasText: `follow accepted send at ${width}` }).waitFor({ timeout: 5_000 });
@@ -63,6 +49,26 @@ try {
     });
 
     await composer.and(page.locator('[data-state="steerable"]')).waitFor({ timeout: 5_000 });
+    const viewport = await scroll.boundingBox();
+    if (!viewport) throw new Error(`${width}: missing scroll viewport`);
+    await page.mouse.move(viewport.x + viewport.width / 2, viewport.y + viewport.height / 2);
+    for (let step = 0; step < 8; step++) { await page.mouse.wheel(0, -1000); await page.waitForTimeout(50); }
+    await page.waitForFunction(() => {
+      const element = document.querySelector<HTMLElement>(".scroll");
+      return element && element.scrollTop < element.scrollHeight - element.clientHeight - 100;
+    });
+    const jump = page.getByRole("button", { name: /jump to latest/i });
+    await jump.waitFor({ timeout: 15_000 });
+    const [transcriptAfter, control] = await Promise.all([scroll.boundingBox(), jump.boundingBox()]);
+    if (!transcriptAfter || !control) throw new Error(`${width}: missing layout bounds`);
+    if (transcriptBefore.y !== transcriptAfter.y || transcriptBefore.height !== transcriptAfter.height) throw new Error(`${width}: showing the control shifted the transcript (${transcriptBefore.y}/${transcriptBefore.height} to ${transcriptAfter.y}/${transcriptAfter.height})`);
+    if (control.y < transcriptAfter.y + transcriptAfter.height - 0.5) throw new Error(`${width}: control overlaps transcript text`);
+
+    await jump.click();
+    await page.waitForFunction(() => {
+      const element = document.querySelector<HTMLElement>(".scroll");
+      return element && element.scrollHeight - element.clientHeight - element.scrollTop < 2;
+    });
     await scroll.evaluate((element) => { element.scrollTop = 0; });
     await composer.locator("textarea").fill(`follow accepted steer at ${width}`);
     await composer.locator('[data-part="composer-submit"]').click();
