@@ -261,10 +261,13 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   let catalogBusy = false;
   let settingsEnabled = true;
   let advertiseNewSessionSettings = newSessionSettings;
-  let settings = { model: "gpt-5.1-codex", approval_mode: "ask" as "ask" | "allow" | "deny" };
+  type Settings = { model: string; approval_mode: "ask" | "allow" | "deny" };
+  const settingsBySession = new Map(sessions.map((session) => [String(session.session_id), { model: String(session.model), approval_mode: session.approval_mode as Settings["approval_mode"] }]));
+  const activeSettings = () => settingsBySession.get(active ?? "") ?? { model: "gpt-5.1-codex", approval_mode: "ask" as const };
+  const failures = new Map<string, string[]>();
   const imageSends: Json[] = [];
   const decisions: Json[] = [];
-  const requests: Array<{ method: string; received: number; started: number; replied?: number }> = [];
+  const requests: Array<{ method: string; params: Json; running: boolean; received: number; started: number; replied?: number }> = [];
   type SocketData = { role: "controller" | "observer" };
   const sockets = new Set<ServerWebSocket<SocketData>>();
   let controller: ServerWebSocket<SocketData> | null = null;
@@ -339,7 +342,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         const request = JSON.parse(String(raw)) as { id: number; method: string; params?: Json };
         return schedule(async () => {
         const { id, method, params = {} } = request;
-        const timing: { method: string; received: number; started: number; replied?: number } = { method, received, started: performance.now() };
+        const timing: { method: string; params: Json; running: boolean; received: number; started: number; replied?: number } = { method, params, running, received, started: performance.now() };
         requests.push(timing);
         await wait(requestDelay(method));
         const reply = (body: Json) => {
@@ -374,10 +377,12 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           // real zeta requires a concrete model whenever new_session_settings carries approval_mode
           if (typeof params.approval_mode !== "undefined" && typeof params.model !== "string") return reply({ error: { code: -32602, message: "model is required with approval_mode" } });
           if (typeof params.model !== "undefined" && (!validModels.includes(String(params.model)) || (typeof params.approval_mode !== "undefined" && !["ask", "allow", "deny"].includes(String(params.approval_mode))))) return reply({ error: { code: -32602, message: "invalid model or approval_mode" } });
-          if (typeof params.model === "string" || typeof params.approval_mode === "string") settings = { model: typeof params.model === "string" ? params.model : settings.model, approval_mode: params.approval_mode === "allow" ? "allow" : params.approval_mode === "ask" ? "ask" : settings.approval_mode };
-          const created = meta(`s-new-${sessions.length}`, 0, { created_at: at(0), model: settings.model, approval_mode: settings.approval_mode, cwd: "/Users/dev/me/fun/fulcrum", retained_tail: 8, compaction_budget: 262144, override_audit: [], context_files: [], skill_catalog: [], agent_catalog: [], plan_mode: false, project_id: null, tool_allow: null, tool_deny: [] });
+          const previous = activeSettings();
+          const createdSettings: Settings = { model: typeof params.model === "string" ? params.model : previous.model, approval_mode: params.approval_mode === "allow" ? "allow" : params.approval_mode === "ask" ? "ask" : previous.approval_mode };
+          const created = meta(`s-new-${sessions.length}`, 0, { created_at: at(0), model: createdSettings.model, approval_mode: createdSettings.approval_mode, cwd: "/Users/dev/me/fun/fulcrum", retained_tail: 8, compaction_budget: 262144, override_audit: [], context_files: [], skill_catalog: [], agent_catalog: [], plan_mode: false, project_id: null, tool_allow: null, tool_deny: [] });
           sessions.unshift(created);
           histories[created.session_id] = [];
+          settingsBySession.set(String(created.session_id), createdSettings);
           active = created.session_id;
           return reply({ result: { session: created } });
         }
@@ -432,9 +437,13 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           if (method !== "model_catalog" && params.session_id !== active) return reply({ error: { code: -32003, message: "session is not active" } });
         }
         if (method === "model_catalog") return reply({ result: { models: ["claude-sonnet-5", "claude-opus-4-6", "gpt-5.1-codex"], providers: { "claude-sonnet-5": "claude", "claude-opus-4-6": "claude", "gpt-5.1-codex": "codex" } } });
-        if (method === "session_settings") return reply({ result: settings });
+        const failure = failures.get(method)?.shift();
+        if (failure) return reply({ error: { code: -32000, message: failure } });
+        if (method === "session_settings") return reply({ result: activeSettings() });
         if (method === "set_settings") {
-          settings = { model: String(params.model), approval_mode: params.approval_mode as "ask" | "allow" | "deny" };
+          if (running) return reply({ error: { code: -32004, message: "a turn is already running" } });
+          const settings: Settings = { model: String(params.model), approval_mode: params.approval_mode as Settings["approval_mode"] };
+          settingsBySession.set(String(active), settings);
           return reply({ result: settings });
         }
         if (method === "send_images") {
@@ -466,7 +475,10 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     decisions,
     requests,
     imageSends,
-    get settings() { return settings; },
+    get settings() { return activeSettings(); },
+    settingsFor(sessionId: string) { return settingsBySession.get(sessionId); },
+    setSettings(sessionId: string, settings: Settings) { settingsBySession.set(sessionId, settings); },
+    failNext(method: string, message: string) { failures.set(method, [...(failures.get(method) ?? []), message]); },
     get running() { return running; },
     /** Every accepted send and steer, in order. */
     sent: composer.sent,

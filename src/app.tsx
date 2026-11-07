@@ -72,9 +72,9 @@ function ToolWithArtifacts({ id }: { id: string }) {
   const toolId = useItemSelector(id, (item) => item?.type === "tool" ? item.tool_call.id : null);
   return <><ToolCall id={id} />{toolId ? <ArtifactList anchor={toolId} /> : null}</>;
 }
-const ApprovalModeContext = createContext<{ yolo: boolean; setYolo(value: boolean): void }>({ yolo: false, setYolo() {} });
+const ApprovalModeContext = createContext(false);
 function YoloIndicator({ className = "" }: { className?: string }) {
-  const { yolo } = useContext(ApprovalModeContext);
+  const yolo = useContext(ApprovalModeContext);
   return yolo ? <strong className={`yolo-indicator ${className}`} title="tools run without asking">YOLO</strong> : null;
 }
 function ZetaMessage({ id }: { id: string }) {
@@ -173,7 +173,6 @@ export function App() {
   const landedNotice = useSyncExternalStore(runState.subscribe, runState.getNotice);
   const shownSettings = selectedRecord.settings.error ? selectedRecord.settings.loaded : selectedRecord.settings.pending ? selectedRecord.settings.desired : selectedRecord.settings.loaded ?? selectedRecord.settings.desired;
   const yolo = shownSettings?.approval_mode === "allow";
-  const setYolo = useCallback((value: boolean) => runState.setApprovalMode(browserEntry.run, value ? "allow" : "ask"), [browserEntry.run, runState]);
   const [retryTurn, setRetryTurn] = useState<(() => void) | null>(null);
   const [viewer, setViewer] = useState<any>(null);
   const viewerOpener = useRef<HTMLElement | null>(null);
@@ -211,7 +210,7 @@ export function App() {
 
   return (
     <HighlightContext value={highlight}>
-      <ApprovalModeContext value={{ yolo, setYolo }}>
+      <ApprovalModeContext value={yolo}>
         <RunProvider store={store} highlight={highlight} onRetry={client && open ? () => client.retrySession(open.id) : undefined}>
           <DeliveryStates value={deliveryStates}>
           <RetryTurn value={retryTurn}>
@@ -384,7 +383,7 @@ function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, ru
   const agent = useAgentPhase();
   const agentRunning = agent.kind === "thinking" || agent.kind === "approval" || agent.kind === "running";
   const running = agentRunning && open?.id === view.active;
-  const { yolo, setYolo } = useContext(ApprovalModeContext);
+  const yolo = useContext(ApprovalModeContext);
   useEffect(() => { deliveries.bind(runId, open?.lease.store); }, [deliveries, runId, open?.lease.store]);
   const record = useSyncExternalStore(runState.subscribe, () => runState.get(runId));
   const starting = record.lifecycle.kind === "creating";
