@@ -282,9 +282,7 @@ try {
       await page.locator(".badge", { hasText: "connected" }).waitFor({ timeout: 10_000 });
       const initial = page.locator('.scroll[data-run-ready="true"]');
       await initial.waitFor({ timeout: 10_000 });
-      await settle(page);
-      await initial.evaluate((element) => { element.scrollTop = 0; });
-      await page.locator('[data-part="timeline"] [data-kind="user"]').first().waitFor({ timeout: 10_000 });
+      await page.locator('[data-part="timeline"] [data-id]').first().waitFor({ timeout: 10_000 });
       await settle(page);
       await page.locator(".dock textarea").fill("draft kept across disconnect");
       const historyRequests = fake.requests.filter(({ method }) => method === "session_history").length;
