@@ -335,6 +335,27 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
     });
   };
 
+  const publishOpened = (target: ZetaClient, mine: number, id: string, previous: OpenRun | null, opened: Awaited<ReturnType<typeof openSession>>, history: OpenRun["history"]) => {
+    if (mine !== openGeneration || !live(target)) { opened.lease.release(); return null; }
+    if (previous?.id !== id) previous?.lease.release();
+    const run = { id, lease: opened.lease, stale: false, history, syncing: opened.syncing };
+    cachedRuns.set(id, run);
+    if (opened.session) cachedSessions.set(id, opened.session);
+    attached = id;
+    set(opened.session ? { session: opened.session } : {});
+    transition({ type: "opened", run });
+    watchActiveTurn(id, run);
+    return run;
+  };
+  const reportOpenFailure = async (target: ZetaClient, mine: number, id: string, previousAttached: string | null, error: unknown) => {
+    if (mine !== openGeneration || !live(target)) return;
+    const busy = isBusyError(error);
+    const previousId = previousAttached !== id ? previousAttached : null;
+    const restored = busy ? previousAttached !== null : await restoreAttached(target, previousId);
+    if (mine !== openGeneration || !live(target)) return;
+    transition({ type: "failed", id, error: { id, message: message(error), busy, ...(restored ? { restored: true } : {}) } });
+  };
+
   const open = async (id: string, knownStatus?: ServerStatus) => {
     const target = client;
     const mine = ++openGeneration;
@@ -358,25 +379,9 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
         if (mine !== openGeneration) return;
         transition({ type: "progress", id, messages });
       }, abort.signal, knownStatus, registration ?? await register(target, id));
-      const { lease } = opened;
-      if (mine !== openGeneration || !live(target)) return lease.release();
-      if (previous?.id !== id) previous?.lease.release();
-      const run = { id, lease, stale: false, history, syncing: opened.syncing };
-      cachedRuns.set(id, run);
-      if (opened.session) cachedSessions.set(id, opened.session);
-      attached = id;
-      set(opened.session ? { session: opened.session } : {});
-      transition({ type: "opened", run });
-      watchActiveTurn(id, run);
+      if (!publishOpened(target, mine, id, previous, opened, history)) return;
       trackCompletion(target, mine, id, opened, () => history);
-    } catch (error) {
-      if (mine !== openGeneration || !live(target)) return;
-      const busy = isBusyError(error);
-      const previousId = previousAttached !== id ? previousAttached : null;
-      const restored = busy ? previousAttached !== null : await restoreAttached(target, previousId);
-      if (mine !== openGeneration || !live(target)) return;
-      transition({ type: "failed", id, error: { id, message: message(error), busy, ...(restored ? { restored: true } : {}) } });
-    }
+    } catch (error) { await reportOpenFailure(target, mine, id, previousAttached, error); }
   };
 
   const markApprovalsReconnecting = (disconnected: ZetaClient | null) => {
