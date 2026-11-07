@@ -262,8 +262,9 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   let settingsEnabled = true;
   let advertiseNewSessionSettings = newSessionSettings;
   type Settings = { model: string; approval_mode: "ask" | "allow" | "deny" };
+  const defaultSettings = { model: "gpt-5.1-codex", approval_mode: "ask" as const };
   const settingsBySession = new Map(sessions.map((session) => [String(session.session_id), { model: String(session.model), approval_mode: session.approval_mode as Settings["approval_mode"] }]));
-  const activeSettings = () => settingsBySession.get(active ?? "") ?? { model: "gpt-5.1-codex", approval_mode: "ask" as const };
+  const activeSettings = () => settingsBySession.get(active ?? "") ?? defaultSettings;
   const failures = new Map<string, string[]>();
   const imageSends: Json[] = [];
   const decisions: Json[] = [];
@@ -377,8 +378,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           // real zeta requires a concrete model whenever new_session_settings carries approval_mode
           if (typeof params.approval_mode !== "undefined" && typeof params.model !== "string") return reply({ error: { code: -32602, message: "model is required with approval_mode" } });
           if (typeof params.model !== "undefined" && (!validModels.includes(String(params.model)) || (typeof params.approval_mode !== "undefined" && !["ask", "allow", "deny"].includes(String(params.approval_mode))))) return reply({ error: { code: -32602, message: "invalid model or approval_mode" } });
-          const previous = activeSettings();
-          const createdSettings: Settings = { model: typeof params.model === "string" ? params.model : previous.model, approval_mode: params.approval_mode === "allow" ? "allow" : params.approval_mode === "ask" ? "ask" : previous.approval_mode };
+          const createdSettings: Settings = { model: typeof params.model === "string" ? params.model : defaultSettings.model, approval_mode: params.approval_mode === "allow" ? "allow" : params.approval_mode === "ask" ? "ask" : defaultSettings.approval_mode };
           const created = meta(`s-new-${sessions.length}`, 0, { created_at: at(0), model: createdSettings.model, approval_mode: createdSettings.approval_mode, cwd: "/Users/dev/me/fun/fulcrum", retained_tail: 8, compaction_budget: 262144, override_audit: [], context_files: [], skill_catalog: [], agent_catalog: [], plan_mode: false, project_id: null, tool_allow: null, tool_deny: [] });
           sessions.unshift(created);
           histories[created.session_id] = [];
