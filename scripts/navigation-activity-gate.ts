@@ -63,7 +63,11 @@ async function queuedSteerSequence(browser: Awaited<ReturnType<typeof chromium.l
     for (let attempt = 0; attempt < 50 && !fake.sent.some((sent) => sent.method === "send" && sent.text === `queued steer ${stopped ? "stop" : "natural"}`); attempt++) await Bun.sleep(200);
     if (!fake.sent.some((sent) => sent.method === "steer" && sent.text === `queued steer ${stopped ? "stop" : "natural"}`)) throw new Error("steer was not queued for its owner run");
     if (!fake.sent.some((sent) => sent.method === "send" && sent.text === `queued steer ${stopped ? "stop" : "natural"}`)) throw new Error(stopped ? "manual resend did not send the stopped steer" : "natural turn end did not resend the dropped steer");
-  } finally { await context.close(); fake.drop(); await Bun.sleep(500); }
+  } finally {
+    const stop = page.getByRole("button", { name: "stop the running turn" });
+    if (await stop.count()) await stop.click().catch(() => {});
+    await context.close(); fake.drop(); await Bun.sleep(500);
+  }
 }
 
 async function pendingCreateSequence(browser: Awaited<ReturnType<typeof chromium.launch>>, width: number) {
