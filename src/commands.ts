@@ -52,7 +52,9 @@ type SlashCommand = {
 };
 type SlashListResult = { commands: SlashCommand[]; notices: string[] };
 type SlashRunResult =
-  | { kind: "output" | "text"; text: string }
+  | { kind: "output"; text: string }
+  // Legacy alias from released Zeta 5feea2fc src/zeta/server/slash_commands.py:413-425.
+  | { kind: "text"; text: string }
   | { kind: "model_input"; input_id?: string; display_text?: string; text?: string }
   | { kind: "client_only"; name: string }
   | { kind: "unknown"; name: string }

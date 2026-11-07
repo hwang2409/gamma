@@ -33,7 +33,7 @@ const slashList = {
 describe("slash results", () => {
   const cases = [
     ["output", { kind: "output", text: "model: luna" }, { kind: "receipt", text: "model: luna", tone: "quiet" }],
-    // Zeta src/zeta/server/slash_commands.py:413-425 returns text for /mcp status.
+    // Legacy /mcp status frame from Zeta 5feea2fc src/zeta/server/slash_commands.py:413-425.
     ["text", { kind: "text", text: "server: connected" }, { kind: "receipt", text: "server: connected", tone: "quiet" }],
     ["error", { kind: "error", text: "status unavailable" }, { kind: "receipt", text: "status unavailable", tone: "error" }],
     ["unknown", { kind: "unknown", name: "wat" }, { kind: "receipt", text: "unknown command: /wat", tone: "error" }],
