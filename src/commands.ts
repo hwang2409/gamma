@@ -103,11 +103,11 @@ export function createCommandController(
 
     const normalized = text.trimStart();
     if (normalized.startsWith("/")) {
-      if (!capabilities.requests.has("slash_run")) return unavailableReceipt();
+      if (!capabilities.features.has("model_input_ids") || !capabilities.requests.has("slash_run")) return unavailableReceipt();
       return slashAction(await runSlashCommand(client, sessionId, normalized), normalized);
     }
 
-    if (capabilities.features.has("input_prepare") && POSSIBLE_DOLLAR_SKILL.test(text)) {
+    if (capabilities.features.has("model_input_ids") && capabilities.features.has("input_prepare") && POSSIBLE_DOLLAR_SKILL.test(text)) {
       const result: unknown = await request("input_prepare", { session_id: sessionId, text });
       if (!isRecord(result) || typeof result.kind !== "string") return invalidResponseReceipt();
       switch (result.kind) {

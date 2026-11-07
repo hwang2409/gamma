@@ -114,6 +114,31 @@ describe("inline dollar skills", () => {
     expect(frames).toEqual([]);
   });
 
+  test("does not request hidden input without model_input_ids", async () => {
+    const downgraded: CommandCapabilities = {
+      // Zeta docs/serve-protocol.md:1411-1414: without model_input_ids, model_input includes resolved text.
+      features: new Set(["input_prepare"]),
+      requests: new Set(["slash_list", "slash_run", "input_prepare"]),
+    };
+    const { controller, frames } = fake({
+      slash_run: { kind: "model_input", text: "hidden slash expansion" },
+      input_prepare: { kind: "model_input", text: "hidden skill expansion" },
+    }, downgraded);
+
+    const slash = await controller.prepareComposerInput("/review secret");
+    expect(frames).toEqual([]);
+    expect(slash).toEqual({
+      kind: "receipt",
+      text: "not available in this server version",
+      tone: "error",
+    });
+    expect(await controller.prepareComposerInput("please use $review now")).toEqual({
+      kind: "send",
+      text: "please use $review now",
+    });
+    expect(frames).toEqual([]);
+  });
+
   // Provisional fixtures from design-serve-capability-registry.md section 4 "z1"; zeta z1 has not shipped.
   const cases = [
     [{ kind: "direct" }, { kind: "send", text: "please use $review now" }],
