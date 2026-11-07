@@ -287,8 +287,7 @@ try {
       await page.locator('[data-part="timeline"] [data-kind="user"]').first().waitFor({ timeout: 10_000 });
       await settle(page);
       await page.locator(".dock textarea").fill("draft kept across disconnect");
-      const staleTimeline = await page.locator('[data-part="timeline"]').elementHandle();
-      if (!staleTimeline) throw new Error("the connected transcript has no timeline");
+      const historyRequests = fake.requests.filter(({ method }) => method === "session_history").length;
       await fake.stop();
       await page.getByText("connection lost: zeta serve stopped").waitFor({ timeout: 5000 });
       // The command names the port the page was connected to, not a default.
@@ -308,11 +307,10 @@ try {
       await page.locator(".badge", { hasText: "connected" }).waitFor({ timeout: 10_000 });
       await page.locator(".notice").waitFor({ state: "detached" });
       try {
-        // A replacement virtual timeline starts at the bottom, so wait for its store before inspecting its start.
-        await staleTimeline.waitForElementState("detached", { timeout: 10_000 });
-        const rebuilt = page.locator(".scroll");
-        await rebuilt.evaluate((element) => { element.scrollTop = 0; });
-        await page.locator('[data-part="timeline"] [data-kind="user"]').first().waitFor({ timeout: 10_000 });
+        // The replacement virtual timeline starts at the bottom, where an old user row need not be mounted.
+        for (let attempt = 0; fake.requests.filter(({ method, replied }) => method === "session_history" && replied !== undefined).length <= historyRequests && attempt < 500; attempt++) await Bun.sleep(10);
+        if (fake.requests.filter(({ method, replied }) => method === "session_history" && replied !== undefined).length <= historyRequests) throw new Error("server did not replay history");
+        await page.locator('.scroll:not([data-stale]) [data-part="timeline"] [data-id]').first().waitFor({ timeout: 10_000 });
       } catch {
         const state = await page.locator(".badge, .notice, .panel").allTextContents();
         const recent = fake.requests.slice(-8).map(({ method, received, replied }) => `${method}:${replied === undefined ? "pending" : Math.round(replied - received) + "ms"}`);
