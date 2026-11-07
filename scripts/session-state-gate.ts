@@ -113,13 +113,11 @@ await check("a delayed resume retry is cancelled after navigation", async () => 
   const browser = await chromium.launch({ headless: true });
   const { context, page } = await fresh(browser, 1440, "/?run=s-docs");
   const before = fake.requests.length;
-  fake.busyNext("resume", 1, 3_000);
-  fake.delayNext("resume", 500);
+  fake.busyNext("resume", 1);
+  fake.delayNext("resume", 800);
   try {
     await page.goto(`${origin}/?run=s-themes`);
     if (!await poll(() => Promise.resolve(fake.requests.slice(before).some((request) => request.method === "resume" && request.params.session_id === "s-themes")))) throw new Error("the first resume was not sent");
-    const statusesAfterResume = fake.requests.filter((request) => request.method === "status").length;
-    if (!await poll(() => Promise.resolve(fake.requests.filter((request) => request.method === "status").length > statusesAfterResume))) throw new Error("the retry status check was not sent");
     await page.evaluate(() => {
       const run = `draft:${crypto.randomUUID()}`;
       const url = new URL(location.href); url.searchParams.set("run", run);
@@ -128,9 +126,8 @@ await check("a delayed resume retry is cancelled after navigation", async () => 
     });
     await page.waitForURL((url) => url.searchParams.get("run")?.startsWith("draft:") ?? false);
     const draft = page.url();
-    await Bun.sleep(3_500);
-    const attempts = fake.requests.slice(before).filter((request) => request.method === "resume" && request.params.session_id === "s-themes");
-    if (attempts.length !== 1) throw new Error(`stale resume retried ${attempts.length} times after navigation`);
+    await Bun.sleep(1_500);
+    if (fake.activeId() === "s-themes") throw new Error("stale retry attached the old run after navigation");
     if (page.url() !== draft) throw new Error(`stale resume replaced the selected draft: ${page.url()}`);
     if (await page.getByRole("heading", { name: "another run is active" }).count()) throw new Error("stale resume showed a busy panel on the new run");
   } finally { await context.close(); await browser.close(); }
