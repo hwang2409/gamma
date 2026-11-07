@@ -115,12 +115,12 @@ export function createCommandController(
           return { kind: "send", text };
         case "error":
           return typeof result.text === "string" ? { kind: "receipt", text: result.text, tone: "error" } : invalidResponseReceipt();
-        case "model_input": {
-          const parsed = parseSlashRun(result);
-          return parsed.kind === "model_input" && capabilities.features.has("model_input_ids") && typeof parsed.input_id === "string"
-            ? { kind: "send-input", inputId: parsed.input_id, displayText: parsed.display_text }
-            : parsed.kind === "model_input" ? unavailableReceipt() : invalidResponseReceipt();
-        }
+        case "model_input":
+          // shortcut: input_prepare has a stricter z1 shape than slash_run, until fulcrum adds its parser.
+          if (typeof result.input_id !== "string" || typeof result.display_text !== "string") return invalidResponseReceipt();
+          return capabilities.features.has("model_input_ids")
+            ? { kind: "send-input", inputId: result.input_id, displayText: result.display_text }
+            : unavailableReceipt();
         default:
           return invalidResponseReceipt();
       }
