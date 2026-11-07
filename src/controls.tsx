@@ -1,6 +1,6 @@
-import type { ZetaClient } from "@fulcrum/zeta";
 import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import type { RunStateStore } from "./run-state";
+import type { RunControl } from "./session";
 import { catalogModels, catalogProviders, settingModel, settingsRequest, type SessionSettings } from "./settings";
 
 const CATALOG = "gamma-catalog";
@@ -78,7 +78,7 @@ function ModelPicker({ value, models, resolvedDefault, allowDefault, onChange }:
  * The run's model and approval mode, from zeta. A blank run has no session yet: it shows zeta's catalog and the mode
  * the first send starts the run with (`nextRunModel`, then `set_settings` for YOLO).
  */
-export function RunSettings({ client, sessionId, createdWithDefault, running, yolo, onYolo, store, runId }: { client: ZetaClient | null; sessionId: string | null; createdWithDefault: boolean; running: boolean; yolo: boolean; onYolo(value: boolean): void; store: RunStateStore; runId: string }) {
+export function RunSettings({ available, runs, sessionId, createdWithDefault, running, yolo, onYolo, store, runId }: { available: boolean; runs: RunControl; sessionId: string | null; createdWithDefault: boolean; running: boolean; yolo: boolean; onYolo(value: boolean): void; store: RunStateStore; runId: string }) {
   const [unsupported, setUnsupported] = useState(false);
   const [settings, setSettings] = useState<SessionSettings>({});
   const [models, setModels] = useState<string[]>(() => cachedCatalog().models);
@@ -91,10 +91,10 @@ export function RunSettings({ client, sessionId, createdWithDefault, running, yo
   const confirmRef = useRef<HTMLDivElement>(null);
   const approvalButton = useRef<HTMLButtonElement>(null);
   useEffect(() => {
-    if (!client) return;
+    if (!available) return;
     let live = true;
     setError("");
-    void client.request("model_catalog", sessionId ? { session_id: sessionId } : {}, { timeoutMs: 15_000 }).then((catalog) => {
+    void runs.modelCatalog(sessionId).then((catalog) => {
       if (!live) return;
       localStorage.setItem(CATALOG, JSON.stringify(catalog));
       setModels(catalogModels(catalog));
@@ -102,7 +102,7 @@ export function RunSettings({ client, sessionId, createdWithDefault, running, yo
       if (!live) return;
       if ((cause as { code?: unknown }).code === -32601) setUnsupported(true);
     });
-    if (sessionId) void client.request("session_settings", { session_id: sessionId }, { timeoutMs: 15_000 }).then((value) => {
+    if (sessionId) void runs.loadSettings(sessionId).then((value) => {
       if (!live) return;
       const next = settingModel(value);
       setSettings(next);
@@ -110,17 +110,17 @@ export function RunSettings({ client, sessionId, createdWithDefault, running, yo
       onYolo(next.approval_mode === "allow");
     }, (cause: unknown) => { if (live) setError(cause instanceof Error ? cause.message : "settings unavailable"); });
     return () => { live = false; };
-  }, [client, sessionId, createdWithDefault, onYolo, store, runId]);
+  }, [available, runs, sessionId, createdWithDefault, onYolo, store, runId]);
   useEffect(() => { if (!running) setModelDeferred(false); }, [running]);
   const closeConfirm = useCallback(() => { setConfirmYolo(false); approvalButton.current?.focus(); }, []);
   useDismiss(confirmYolo, confirmRef, closeConfirm);
   useEffect(() => { if (confirmYolo) confirmRef.current?.querySelector<HTMLButtonElement>("button[data-safe]")?.focus(); }, [confirmYolo]);
-  if (!client || unsupported) return null;
+  if (!available || unsupported) return null;
   const change = async (patch: Partial<SessionSettings>) => {
     setError("");
     try {
-      await client.request("set_settings", { session_id: sessionId, ...settingsRequest(settings, patch) });
-      const next = settingModel(await client.request("session_settings", { session_id: sessionId }, { timeoutMs: 15_000 }));
+      if (!sessionId) throw new Error("the run has not started");
+      const next = settingModel(await runs.changeSettings(sessionId, settingsRequest(settings, patch)));
       setSettings(next);
       onYolo(next.approval_mode === "allow");
     } catch (cause) { setError(cause instanceof Error ? cause.message : "could not change settings"); }

@@ -199,7 +199,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .dock .model-picker [role="option"]:hover, .dock .model-picker [role="option"]:focus-visible { background: var(--fulcrum-surface); }
 .model-empty { max-width: 32ch; margin: 0; padding: 6px 12px; color: var(--fulcrum-muted); font-size: 12px; }
 .model-deferred, .settings-error { flex-basis: 100%; font-size: 12px; overflow-wrap: anywhere; }
-.model-deferred { color: var(--fulcrum-muted); }
+.model-deferred { position: absolute; right: var(--inset); bottom: calc(100% + 6px); z-index: 2; padding: 4px 7px; border: 1px solid var(--fulcrum-border); background: var(--fulcrum-bg); color: var(--fulcrum-muted); }
 .settings-error { color: var(--fulcrum-danger); }
 .dock [data-part="composer-status"][data-tone="danger"] { flex-basis: 100%; height: auto; white-space: normal; }
 .dock [data-part="composer-message"] { overflow-wrap: anywhere; white-space: normal; }
@@ -264,20 +264,19 @@ button:active:not(:disabled) { transform: scale(0.97); }
   .dock .composer-tools > * { flex: none; }
   .dock .composer-tools > .model-picker { display: flex; flex: 0 1 auto; min-width: 0; }
   .dock [data-part="composer"] .model-picker > .composer-tool { flex: 0 1 auto; min-width: 0; max-width: none; }
-  .topbar-yolo { display: none; }
   .brand-name { display: none; }
   .run-title h1 { max-width: none; }
   .dock .model-picker > button { width: 14ch; max-width: 14ch; }
   .dock .model-picker { min-width: 8ch; }
-  .attachments { flex-wrap: nowrap; overflow-x: auto; }
+  .attachments { flex-wrap: nowrap; overflow-x: auto; padding-right: 28px; mask-image: linear-gradient(to right, #000 calc(100% - 20px), transparent); }
   [data-part="attachment"] { flex: 0 0 150px; }
   .model-picker [role="listbox"] { right: auto; left: 0; }
 }
 @media (max-width: 420px) {
   .topbar { flex-wrap: wrap; }
-  .topbar-yolo { display: none; }
   .new-run { margin-left: auto; }
-  .topbar .run-title { order: 2; flex-basis: 100%; }
+  .topbar .run-title { order: 2; flex: 1 1 0; }
+  .topbar-yolo { order: 2; }
   .settings-popover { right: 0; width: min(320px, calc(100vw - 24px)); }
   .dock .composer-tools { flex-wrap: wrap; justify-content: flex-start; }
   .dock .composer-tools > .model-picker { flex-basis: 100%; }

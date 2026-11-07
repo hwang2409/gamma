@@ -113,5 +113,57 @@ export function createDelivery(newId: () => string = () => `web-${crypto.randomU
   };
 }
 
+type DeliveryStore = {
+  hasMessageDelivery(id: string): boolean;
+  dispatch(event: RunEvent): void;
+  getState(): { outline: readonly { id: string }[] };
+  getItem(id: string): unknown;
+  subscribe(listener: () => void): () => void;
+};
+type DeliveryRecord = {
+  delivery: ReturnType<typeof createDelivery>;
+  store?: DeliveryStore;
+  unsubscribe?: () => void;
+  provisional: Map<string, unknown>;
+  text: Map<string, string>;
+  waiting: Set<string>;
+  undelivered: Set<string>;
+};
+
+/** Owns delivery reconciliation by run, so navigation cannot unmount an accepted steer's state. */
+export function createDeliveryManager(client: () => ZetaClient | null) {
+  const records = new Map<string, DeliveryRecord>();
+  const listeners = new Set<() => void>();
+  const emit = () => listeners.forEach((listener) => listener());
+  const find = (store: DeliveryStore, id: string) => store.getState().outline.map(({ id: itemId }) => store.getItem(itemId) as { type?: string; event?: { type?: string; delivery_id?: string } } | undefined).find((item) => item?.type === "user" && item.event?.type === "user_message" && item.event.delivery_id === id);
+  const record = (runId: string): DeliveryRecord => {
+    const prior = records.get(runId); if (prior) return prior;
+    const next = {} as DeliveryRecord;
+    next.provisional = new Map(); next.text = new Map(); next.waiting = new Set(); next.undelivered = new Set();
+    next.delivery = createDelivery(undefined, (event) => {
+      const id = event.type === "user_message" ? event.delivery_id : undefined;
+      if (!id || !next.store) return;
+      if (next.store.hasMessageDelivery(id)) { next.waiting.delete(id); emit(); return; }
+      next.store.dispatch(event); next.provisional.set(id, find(next.store, id)); next.waiting.add(id); emit();
+    });
+    records.set(runId, next); return next;
+  };
+  const reconcileRows = (item: DeliveryRecord) => {
+    if (!item.store) return;
+    for (const [id, fallback] of item.provisional) if (find(item.store, id) !== fallback) { item.provisional.delete(id); item.waiting.delete(id); emit(); }
+  };
+  return {
+    subscribe(listener: () => void) { listeners.add(listener); return () => listeners.delete(listener); },
+    marks(runId: string) { const item = record(runId); return { waiting: item.waiting as ReadonlySet<string>, undelivered: item.undelivered as ReadonlySet<string> }; },
+    bind(runId: string, store: DeliveryStore | undefined) { const item = record(runId); if (item.store === store) return; item.unsubscribe?.(); item.store = store; item.unsubscribe = store?.subscribe(() => reconcileRows(item)); reconcileRows(item); },
+    async submit(runId: string, text: string, steer: boolean, deliveryId?: string) { const target = client(); if (!target) throw new Error("not connected to zeta serve"); const item = record(runId); if (deliveryId) item.text.set(deliveryId, text); return item.delivery.submit(target, text, steer, deliveryId); },
+    stop(runId: string) { const target = client(); return target ? record(runId).delivery.stop(target) : Promise.reject(new Error("not connected to zeta serve")); },
+    async turnEnded(runId: string) { const target = client(); if (!target) return; const item = record(runId); for (const id of item.provisional.keys()) item.waiting.delete(id); item.provisional.clear(); const dropped = await item.delivery.turnEnded(target); dropped.forEach((id) => item.undelivered.add(id)); emit(); },
+    async resend(runId: string, intentId: string) { const item = record(runId); const text = item.text.get(intentId); if (!text) return; item.undelivered.delete(intentId); emit(); await this.submit(runId, text, false); },
+    dispose() { records.forEach((item) => item.unsubscribe?.()); records.clear(); listeners.clear(); },
+  };
+}
+export type DeliveryManager = ReturnType<typeof createDeliveryManager>;
+
 /** Stops the running turn and everything it started (zeta's default session-scope abort). */
 export const stopTurn = (client: ZetaClient) => client.request("abort", {}, { timeoutMs: 15_000 });

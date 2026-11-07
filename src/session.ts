@@ -235,6 +235,9 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
   let activeSubscription = () => {};
   let openGeneration = 0;
   let openAbort: AbortController | null = null;
+  let attachmentHolds = 0;
+  let deferredSelection: string | null | undefined;
+  let createdPending: string | null = null;
   const live = (target: ZetaClient) => client === target;
   const register = (target: ZetaClient, id?: string) => bindings && target.features.includes("session_host_commands") ? bindings.register(id) : undefined;
   const watchActiveTurn = (id: string, run: OpenRun) => {
@@ -256,6 +259,11 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
   };
   const open = async (id: string, knownStatus?: ServerStatus) => {
     const target = client;
+    if (state.active && state.active !== id) {
+      publishSelected(id);
+      set({ opening: cachedRuns.has(id) ? null : { id, messages: 0 }, openError: { id, message: `${state.active} has the active turn`, busy: true } });
+      return;
+    }
     const mine = ++openGeneration;
     openAbort?.abort();
     const abort = new AbortController();
@@ -286,12 +294,17 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
       set({ attached: id, ...(state.selected === id ? { session: opened.session ?? cachedSessions.get(id) ?? null, openError: null } : {}) });
       watchActiveTurn(id, run);
       void opened.complete.then((result) => {
+        const nextSelection = state.active === id ? state.selected : null;
+        if (state.active === id) set({ active: null });
         if (result.lease) {
           const current = cachedRuns.get(id);
           if (mine !== openGeneration || !live(target)) return result.lease.release();
           current?.lease.release();
-          updateCached(id, { ...run, lease: result.lease, history: { ...history, complete: true }, syncing: result.syncing });
+          const completed = { ...run, lease: result.lease, history: { ...history, complete: true }, syncing: result.syncing };
+          updateCached(id, completed);
+          if (state.attached === id) watchActiveTurn(id, completed);
         } else if (cachedRuns.get(id) === run) updateCached(id, { ...run, history: { ...history, complete: true }, syncing: result.syncing });
+        if (nextSelection && nextSelection !== id) void open(nextSelection);
       }).catch((error) => {
         if (mine === openGeneration && live(target) && state.selected === id && (error as { name?: string }).name !== "AbortError")
           set({ openError: { id, message: message(error), busy: isBusyError(error) } });
@@ -343,9 +356,46 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
     select(id: string) {
       if (id === state.selected && (state.opening || (state.open && !state.open.stale))) return;
       onSelect?.(id);
+      if (attachmentHolds) { deferredSelection = id; publishSelected(id); return; }
       void open(id);
     },
+    holdAttachment() {
+      attachmentHolds++;
+      let held = true;
+      return () => {
+        if (!held) return;
+        held = false;
+        if (--attachmentHolds) return;
+        const target = deferredSelection === undefined ? createdPending : deferredSelection;
+        deferredSelection = undefined; createdPending = null;
+        if (target) void open(target);
+      };
+    },
     dismissOpenError() { set({ openError: null }); },
+    async refreshStatus() {
+      if (!client) return;
+      const status = await getStatus(client);
+      const owner = status.state === "idle" ? null : status.session?.session_id ?? null;
+      set({ active: owner, attached: status.session?.session_id ?? state.attached });
+      if (!owner && state.selected && !state.selected.startsWith("draft:")) await open(state.selected, status);
+    },
+    modelCatalog(sessionId?: string | null) {
+      if (!client) throw new Error("not connected to zeta serve");
+      return client.request("model_catalog", sessionId ? { session_id: sessionId } : {}, { timeoutMs: 15_000 });
+    },
+    loadSettings(sessionId: string) {
+      if (!client || state.attached !== sessionId) throw Object.assign(new Error("session is not attached"), { code: -32003 });
+      return client.request("session_settings", { session_id: sessionId }, { timeoutMs: 15_000 });
+    },
+    async changeSettings(sessionId: string, settings: Record<string, unknown>) {
+      if (!client || state.attached !== sessionId) throw Object.assign(new Error("session is not attached"), { code: -32003 });
+      await client.request("set_settings", { session_id: sessionId, ...settings });
+      return client.request("session_settings", { session_id: sessionId }, { timeoutMs: 15_000 });
+    },
+    sendImages(sessionId: string, deliveryId: string, text: string, images: readonly { name: string; mime_type: string; data: string }[]) {
+      if (!client || state.attached !== sessionId) throw Object.assign(new Error("session is not attached"), { code: -32003 });
+      return client.request("send_images", { session_id: sessionId, delivery_id: deliveryId, text, images }, { timeoutMs: 30_000 });
+    },
     async create(choice: { model?: string; provider?: string; approval_mode?: "ask" | "allow" } = {}) {
       const target = client;
       if (!target) throw new Error("not connected to zeta serve");
@@ -356,14 +406,15 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
       if (binding) await bindings!.bind(binding.registration_id, session.session_id);
       if (!live(target)) throw new Error("the connection dropped while the run started");
       cachedSessions.set(session.session_id, session);
+      createdPending = session.session_id;
+      set({ attached: session.session_id, ...(deferredSelection === undefined ? { selected: session.session_id, opening: { id: session.session_id, messages: 0 }, open: null, session } : {}) });
       onSelect?.(session.session_id);
-      await open(session.session_id);
-      if (state.openError?.id === session.session_id) throw new Error(state.openError.message);
+      if (!attachmentHolds) { createdPending = null; await open(session.session_id); }
       return session.session_id;
     },
     reset() {
-      openGeneration++;
-      openAbort?.abort();
+      if (!state.active) { openGeneration++; openAbort?.abort(); }
+      if (attachmentHolds) deferredSelection = null;
       onSelect?.(null);
       set({ selected: null, open: null, opening: null, openError: null, session: null });
     },
