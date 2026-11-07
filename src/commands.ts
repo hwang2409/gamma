@@ -52,7 +52,7 @@ type SlashCommand = {
 };
 type SlashListResult = { commands: SlashCommand[]; notices: string[] };
 type SlashRunResult =
-  | { kind: "output"; text: string }
+  | { kind: "output" | "text"; text: string }
   | { kind: "model_input"; input_id?: string; display_text?: string; text?: string }
   | { kind: "client_only"; name: string }
   | { kind: "unknown"; name: string }
@@ -77,7 +77,8 @@ const CLIENT_ACTIONS: Readonly<Record<string, ClientActionName>> = {
 };
 
 const POSSIBLE_DOLLAR_SKILL = /(?:^|\s)\$[A-Za-z0-9][A-Za-z0-9_-]*/;
-const COMPLETION = /(?:^|\s)([/\$])([A-Za-z0-9_-]*)$/;
+const SLASH_COMPLETION = /^\/([A-Za-z0-9_-]*)$/;
+const DOLLAR_COMPLETION = /(?:^|\s)\$([A-Za-z0-9_-]*)$/;
 
 export function createCommandController(
   sessionId: string,
@@ -96,11 +97,12 @@ export function createCommandController(
   }
 
   async function completions(valueBeforeCursor: string): Promise<CompletionRow[]> {
-    const match = COMPLETION.exec(valueBeforeCursor);
-    if (!match || !capabilities.requests.has("slash_list")) return [];
+    const slash = SLASH_COMPLETION.exec(valueBeforeCursor);
+    const dollar = DOLLAR_COMPLETION.exec(valueBeforeCursor);
+    if ((!slash && !dollar) || !capabilities.requests.has("slash_list")) return [];
     if (catalog === undefined) await refreshCatalog();
-    const trigger = match[1] as "/" | "$";
-    const prefix = match[2].toLowerCase();
+    const trigger = slash ? "/" : "$";
+    const prefix = (slash?.[1] ?? dollar?.[1] ?? "").toLowerCase();
     return (catalog ?? [])
       .filter((entry) => (trigger === "/" || entry.kind === "skill") && entry.name.toLowerCase().startsWith(prefix))
       .sort((a, b) => Number(b.name.toLowerCase() === prefix) - Number(a.name.toLowerCase() === prefix) || a.name.localeCompare(b.name))
@@ -114,7 +116,7 @@ export function createCommandController(
     const normalized = text.trimStart();
     if (normalized.startsWith("/")) {
       if (!capabilities.requests.has("slash_run")) return unavailableReceipt();
-      const result = await request("slash_run", { session_id: sessionId, text: normalized }) as SlashRunResult;
+      const result: unknown = await request("slash_run", { session_id: sessionId, text: normalized });
       return slashAction(result, normalized);
     }
 
@@ -129,22 +131,28 @@ export function createCommandController(
     return { kind: "send", text };
   }
 
-  function slashAction(result: SlashRunResult, text: string): ComposerAction {
-    switch (result.kind) {
+  function slashAction(result: unknown, text: string): ComposerAction {
+    if (!isRecord(result) || typeof result.kind !== "string") return invalidResponseReceipt();
+    const frame = result as Partial<SlashRunResult> & Record<string, unknown>;
+    switch (frame.kind) {
       case "output":
-        return { kind: "receipt", text: result.text, tone: "quiet" };
+      case "text":
+        return typeof frame.text === "string" ? { kind: "receipt", text: frame.text, tone: "quiet" } : invalidResponseReceipt();
       case "error":
-        return { kind: "receipt", text: result.text, tone: "error" };
+        return typeof frame.text === "string" ? { kind: "receipt", text: frame.text, tone: "error" } : invalidResponseReceipt();
       case "unknown":
-        return { kind: "receipt", text: `unknown command: /${result.name}`, tone: "error" };
+        return typeof frame.name === "string" ? { kind: "receipt", text: `unknown command: /${frame.name}`, tone: "error" } : invalidResponseReceipt();
       case "client_only": {
-        const name = CLIENT_ACTIONS[result.name];
+        if (typeof frame.name !== "string") return invalidResponseReceipt();
+        const name = CLIENT_ACTIONS[frame.name];
         return name ? { kind: "client-action", name, args: commandArgs(text) } : unavailableReceipt();
       }
       case "model_input":
-        if (!capabilities.features.has("model_input_ids") || result.input_id === undefined || result.display_text === undefined)
-          return unavailableReceipt();
-        return { kind: "send-input", inputId: result.input_id, displayText: result.display_text };
+        if (!capabilities.features.has("model_input_ids")) return unavailableReceipt();
+        if (typeof frame.input_id !== "string" || typeof frame.display_text !== "string") return invalidResponseReceipt();
+        return { kind: "send-input", inputId: frame.input_id, displayText: frame.display_text };
+      default:
+        return invalidResponseReceipt();
     }
   }
 
@@ -159,4 +167,12 @@ function commandArgs(text: string): string {
 
 function unavailableReceipt(): ComposerAction {
   return { kind: "receipt", text: "not available in this server version", tone: "error" };
+}
+
+function invalidResponseReceipt(): ComposerAction {
+  return { kind: "receipt", text: "invalid response from server", tone: "error" };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
