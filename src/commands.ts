@@ -72,9 +72,10 @@ export function createCommandController(
   capabilities: CommandCapabilities,
 ): CommandController {
   let catalog: SlashCommandInfo[] | undefined;
-  const client: CommandClient = {
-    request: (method, params) => request(method as "slash_list" | "slash_run" | "input_prepare", params ?? {}),
-  };
+  const client = {
+    request: (method: string, params?: Record<string, unknown>) => request(method as "slash_list" | "slash_run" | "input_prepare", params ?? {}),
+    features: [...capabilities.features],
+  } satisfies CommandClient & { features: readonly string[] };
 
   async function refreshCatalog(): Promise<void> {
     if (!capabilities.requests.has("slash_list")) {
@@ -103,11 +104,11 @@ export function createCommandController(
 
     const normalized = text.trimStart();
     if (normalized.startsWith("/")) {
-      if (!capabilities.requests.has("slash_run")) return unavailableReceipt();
+      if (!capabilities.features.has("model_input_ids") || !capabilities.requests.has("slash_run")) return unavailableReceipt();
       return slashAction(await runSlashCommand(client, sessionId, normalized), normalized);
     }
 
-    if (capabilities.features.has("input_prepare") && POSSIBLE_DOLLAR_SKILL.test(text)) {
+    if (capabilities.features.has("model_input_ids") && capabilities.features.has("input_prepare") && POSSIBLE_DOLLAR_SKILL.test(text)) {
       const result: unknown = await request("input_prepare", { session_id: sessionId, text });
       if (!isRecord(result) || typeof result.kind !== "string") return invalidResponseReceipt();
       switch (result.kind) {
@@ -147,7 +148,7 @@ export function createCommandController(
           ? { kind: "send-input", inputId: result.input_id, displayText: result.display_text }
           : unavailableReceipt();
       default:
-        return invalidResponseReceipt();
+        return mapUnavailableSlashResult(result) ?? invalidResponseReceipt();
     }
   }
 
@@ -158,6 +159,11 @@ function commandArgs(text: string): string {
   const commandLine = text.split("\n", 1)[0].slice(1).trimStart();
   const separator = commandLine.search(/\s/);
   return separator < 0 ? "" : commandLine.slice(separator).trimStart();
+}
+
+export function mapUnavailableSlashResult(result: { kind?: unknown }): ComposerAction | undefined {
+  // fulcrum f1g adds this result for requests missing model_input_ids.
+  return result.kind === "unavailable" ? unavailableReceipt() : undefined;
 }
 
 function unavailableReceipt(): ComposerAction {
