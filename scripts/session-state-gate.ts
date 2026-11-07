@@ -104,6 +104,7 @@ await check("one transient busy new session retries and starts", async () => {
   } finally { const stop = page.getByRole("button", { name: "stop the running turn" }); await stop.click().catch(() => {}); await context.close(); await browser.close(); }
 });
 
+// The delayed-retry, known-owner, rapid-selection, approval-navigation, and three-busy-resume cases below are regression guards; they already pass on 6216ad7.
 await check("a delayed resume retry is cancelled after navigation", async () => {
   const before = fake.requests.length;
   fake.busyNext("resume", 1);
