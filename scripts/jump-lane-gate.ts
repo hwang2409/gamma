@@ -39,8 +39,6 @@ try {
     if (!transcriptBefore) throw new Error(`${width}: missing transcript bounds`);
     const composer = page.locator('.dock [data-part="composer"]');
     await scroll.evaluate((element) => { element.scrollTop = 0; });
-    const rowBefore = await page.locator('[data-part="timeline"] [data-id]').first().evaluate((element) => ({ id: element.getAttribute("data-id"), top: element.getBoundingClientRect().top }));
-    if (!rowBefore) throw new Error(`${width}: missing comparison row`);
     await composer.locator("textarea").fill(`use a tool; follow accepted send at ${width}`);
     await composer.locator('[data-part="composer-submit"]').click();
     // Mirrors accepted send/steer replies in zeta tests/test_server_delivery.py:570-601.
@@ -59,6 +57,8 @@ try {
       const element = document.querySelector<HTMLElement>(".scroll");
       return element && element.scrollTop < element.scrollHeight - element.clientHeight - 100;
     });
+    const rowBefore = await page.locator('[data-part="timeline"] [data-id]').first().evaluate((element) => ({ id: element.getAttribute("data-id"), top: element.getBoundingClientRect().top }));
+    if (!rowBefore) throw new Error(`${width}: missing comparison row`);
     const jump = page.getByRole("button", { name: /jump to latest/i });
     await jump.waitFor({ timeout: 15_000 });
     const [transcriptAfter, control] = await Promise.all([scroll.boundingBox(), jump.boundingBox()]);
