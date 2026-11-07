@@ -264,7 +264,8 @@ test("a busy resume displays the URL-selected cached run and forward restores th
   }));
   const view = harness(source(fake.client), { selected: "a" });
   await tick();
-  view.select("b"); await tick();
+  view.select("b");
+  for (let attempt = 0; attempt < 50 && view.state.session?.session_id !== "b"; attempt++) await tick();
   blockA = true;
   view.select("a");
   for (let attempt = 0; attempt < 50 && !present(view).openError; attempt++) await tick();
