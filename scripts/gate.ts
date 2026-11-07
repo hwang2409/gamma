@@ -298,7 +298,13 @@ try {
       await page.getByRole("button", { name: "retry now" }).click();
       await page.locator(".badge", { hasText: "connected" }).waitFor({ timeout: 10_000 });
       await page.locator(".notice").waitFor({ state: "detached" });
-      await page.locator('[data-part="timeline"] [data-kind="user"]').first().waitFor({ timeout: 10_000 });
+      try {
+        await page.locator('[data-part="timeline"] [data-kind="user"]').first().waitFor({ timeout: 10_000 });
+      } catch {
+        const state = await page.locator(".badge, .notice, .panel").allTextContents();
+        const recent = fake.requests.slice(-8).map(({ method, received, replied }) => `${method}:${replied === undefined ? "pending" : Math.round(replied - received) + "ms"}`);
+        throw new Error(`transcript did not rebuild; page=${JSON.stringify(state)} requests=${recent.join(",")}`);
+      }
       const ids = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('[data-part="timeline"] [data-id]')].map((item) => item.dataset.id));
       if (new Set(ids).size !== ids.length) throw new Error("duplicate rows after reconnect");
       if (await page.locator('[data-part="approval"][data-state="pending"]').count()) throw new Error("a dropped approval came back as pending");
