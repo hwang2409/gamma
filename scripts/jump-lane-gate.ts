@@ -68,14 +68,32 @@ try {
     if (Math.abs(rowBefore.top - rowAfter) > 0.5) throw new Error(`${width}: showing the control shifted row ${rowBefore.id} (${rowBefore.top} to ${rowAfter})`);
     if (control.y < transcriptAfter.y + transcriptAfter.height - 0.5) throw new Error(`${width}: control overlaps transcript text`);
 
-    const rowBeforeDisappearance = await page.locator(`[data-part="timeline"] [data-id="${rowBefore.id}"]`).evaluate((element) => element.getBoundingClientRect().top).catch(() => null);
+    await scroll.evaluate(async (element) => {
+      element.scrollTop = element.scrollHeight - element.clientHeight - 10;
+      await new Promise(requestAnimationFrame);
+      await new Promise(requestAnimationFrame);
+    });
+    await jump.waitFor();
+    await page.waitForFunction(() => {
+      const row = [...document.querySelectorAll<HTMLElement>('[data-part="timeline"] [data-id]')].at(-1);
+      if (!row) return false;
+      const next = `${row.dataset.id}:${row.getBoundingClientRect().top}`;
+      const state = window as typeof window & { __jumpStableRow?: { value: string; frames: number } };
+      state.__jumpStableRow = state.__jumpStableRow?.value === next ? { value: next, frames: state.__jumpStableRow.frames + 1 } : { value: next, frames: 1 };
+      return state.__jumpStableRow.frames >= 3;
+    }, { polling: "raf" });
+    const stableRow = await page.locator('[data-part="timeline"] [data-id]').last().evaluate((element) => {
+      const scroll = document.querySelector<HTMLElement>(".scroll")!;
+      return { id: element.getAttribute("data-id"), top: element.getBoundingClientRect().top, distance: scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop };
+    });
     await jump.click();
     await page.waitForFunction(() => {
       const element = document.querySelector<HTMLElement>(".scroll");
       return element && element.scrollHeight - element.clientHeight - element.scrollTop < 2;
     });
-    const rowAfterDisappearance = await page.locator(`[data-part="timeline"] [data-id="${rowBefore.id}"]`).evaluate((element) => element.getBoundingClientRect().top).catch(() => null);
-    if (rowBeforeDisappearance !== null && rowAfterDisappearance !== null && Math.abs(rowBeforeDisappearance - rowAfterDisappearance) > 0.5) throw new Error(`${width}: hiding the control shifted row ${rowBefore.id} (${rowBeforeDisappearance} to ${rowAfterDisappearance})`);
+    const rowAfterDisappearance = await page.locator(`[data-part="timeline"] [data-id="${stableRow.id}"]`).evaluate((element) => element.getBoundingClientRect().top);
+    const shift = stableRow.top - rowAfterDisappearance;
+    if (Math.abs(shift - stableRow.distance) > 0.5) throw new Error(`${width}: hiding the control shifted row ${stableRow.id} by ${shift} px while scrolling ${stableRow.distance} px to the bottom`);
     await scroll.evaluate((element) => { element.scrollTop = 0; });
     await composer.locator("textarea").fill(`follow accepted steer at ${width}`);
     await composer.locator('[data-part="composer-submit"]').click();
