@@ -118,7 +118,8 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .scroll:focus-visible { outline: none; }
 .scroll > [data-part="timeline"] { max-width: var(--measure); margin: 0 auto; padding-top: 28px; }
 /* The shipped control has no hit area of its own. */
-.scroll [data-part="jump-to-latest"] { display: flex; align-items: center; min-height: var(--control); padding: 0 14px; border: 0; }
+.jump-lane { flex: none; display: flex; justify-content: flex-end; height: var(--control); padding-inline: max(var(--gutter), calc((100% - var(--measure)) / 2)); }
+.jump-lane [data-part="jump-to-latest"] { display: flex; align-items: center; min-height: var(--control); padding: 0 14px; border: 0; }
 
 /* A steer that a stop dropped: the row stays, struck through, with a danger rail and a note that says why. */
 .scroll [data-kind="user"]:has(+ .undelivered:not([data-empty])) { border-left-color: var(--fulcrum-danger); color: var(--fulcrum-muted); text-decoration: line-through; text-decoration-color: var(--fulcrum-danger); }
