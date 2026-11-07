@@ -16,6 +16,9 @@ export function catalogModels(value: unknown): string[] {
   return (value as ModelCatalog).models!.flatMap((item) => typeof item === "string" ? [item] : item?.id ? [item.id] : []);
 }
 
-export function settingsRequest(current: SessionSettings, patch: Partial<SessionSettings>) {
-  return { model: patch.model ?? current.model ?? "", approval_mode: patch.approval_mode ?? current.approval_mode ?? "ask" };
+/** zeta's model → provider map from `model_catalog`, so a new run can name both. */
+export function catalogProviders(value: unknown): Record<string, string> {
+  const providers = value && typeof value === "object" ? (value as { providers?: unknown }).providers : undefined;
+  if (!providers || typeof providers !== "object") return {};
+  return Object.fromEntries(Object.entries(providers).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
 }

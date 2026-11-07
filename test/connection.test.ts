@@ -3,7 +3,7 @@ import { ZetaError, type ZetaClient, type ZetaDiscovery } from "@fulcrum/zeta";
 import { backoff, createConnection, initialConnection, reduceConnection, serveCommand, type ConnectionState } from "../src/connection";
 
 const ORIGIN = "http://localhost:5180";
-const found: ZetaDiscovery = { url: "ws://127.0.0.1:8765/", controller_token: "secret", observer_token: "secret", origins: [ORIGIN] };
+const found: ZetaDiscovery = { url: "ws://127.0.0.1:8765/", controller_token: "controller-secret", observer_token: "observer-secret", origins: [ORIGIN] };
 
 test("backoff doubles from 0.5 s and stops at 10 s", () => {
   expect([1, 2, 3, 4, 5, 6, 9].map(backoff)).toEqual([500, 1000, 2000, 4000, 8000, 10_000, 10_000]);
@@ -18,7 +18,12 @@ test("a failure only ends an attempt in flight and counts up", () => {
   expect(state).toEqual({ phase: "busy", attempt: 2, retryAt: 2000, lost: false });
 });
 
-test("a drop after a connection is marked lost until it reconnects, and a mismatch is final", () => {
+test("a hello timeout stays visible during the next attempt", () => {
+  const timedOut = reduceConnection(initialConnection, { type: "unresponsive", now: 1_000 });
+  expect(reduceConnection(timedOut, { type: "attempt" })).toEqual({ phase: "connecting", attempt: 1, lost: false, lastFailure: "unresponsive" });
+});
+
+test("a drop stays marked lost, and a protocol mismatch retries after an update", () => {
   let state = reduceConnection(initialConnection, { type: "connected" });
   state = reduceConnection(state, { type: "closed", now: 100 });
   expect(state).toEqual({ phase: "dropped", attempt: 1, retryAt: 600, lost: true });
@@ -26,8 +31,9 @@ test("a drop after a connection is marked lost until it reconnects, and a mismat
   expect(state).toMatchObject({ phase: "not_running", attempt: 2, lost: true });
   state = reduceConnection(reduceConnection(state, { type: "attempt" }), { type: "connected" });
   expect(state).toEqual({ phase: "connected" });
-  const final = reduceConnection(initialConnection, { type: "incompatible" });
-  expect(reduceConnection(final, { type: "attempt" })).toBe(final);
+  const mismatch = reduceConnection(initialConnection, { type: "incompatible", now: 1_000 });
+  expect(mismatch).toEqual({ phase: "incompatible", attempt: 1, retryAt: 1_500, lost: false });
+  expect(reduceConnection(mismatch, { type: "attempt" })).toEqual({ phase: "connecting", attempt: 1, lost: false });
 });
 
 type Fake = ZetaClient & { drop(): void; closed: boolean };
@@ -82,7 +88,7 @@ test("an origin missing from the allowlist is named before any socket opens", as
   expect(opened).toBe(false);
 });
 
-test("refused upgrade is auth_failed, busy is busy, version mismatch stops retrying", async () => {
+test("refused upgrade is auth_failed, busy is busy, version mismatch waits before retrying", async () => {
   const refused = harness([async () => found], [() => Promise.reject(new ZetaError("connect_failed"))]);
   await refused.settle();
   expect(refused.connection.state).toMatchObject({ phase: "auth_failed", reason: "rejected" });
@@ -92,7 +98,7 @@ test("refused upgrade is auth_failed, busy is busy, version mismatch stops retry
   const old = harness([async () => found], [() => Promise.reject(new ZetaError("version_mismatch"))]);
   await old.settle();
   expect(old.connection.state.phase).toBe("incompatible");
-  expect(old.timers).toHaveLength(0);
+  expect(old.timers).toHaveLength(1);
 });
 
 test("a drop reconnects with a new client, and retryNow skips the wait", async () => {
@@ -111,6 +117,20 @@ test("a drop reconnects with a new client, and retryNow skips the wait", async (
   expect(connection.client).toBe(second);
   first.drop(); // a late close from the old socket must not tear down the new one
   expect(connection.state.phase).toBe("connected");
+});
+
+test("hello timeout closes its open socket before retrying", async () => {
+  let closed = false;
+  const connection = createConnection({
+    origin: ORIGIN,
+    discover: async () => found,
+    connect: (_discovery, opened) => { opened?.(() => { closed = true; }); return new Promise(() => {}); },
+    helloTimeoutMs: 1,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  expect(closed).toBe(true);
+  expect(connection.state.phase).toBe("unresponsive");
+  connection.stop();
 });
 
 test("stop closes the client and ignores attempts still in flight", async () => {

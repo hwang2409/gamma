@@ -115,21 +115,42 @@ const liveTurn = (send: (event: Json) => void, ask: () => Promise<"approve" | "d
  * The composer's methods (send, steer, delivery_status, abort) with zeta's delivery_id rules. A send starts a
  * text-only reply that streams for about 2.5 s, long enough to steer and to stop. As in zeta, an accepted message is
  * echoed as `user_message` before the reply, and a steer is persisted only once a turn takes it.
+ * Zeta 5feea2fc parity: `test_duplicate_steer_is_queued_once_and_status_becomes_delivered`,
+ * `test_session_abort_marks_accepted_steering_dropped`, `test_disconnect_marks_accepted_steering_dropped`, and
+ * `test_tool_less_turn_end_marks_late_steering_dropped` in tests/test_server_delivery.py.
  */
 export function composerMethods(wait: (ms: number) => Promise<void>, running: { get(): boolean; set(value: boolean): void }) {
   const sent: Json[] = [];
   const deliveries = new Map<string, Json>();
   const statuses = new Map<string, "queued" | "delivered" | "dropped">();
   let aborts = 0;
-  let chat: { session: string; steers: string[]; aborted: boolean } | null = null;
+  let echo = true;
+  const withheldEchoes: Array<() => void> = [];
+  const withheldHistory: Array<() => void> = [];
+  let chat: { session: string; sendDelivery: string | null; steers: string[]; aborted: boolean } | null = null;
+  const externalSteers: Array<{ id: string; session: string }> = [];
   type Send = (event: Json) => void;
-  const chatTurn = async (session: string, send: Send) => {
-    const turn = { session, steers: [] as string[], aborted: false }; // steers holds delivery ids
+  const chatTurn = async (session: string, send: Send, prompt: string, sendDelivery: string | null) => {
+    const turn = { session, sendDelivery, steers: [] as string[], aborted: false }; // steers holds delivery ids
     chat = turn;
     running.set(true);
     const e = (event: string, body: Json = {}) => { if (!turn.aborted) send({ event, session_id: session, ...body }); };
     e("agent_start");
     e("turn_start", { data: { turn: sent.length } });
+    const finish = () => { if (turn.sendDelivery) statuses.set(turn.sendDelivery, "delivered"); e("turn_end", { data: { turn: sent.length } }); chat = null; running.set(false); e("agent_end"); };
+    // Prompts that steer the scripted turn, for the status line: a provider failure, and a slow tool call.
+    if (prompt.includes("fail this turn")) {
+      await wait(200);
+      e("error", { error: { code: "provider_error", message: "the provider is overloaded (529)" } });
+      return finish();
+    }
+    if (prompt.includes("use a tool")) {
+      const call = { id: `chat-tool-${sent.length}`, name: "bash", arguments: { command: "sleep 2" } };
+      e("tool_start", { tool_call: call, data: {} });
+      await wait(2000);
+      if (turn.aborted) return;
+      e("tool_end", { tool_call: call, tool_result: result(call.id, "", { structured_content: { exit_code: 0, stdout: "", stderr: "" } }), data: {} });
+    }
     let reply = "";
     for (const word of "Reading the files you named, then running the focused tests before the full suite. ".repeat(3).match(/\S+\s*/g)!) {
       await wait(Number(process.env.FAKE_ZETA_WORD_MS ?? 60));
@@ -139,14 +160,19 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
     }
     e("assistant_message", { message: { role: "assistant", content: [text(reply)] } });
     histories[session] = [...(histories[session] ?? []), { id: `reply-${sent.length}`, role: "assistant", content: [text(reply)], tool_result: null }];
-    // As in zeta: a turn with no tool call reaches no provider boundary, so steering still queued at its end is dropped.
-    for (const id of turn.steers) statuses.set(id, "dropped");
+    // serve-protocol.md:469-475: terminal steer outcomes are durable session_history rows.
+    for (const id of turn.steers) {
+      statuses.set(id, "dropped");
+      histories[session]!.push({ id: `delivery-${id}`, role: "system", event: "delivery_status", delivery_id: id, method: "steer", status: "dropped", content: [text("steer dropped: abort")], reason: "abort" });
+    }
     e("turn_end", { data: { turn: sent.length } });
     chat = null;
     running.set(false);
     e("agent_end");
   };
-  const deliver = (method: "send" | "steer", params: Json, active: string | null, send: Send): Json => {
+  const deliver = (requested: "send" | "steer" | "send_images", params: Json, active: string | null, send: Send): Json => {
+    const method = requested === "steer" ? "steer" : "send";
+    const images = requested === "send_images" ? (params.images as Json[]) : [];
     const delivery = typeof params.delivery_id === "string" ? params.delivery_id : null;
     const seen = delivery ? deliveries.get(delivery) : undefined;
     if (seen) return { result: statuses.get(delivery!) === "dropped" ? { accepted: false, duplicate: true, status: "dropped" } : { ...seen, duplicate: true } };
@@ -155,19 +181,28 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
     if (method === "steer" && !running.get()) return { error: { code: -32005, message: "no turn is running for steering" } };
     const value = String(params.text ?? "");
     sent.push({ method, text: value, delivery_id: delivery });
-    send({ event: "user_message", session_id: active, text: value, mode: method, attachments: [], ...(delivery ? { delivery_id: delivery } : {}) });
+    const userMessage = { event: "user_message", session_id: active, text: value, mode: method, attachments: images.map((image) => ({ name: image.name, mime_type: image.mime_type, size: Math.floor(String(image.data).length * 3 / 4) })), ...(delivery ? { delivery_id: delivery } : {}) };
+    const emitEcho = () => send(userMessage);
     const accepted = method === "send" ? { accepted: true, session_id: active } : { accepted: true };
-    if (delivery) { deliveries.set(delivery, accepted); statuses.set(delivery, method === "steer" ? "queued" : "delivered"); }
-    if (method === "steer") { if (delivery) chat?.steers.push(delivery); return { result: accepted }; }
-    histories[active] = [...(histories[active] ?? []), { id: `sent-${sent.length}`, role: "user", content: [text(value)], ...(delivery ? { delivery_id: delivery } : {}), tool_result: null }];
+    if (delivery) { deliveries.set(delivery, accepted); statuses.set(delivery, "queued"); }
+    const persistHistory = () => { if (delivery && method === "send") statuses.set(delivery, "delivered"); histories[active] = [...(histories[active] ?? []), { id: `sent-${sent.length}`, role: "user", content: [text(value)], ...(delivery ? { delivery_id: delivery } : {}), tool_result: null }]; };
+    if (echo) { persistHistory(); emitEcho(); } else { withheldHistory.push(persistHistory); withheldEchoes.push(emitEcho); }
+    if (method === "steer") {
+      if (delivery) chat ? chat.steers.push(delivery) : externalSteers.push({ id: delivery, session: active });
+      return { result: accepted };
+    }
     // After the reply, as zeta starts the turn once the send is persisted.
-    queueMicrotask(() => void chatTurn(active, send));
+    queueMicrotask(() => void chatTurn(active, send, value, delivery));
     return { result: accepted };
   };
   const abort = (send: Send): Json => {
     if (!chat) return { result: { aborted: false } };
     const turn = chat;
-    for (const id of turn.steers) statuses.set(id, "dropped");
+    if (turn.sendDelivery) statuses.set(turn.sendDelivery, "delivered");
+    for (const id of turn.steers) {
+      statuses.set(id, "dropped");
+      histories[turn.session]!.push({ id: `delivery-${id}`, role: "system", event: "delivery_status", delivery_id: id, method: "steer", status: "dropped", content: [text("steer dropped: abort")], reason: "abort" });
+    }
     chat = null;
     running.set(false);
     turn.aborted = true;
@@ -180,11 +215,32 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
     /** Every accepted send and steer, in order. */
     sent,
     clearSent() { sent.splice(0); },
+    setEcho(value: boolean) { echo = value; },
+    persistWithheldHistory() { withheldHistory.splice(0).forEach((persist) => persist()); },
+    flushEchoes() { this.persistWithheldHistory(); withheldEchoes.splice(0).forEach((send) => send()); },
     get history() { return histories[ACTIVE] ?? []; },
     get aborts() { return aborts; },
+    finishExternalTurn(session: string) {
+      for (const steer of externalSteers.splice(0).filter((steer) => steer.session === session)) {
+        statuses.set(steer.id, "dropped");
+        histories[session]!.push({ id: `delivery-${steer.id}`, role: "system", event: "delivery_status", delivery_id: steer.id, method: "steer", status: "dropped", content: [text("steer dropped: turn_end")], reason: "turn_end" });
+      }
+    },
+    disconnect() {
+      for (const steer of externalSteers.splice(0)) {
+        statuses.set(steer.id, "dropped");
+        histories[steer.session]!.push({ id: `delivery-${steer.id}`, role: "system", event: "delivery_status", delivery_id: steer.id, method: "steer", status: "dropped", content: [text("steer dropped: disconnect")], reason: "disconnect" });
+      }
+      if (!chat) return;
+      for (const id of chat.steers) {
+        statuses.set(id, "dropped");
+        histories[chat.session]!.push({ id: `delivery-${id}`, role: "system", event: "delivery_status", delivery_id: id, method: "steer", status: "dropped", content: [text("steer dropped: abort")], reason: "abort" });
+      }
+      chat.aborted = true; chat = null; running.set(false);
+    },
     /** The reply body for a composer method, or undefined for any other method. */
     handle(method: string, params: Json, active: string | null, send: Send): Json | undefined {
-      if (method === "send" || method === "steer") return deliver(method, params, active, send);
+      if (method === "send" || method === "steer" || method === "send_images") return deliver(method, params, active, send);
       if (method === "abort") return abort(send);
       if (method !== "delivery_status") return undefined;
       const status = statuses.get(String(params.delivery_id));
@@ -193,7 +249,7 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
   };
 }
 
-export async function startFakeZeta({ origins, port = 0, live = true, historyMode = process.env.FAKE_ZETA_HISTORY_MODE === "old" ? "old" : "new", approvalHistoryMode = (process.env.FAKE_ZETA_APPROVAL_HISTORY_MODE as ApprovalHistoryMode | undefined) ?? "not-advertised-with-rows", approvalReconnect = true, approvalReconnectGraceMs = 90_000, serialDelays }: { origins: string[]; port?: number; live?: boolean; historyMode?: HistoryMode; approvalHistoryMode?: ApprovalHistoryMode; approvalReconnect?: boolean; approvalReconnectGraceMs?: number; serialDelays?: Readonly<Record<string, number | readonly number[]>> }) {
+export async function startFakeZeta({ origins, port = 0, live = true, historyMode = process.env.FAKE_ZETA_HISTORY_MODE === "old" ? "old" : "new", approvalHistoryMode = (process.env.FAKE_ZETA_APPROVAL_HISTORY_MODE as ApprovalHistoryMode | undefined) ?? "not-advertised-with-rows", approvalReconnect = true, approvalReconnectGraceMs = 90_000, newSessionSettings = true, helloDelay = 60_000, serialDelays }: { origins: string[]; port?: number; live?: boolean; historyMode?: HistoryMode; approvalHistoryMode?: ApprovalHistoryMode; approvalReconnect?: boolean; approvalReconnectGraceMs?: number; newSessionSettings?: boolean; helloDelay?: number; serialDelays?: Readonly<Record<string, number | readonly number[]>> }) {
   const home = await mkdtemp(join(tmpdir(), "fulcrum-web-zeta-"));
   await mkdir(join(home, "run"), { recursive: true });
   const discovery = join(home, "run", "serve.ws.json");
@@ -221,10 +277,16 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   let delayedOpen = false;
   let catalogBusy = false;
   let settingsEnabled = true;
-  let settings = { model: "claude-opus-4-6", approval_mode: "ask" as "ask" | "allow" | "deny" };
+  let advertiseNewSessionSettings = newSessionSettings;
+  type Settings = { model: string; approval_mode: "ask" | "allow" | "deny" };
+  const defaultSettings = { model: "gpt-5.1-codex", approval_mode: "ask" as const };
+  const settingsBySession = new Map(sessions.map((session) => [String(session.session_id), { model: String(session.model), approval_mode: session.approval_mode as Settings["approval_mode"] }]));
+  const activeSettings = () => settingsBySession.get(active ?? "") ?? defaultSettings;
+  const failures = new Map<string, string[]>();
+  const transientBusy = new Map<string, number>();
   const imageSends: Json[] = [];
   const decisions: Json[] = [];
-  const requests: Array<{ method: string; received: number; started: number; replied?: number }> = [];
+  const requests: Array<{ method: string; params: Json; running: boolean; received: number; started: number; replied?: number }> = [];
   type SocketData = { role: "controller" | "observer" };
   const sockets = new Set<ServerWebSocket<SocketData>>();
   let controller: ServerWebSocket<SocketData> | null = null;
@@ -245,7 +307,10 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   const composer = composerMethods(wait, { get: () => running, set: (value) => { running = value; } });
   let serialTail = Promise.resolve<unknown>(undefined);
   const delayCalls = new Map<string, number>();
+  const nextDelays = new Map<string, number[]>();
   const requestDelay = (method: string) => {
+    const queued = nextDelays.get(method)?.shift();
+    if (queued !== undefined) return queued;
     const configured = serialDelays?.[method] ?? 0;
     if (typeof configured === "number") return configured;
     const call = delayCalls.get(method) ?? 0;
@@ -261,6 +326,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   const releaseController = (socket: ServerWebSocket<SocketData>) => {
     if (controller !== socket) return;
     controller = null;
+    composer.disconnect();
     if (!decide || approvalAborted) return;
     if (approvalReconnect && reconnectControllers.has(socket as object)) {
       if (approvalExpiry) clearTimeout(approvalExpiry);
@@ -298,7 +364,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         const request = JSON.parse(String(raw)) as { id: number; method: string; params?: Json };
         return schedule(async () => {
         const { id, method, params = {} } = request;
-        const timing: { method: string; received: number; started: number; replied?: number } = { method, received, started: performance.now() };
+        const timing: { method: string; params: Json; running: boolean; received: number; started: number; replied?: number } = { method, params, running, received, started: performance.now() };
         requests.push(timing);
         await wait(requestDelay(method));
         const reply = (body: Json) => {
@@ -310,13 +376,13 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           if (params.role !== socket.data.role) { reply({ error: { code: -32602, message: `credential permits ${socket.data.role} role only` } }); socket.close(); return; }
           if (mode === "busy" || (socket.data.role === "controller" && controller !== null)) { socket.send(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "server busy" } })); socket.close(); return; }
           if (mode === "incompatible") { reply({ error: { code: -32002, message: "version mismatch", data: { requested: "1.2", supported: ["1.0"] } } }); socket.close(); return; }
-          if (mode === "slow") await wait(60_000);
+          if (mode === "slow") await wait(helloDelay);
           if (!sockets.has(socket)) return;
           if (socket.data.role === "controller") controller = socket;
-          const features = (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (settingsEnabled && ["model_catalog", "session_settings", "set_settings", "send_images"].includes(name)) || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect)) ?? [];
+          const features = (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings)) ?? [];
           const reconnect = features.includes("approval_reconnect");
           if (reconnect) reconnectControllers.add(socket as object);
-          reply({ result: { protocol_version: "1.2", server: "fake-zeta", capabilities: { features } } });
+          reply({ result: { protocol_version: "1.2", server: "fake-zeta", capabilities: { features, requests: settingsEnabled ? ["model_catalog", "session_settings", "set_settings", "send_images", ...(advertiseNewSessionSettings ? ["new_session_settings"] : [])] : [] } } });
           if (decide && !approvalAborted) {
             if (!reconnect) expireApproval();
             else {
@@ -328,11 +394,20 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           return;
         }
         if (method === "new_session") {
-          // zeta's reply (server.py `new_session`): the full metadata of the new session, which becomes the server's own.
+          // Zeta 5feea2fc src/zeta/server/server.py:561-593 creates and activates this metadata;
+          // src/zeta/server/control.py:160-180 makes a reserved or running turn return -32004 first.
+          const busy = transientBusy.get(method) ?? 0;
+          if (busy > 0) { transientBusy.set(method, busy - 1); return reply({ error: { code: -32004, message: "a turn is already running" } }); }
           if (running || rejectCreate) return reply({ error: { code: -32004, message: "a turn is already running" } });
-          const created = meta(`s-new-${sessions.length}`, 0, { created_at: at(0), cwd: "/Users/dev/me/fun/fulcrum", retained_tail: 8, compaction_budget: 262144, override_audit: [], context_files: [], skill_catalog: [], agent_catalog: [], plan_mode: false, project_id: null, tool_allow: null, tool_deny: [] });
+          const validModels = ["claude-sonnet-5", "claude-opus-4-6", "gpt-5.1-codex"];
+          // real zeta requires a concrete model whenever new_session_settings carries approval_mode
+          if (typeof params.approval_mode !== "undefined" && typeof params.model !== "string") return reply({ error: { code: -32602, message: "model is required with approval_mode" } });
+          if (typeof params.model !== "undefined" && (!validModels.includes(String(params.model)) || (typeof params.approval_mode !== "undefined" && !["ask", "allow", "deny"].includes(String(params.approval_mode))))) return reply({ error: { code: -32602, message: "invalid model or approval_mode" } });
+          const createdSettings: Settings = { model: typeof params.model === "string" ? params.model : defaultSettings.model, approval_mode: typeof params.approval_mode === "string" ? params.approval_mode as Settings["approval_mode"] : defaultSettings.approval_mode };
+          const created = meta(`s-new-${sessions.length}`, 0, { created_at: at(0), model: createdSettings.model, approval_mode: createdSettings.approval_mode, cwd: "/Users/dev/me/fun/fulcrum", retained_tail: 8, compaction_budget: 262144, override_audit: [], context_files: [], skill_catalog: [], agent_catalog: [], plan_mode: false, project_id: null, tool_allow: null, tool_deny: [] });
           sessions.unshift(created);
           histories[created.session_id] = [];
+          settingsBySession.set(String(created.session_id), createdSettings);
           active = created.session_id;
           return reply({ result: { session: created } });
         }
@@ -351,7 +426,11 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           return reply({ result: { session: active ? sessions.find((session) => session.session_id === active) ?? null : null, state: running ? (decide ? "tool" : "running") : "idle", explicit_finish: false, pending_approvals: pending, usage: {}, compaction_markers: 0 } });
         }
         if (method === "resume") {
+          // Zeta 5feea2fc src/zeta/server/server.py:601-626 and src/zeta/server/control.py:160-180 keep the
+          // current session while busy and return -32004 before a session swap.
           if (mode === "broken-session") return reply({ error: { code: -32602, message: "session log is invalid at line 12" } });
+          const busy = transientBusy.get(method) ?? 0;
+          if (busy > 0) { transientBusy.set(method, busy - 1); return reply({ error: { code: -32004, message: "a turn is already running" } }); }
           if (running && params.session_id !== active) return reply({ error: { code: -32004, message: "a turn is already running" } });
           active = String(params.session_id);
           delayedOpen = false;
@@ -367,7 +446,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           const offset = Number(params.offset ?? 0);
           const pageSize = active === LARGE ? 128 : 8;
           reply({ result: { messages: rows.slice(offset, offset + pageSize), next_offset: offset + pageSize < rows.length ? offset + pageSize : null } });
-          // The run starts once, after the first open of the active session finishes its history.
+          // Zeta 5feea2fc tests/test_server.py::test_approval_and_steer_continue_the_same_turn and
+          // ::test_resumed_approval_finishes_idle_after_terminal_event define this approval-turn lifecycle.
           if (liveEnabled && active === ACTIVE && offset + pageSize >= rows.length && !turnStarted) {
             turnStarted = true;
             running = true;
@@ -375,19 +455,31 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
               approvalAborted = false;
               decide = (decision) => { decide = null; resolve(decision); };
             });
-            setTimeout(() => void liveTurn(send, ask, wait, () => { running = false; }, currentHistoryMode)(), 300);
+            setTimeout(() => void liveTurn(send, ask, wait, () => { composer.finishExternalTurn(ACTIVE); running = false; }, currentHistoryMode)(), 300);
           }
           return;
         }
-        if (method === "model_catalog") return reply({ result: { models: ["claude-opus-4-6", "gpt-5.1-codex"] } });
-        if (method === "session_settings") return reply({ result: settings });
+        // As in zeta (server/ergonomics.py `active`): these name the active session or fail.
+        if (["model_catalog", "session_settings", "set_settings", "send_images"].includes(method)) {
+          // zeta lists these under hello's `requests`; an older zeta does not know them.
+          if (!settingsEnabled) return reply({ error: { code: -32601, message: "method not found" } });
+          if (method !== "model_catalog" && (typeof params.session_id !== "string" || !params.session_id)) return reply({ error: { code: -32602, message: "session_id must be a nonempty string" } });
+          if (method !== "model_catalog" && params.session_id !== active) return reply({ error: { code: -32003, message: "session is not active" } });
+        }
+        if (method === "model_catalog") return reply({ result: { models: ["claude-sonnet-5", "claude-opus-4-6", "gpt-5.1-codex"], providers: { "claude-sonnet-5": "claude", "claude-opus-4-6": "claude", "gpt-5.1-codex": "codex" } } });
+        const failure = failures.get(method)?.shift();
+        if (failure) return reply({ error: { code: -32000, message: failure } });
+        if (method === "session_settings") return reply({ result: activeSettings() });
         if (method === "set_settings") {
-          settings = { model: String(params.model), approval_mode: params.approval_mode as "ask" | "allow" | "deny" };
+          if (running) return reply({ error: { code: -32004, message: "a turn is already running" } });
+          const settings: Settings = { model: String(params.model), approval_mode: params.approval_mode as Settings["approval_mode"] };
+          settingsBySession.set(String(active), settings);
           return reply({ result: settings });
         }
         if (method === "send_images") {
           imageSends.push(params);
-          return reply({ result: { accepted: true, delivery_id: crypto.randomUUID() } });
+          const handled = composer.handle("send_images", params, active, send);
+          return reply(handled!);
         }
         if (method === "approve" || method === "deny") {
           decisions.push({ method, ...params });
@@ -413,13 +505,20 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     decisions,
     requests,
     imageSends,
-    get settings() { return settings; },
+    get settings() { return activeSettings(); },
+    settingsFor(sessionId: string) { return settingsBySession.get(sessionId); },
+    setSettings(sessionId: string, settings: Settings) { settingsBySession.set(sessionId, settings); },
+    failNext(method: string, message: string) { failures.set(method, [...(failures.get(method) ?? []), message]); },
+    busyNext(method: "resume" | "new_session", count = 1) { transientBusy.set(method, count); },
+    get running() { return running; },
     /** Every accepted send and steer, in order. */
     sent: composer.sent,
     clearSent() { composer.clearSent(); },
+    setEcho(value: boolean) { composer.setEcho(value); },
+    flushEchoes() { composer.flushEchoes(); },
     get aborts() { return composer.aborts; },
     /** Closes every socket, like a network blip; the server keeps running. */
-    drop() { for (const socket of sockets) socket.close(1012, "restart"); },
+    drop() { composer.persistWithheldHistory(); for (const socket of sockets) socket.close(1012, "restart"); },
     /** Removes the discovery file and refuses upgrades, like a stopped server. */
     async stop() {
       allowed = [];
@@ -441,12 +540,16 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     async wrongToken() { await write({ port: server.port, controller_token: "stale-token", observer_token: observerToken, pid: process.pid, origins: allowed }); },
     setMode(next: Mode) { mode = next; },
     setSettingsEnabled(value: boolean) { settingsEnabled = value; },
+    setNewSessionSettings(value: boolean) { advertiseNewSessionSettings = value; },
     setOpenDelay(ms: number) { openDelay = ms; },
+    delayNext(method: string, ms: number) { nextDelays.set(method, [...(nextDelays.get(method) ?? []), ms]); },
     /** `true`: new_session fails the way real zeta does while a turn runs (`require_idle`). */
     setRejectCreate(next: boolean) { rejectCreate = next; },
+    activeId() { return active; },
     setHistoryMode(next: HistoryMode) { currentHistoryMode = next; },
     setLive(next: boolean) {
       if (next && !liveEnabled) {
+        active = ACTIVE;
         turnStarted = false;
         histories[ACTIVE] = histories[ACTIVE]!.filter((row) => row.event !== "approval_request" && row.event !== "approval_end");
       }
@@ -461,6 +564,6 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
 if (import.meta.main) {
   const origin = process.env.WEB_ORIGIN ?? "http://localhost:5180";
   const fake = await startFakeZeta({ origins: [origin, origin.replace("localhost", "127.0.0.1")], port: Number(process.env.FAKE_ZETA_PORT ?? 0) });
-  console.log(`fake zeta serve on 127.0.0.1:${fake.port} for ${origin}\nstart the app with:\n  ZETA_HOME=${fake.home} bun run --cwd apps/web dev\nctrl-c stops it and deletes ${fake.home}`);
+  console.log(`fake zeta serve on 127.0.0.1:${fake.port} for ${origin}\nstart the app with:\n  ZETA_HOME=${fake.home} bun run dev\nctrl-c stops it and deletes ${fake.home}`);
   process.once("SIGINT", () => void fake.close().then(() => process.exit(0)));
 }

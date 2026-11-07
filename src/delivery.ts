@@ -1,5 +1,6 @@
 import type { RunEvent } from "@fulcrum/core";
 import type { ZetaClient } from "@fulcrum/zeta";
+import { catalogModels, catalogProviders, settingModel } from "./settings";
 
 /** Zeta errors that mean the turn changed state between the click and the server: -32004 running, -32005 not running. */
 const TURN_RUNNING = -32004;
@@ -17,26 +18,9 @@ type Method = "send" | "steer";
 const raced = (method: Method, error: unknown) => code(error) === (method === "steer" ? NO_TURN : TURN_RUNNING);
 const refusal = (result: Accepted) => new Error(result.status === "dropped" ? "the server dropped this message before the turn took it; send it again" : "the server did not accept this message");
 
-/**
- * Sends the composer's draft to zeta: `send` starts a turn, `steer` adds to the running one. With the negotiated
- * `delivery_id` feature every attempt carries an id, and a retry of the same text reuses it, so a retry after a timeout
- * or a dropped socket can never deliver the message twice (docs/serve-protocol.md, "client delivery IDs"). The id is
- * dropped once the server has accepted or definitely dropped the message, so the next message gets a fresh one. When
- * the turn starts or ends between the click and the server, the other method runs once with the same id.
- *
- * Zeta delivers a steer at the next provider boundary of the running turn. A turn that ends first (a final answer with
- * no tool call) drops it, and the protocol leaves the resend to the client. `turnEnded` does that, as the zeta TUI does:
- * each dropped steer goes out again as a new message, in order, with a new delivery id. After a stop the user meant to
- * drop them, so they stay dropped, and `turnEnded` names them so the view can show they never reached the agent.
- *
- * Each message keeps one `intent` across every attempt, and the client stamps it on zeta's `user_message` echo, so the
- * steer's row becomes the resent message's row: the user sees one row per message they wrote.
- */
+/** Performs one idempotent zeta delivery attempt and publishes its accepted user row. Durable retry and stop policy lives in RunRecord.deliveries. */
+
 export function createDelivery(newId: () => string = () => `web-${crypto.randomUUID()}`, reconcile?: (event: RunEvent) => void) {
-  let unsettled: Message | null = null;
-  let steers: Message[] = [];
-  // The user's stop of the running turn: resolves to whether it ended the turn (it failed, or found no turn: false).
-  let stopping: Promise<boolean> | null = null;
   const request = async (client: ZetaClient, method: Method, { text, id, intent }: Message) => {
     try {
       return (await client.request(method, { text, ...(id ? { delivery_id: id } : {}) }, { timeoutMs: 15_000, intent })) as Accepted;
@@ -47,7 +31,7 @@ export function createDelivery(newId: () => string = () => `web-${crypto.randomU
       throw error;
     }
   };
-  /** Delivers one attempt; a steer that zeta queued is remembered, since the turn may still drop it. */
+  /** Delivers one attempt and handles a turn-state race by trying the other method once. */
   const deliver = async (client: ZetaClient, method: Method, message: Message) => {
     let used = method;
     let result: Accepted;
@@ -58,62 +42,148 @@ export function createDelivery(newId: () => string = () => `web-${crypto.randomU
       used = method === "steer" ? "send" : "steer";
       result = await request(client, used, message);
     }
-    if (used === "steer" && message.id && result.accepted !== false) steers.push(message);
     return { result, used };
   };
   const reconcileAccepted = (message: Message, used: Method, result: Accepted) => {
     if (result.accepted === true && message.id && reconcile)
       reconcile({ type: "user_message", text: message.text, mode: used, intent: message.intent, delivery_id: message.id });
   };
-  const fresh = (client: ZetaClient, text: string): Message => {
-    const intent = newId();
-    return { text, intent, id: client.features.includes("delivery_id") ? intent : null };
-  };
-  const dropped = async (client: ZetaClient, id: string) => {
-    const { status, outcome } = (await client.request("delivery_status", { delivery_id: id }, { timeoutMs: 15_000 })) as { status?: string; outcome?: string };
-    return status === "dropped" || (status === "evicted" && outcome === "dropped");
-  };
+  const fresh = (client: ZetaClient, text: string, deliveryId = newId()): Message =>
+    ({ text, intent: deliveryId, id: client.features.includes("delivery_id") ? deliveryId : null });
   return {
-    async submit(client: ZetaClient, text: string, steer: boolean) {
-      const message = unsettled?.text === text ? unsettled : fresh(client, text);
-      unsettled = message;
+    async submit(client: ZetaClient, text: string, steer: boolean, deliveryId = newId()) {
+      const message = fresh(client, text, deliveryId);
       const delivered = await deliver(client, steer ? "steer" : "send", message);
-      unsettled = null;
       if (delivered.result.accepted === false) throw refusal(delivered.result);
       reconcileAccepted(message, delivered.used, delivered.result);
+      return delivered;
     },
-    /** Stops the running turn (zeta's default session-scope abort); `turnEnded` then knows the user ended it. */
-    stop(client: ZetaClient) {
-      const request = stopTurn(client);
-      stopping = request.then((result) => (result as { aborted?: boolean } | null)?.aborted !== false, () => false);
-      return request;
+    async retry(client: ZetaClient, text: string, intent: string, deliveryId = newId()) {
+      const message = { text, intent, id: client.features.includes("delivery_id") ? deliveryId : null };
+      const delivered = await deliver(client, "send", message);
+      if (delivered.result.accepted === false) throw refusal(delivered.result);
+      reconcileAccepted(message, delivered.used, delivered.result);
+      return delivered;
     },
-    /**
-     * Call when the running turn ends. Resends the steers it dropped, unless the user's stop ended it: then they stay
-     * dropped, and their intents are returned so the view can mark those rows as not delivered. A stop that failed or
-     * found no turn is not a stop: the turn ended on its own, so its dropped steers are resent.
-     */
-    async turnEnded(client: ZetaClient) {
-      const ended = steers;
-      steers = [];
-      const stopped = await (stopping ?? false);
-      stopping = null;
-      const undelivered: string[] = [];
-      // A query that fails (a dropped socket) leaves its steer unmarked, the safe side; the others still count.
-      const statuses = await Promise.allSettled(ended.map((message) => dropped(client, message.id!)));
-      for (const [index, message] of ended.entries()) {
-        const status = statuses[index]!;
-        if (status.status === "rejected" || !status.value) continue;
-        if (stopped) { undelivered.push(message.intent); continue; }
-        const retry = { ...message, id: newId() };
-        const delivered = await deliver(client, "send", retry);
-        if (delivered.result.accepted === false) throw refusal(delivered.result);
-        reconcileAccepted(retry, delivered.used, delivered.result);
-      }
-      return undelivered;
-    },
+    stop(client: ZetaClient) { return stopTurn(client); },
   };
 }
+
+type DeliveryStore = {
+  hasMessageDelivery(id: string): boolean;
+  dispatch(event: RunEvent): void;
+  subscribe(listener: () => void): () => void;
+};
+type DeliveryRunStore = import("./run-state").RunStateStore;
+type WorkspaceEffect = import("./run-state").WorkspaceEffect;
+type OperationId = import("./run-state").OperationId;
+type RunId = import("./run-state").RunId;
+type DeliveryRecord = { delivery: ReturnType<typeof createDelivery>; store?: DeliveryStore; unsubscribe?: () => void };
+
+/** The small effect seam: reducer effects enter; owner- and operation-tagged results return through RunStateStore.dispatch. */
+function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: DeliveryRunStore, record: (runId: string) => DeliveryRecord, finish: (operationId: OperationId, error?: unknown) => void, abortSession?: (runId: string) => Promise<unknown>) {
+  const unavailable = () => new Error("not connected to zeta serve");
+  const handleAbort = async (effect: Extract<WorkspaceEffect, { type: "abort" }>) => {
+    const target = client();
+    if (!target) { const error = unavailable(); runs.dispatch({ type: "STOP_FAIL", runId: effect.runId, operationId: effect.operationId }); return finish(effect.operationId, error); }
+    try { await (abortSession ? abortSession(effect.runId) : record(effect.runId).delivery.stop(target)); runs.dispatch({ type: "STOP_OK", runId: effect.runId, operationId: effect.operationId }); finish(effect.operationId); }
+    catch (error) { runs.dispatch({ type: "STOP_FAIL", runId: effect.runId, operationId: effect.operationId }); finish(effect.operationId, error); }
+  };
+  const handleStatus = async (effect: Extract<WorkspaceEffect, { type: "delivery-status" }>) => {
+    const target = client(); if (!target) return;
+    const delivery = runs.get(effect.runId).deliveries.get(effect.intentId);
+    if (!delivery || delivery.operationId !== effect.operationId) return;
+    try {
+      const result = await target.request("delivery_status", { delivery_id: delivery.attemptId }, { timeoutMs: 15_000 }) as { status?: string; outcome?: string };
+      const status = result.status === "evicted" ? result.outcome : result.status;
+      if (status === "delivered" || status === "dropped") runs.dispatch({ type: "DELIVERY_STATUS", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, status });
+    } catch { /* A reconnect or later turn end queries durable truth again. */ }
+  };
+  const handleDelivery = async (effect: Extract<WorkspaceEffect, { type: "deliver" }>) => {
+    const delivery = runs.get(effect.runId).deliveries.get(effect.intentId);
+    if (!delivery || delivery.operationId !== effect.operationId) return;
+    const target = client();
+    if (!target) { const error = unavailable(); if (delivery.state !== "retrying") runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, failed: true }); return finish(effect.operationId, error); }
+    const attemptId = delivery.state === "retrying" ? `web-${crypto.randomUUID()}` : delivery.attemptId;
+    try {
+      if (delivery.state === "retrying") await record(effect.runId).delivery.retry(target, delivery.text, delivery.id, attemptId);
+      else await record(effect.runId).delivery.submit(target, delivery.text, delivery.method === "steer", attemptId);
+      runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId, queued: target.features.includes("delivery_id") });
+      finish(effect.operationId);
+    } catch (error) { if (delivery.state !== "retrying") runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId, failed: true }); finish(effect.operationId, error); }
+  };
+  const settingsFailure = (effect: Extract<WorkspaceEffect, { type: "load-settings" | "set-settings" }>, error: unknown) => {
+    runs.dispatch({ type: "SETTINGS_FAIL", runId: effect.runId, operationId: effect.operationId, error: error instanceof Error ? error.message : "settings unavailable" }); finish(effect.operationId, error);
+  };
+  const handleSettings = async (effect: Extract<WorkspaceEffect, { type: "load-settings" | "set-settings" }>) => {
+    const target = client(); if (!target) return settingsFailure(effect, unavailable());
+    try {
+      if (effect.type === "set-settings") {
+        const current = effect.settings.model ? {} : settingModel(await target.request("session_settings", { session_id: effect.runId }, { timeoutMs: 15_000 }));
+        await target.request("set_settings", { session_id: effect.runId, ...effect.settings, ...(current.model ? { model: current.model } : {}) }, { timeoutMs: 15_000 });
+      }
+      const value = settingModel(await target.request("session_settings", { session_id: effect.runId }, { timeoutMs: 15_000 }));
+      runs.dispatch({ type: "SETTINGS_OK", runId: effect.runId, operationId: effect.operationId, ...(value.model ? { model: value.model } : {}), ...(value.approval_mode === "ask" || value.approval_mode === "allow" ? { approval_mode: value.approval_mode } : {}) }); finish(effect.operationId);
+    } catch (error) { settingsFailure(effect, error); }
+  };
+  const handleCatalog = async (effect: Extract<WorkspaceEffect, { type: "load-catalog" }>) => {
+    const target = client(); if (!target) { const error = unavailable(); runs.dispatch({ type: "CATALOG_FAIL", operationId: effect.operationId, error: error.message }); return finish(effect.operationId, error); }
+    try {
+      const raw = await target.request("model_catalog", effect.runId ? { session_id: effect.runId } : {}, { timeoutMs: 15_000 });
+      const catalog = { models: catalogModels(raw), providers: catalogProviders(raw) };
+      localStorage.setItem("gamma-catalog", JSON.stringify(raw)); runs.dispatch({ type: "CATALOG_OK", operationId: effect.operationId, catalog }); finish(effect.operationId);
+    } catch (error) { const message = error instanceof Error ? error.message : "model catalog unavailable"; runs.dispatch({ type: "CATALOG_FAIL", operationId: effect.operationId, error: code(error) === -32601 ? `-32601: ${message}` : message }); finish(effect.operationId, error); }
+  };
+  const executeOne = (effect: WorkspaceEffect) => {
+    if (effect.type === "abort") return void handleAbort(effect);
+    if (effect.type === "delivery-status") return void handleStatus(effect);
+    if (effect.type === "deliver") return void handleDelivery(effect);
+    if (effect.type === "load-settings" || effect.type === "set-settings") return void handleSettings(effect);
+    if (effect.type === "load-catalog") return void handleCatalog(effect);
+  };
+  return { execute(effects: readonly WorkspaceEffect[]) { for (const effect of effects) executeOne(effect); } };
+}
+
+/** Coordinates UI bindings and reducer commands; all zeta calls are in the effect executor above. */
+export function createDeliveryManager(client: () => ZetaClient | null, runs: DeliveryRunStore, executeSession: (effects: readonly WorkspaceEffect[]) => void = () => {}, abortSession?: (runId: string) => Promise<unknown>) {
+  const records = new Map<string, DeliveryRecord>();
+  const pending = new Map<string, { resolve(value?: unknown): void; reject(error: unknown): void }>();
+  let activeRun: string | null = null;
+  const record = (runId: string): DeliveryRecord => {
+    const prior = records.get(runId); if (prior) return prior;
+    const next: DeliveryRecord = { delivery: createDelivery(undefined, (event) => next.store?.dispatch(event)) };
+    records.set(runId, next); return next;
+  };
+  const finish = (operationId: OperationId, error?: unknown) => {
+    const waiter = pending.get(operationId); if (!waiter) return;
+    pending.delete(operationId); error === undefined ? waiter.resolve() : waiter.reject(error);
+  };
+  const executor = createDeliveryEffectExecutor(client, runs, record, finish, abortSession);
+  const operation = (start: (operationId: OperationId) => void) => { const operationId = crypto.randomUUID() as OperationId; const result = new Promise<void>((resolve, reject) => pending.set(operationId, { resolve, reject })); start(operationId); return result; };
+  runs.setEffectExecutor((effects) => { executor.execute(effects); executeSession(effects); });
+  return {
+    bind(runId: string, store: DeliveryStore | undefined) { const item = record(runId); if (item.store === store) return; item.unsubscribe?.(); item.store = store; item.unsubscribe = store?.subscribe(() => setTimeout(() => runs.reconcileDeliveries(runId), 0)); runs.reconcileDeliveries(runId); },
+    reconcile(runId: string) { runs.reconcileDeliveries(runId); },
+    loadCatalog(runId: string | null) { return operation((operationId) => runs.loadCatalog(runId, operationId)); },
+    loadSettings(runId: string) { return operation((operationId) => runs.loadSettings(runId, operationId)); },
+    async changeSettings(runId: string, patch: import("./run-state").SessionSettings) {
+      runs.desireSettings(runId, patch);
+      if (!runs.get(runId).settings.loaded?.model && !runs.get(runId).settings.desired?.model) await this.loadSettings(runId);
+      return operation((operationId) => runs.writeSettings(runId, operationId));
+    },
+    observeActive(runId: string | null, connected: boolean) { const previous = activeRun; activeRun = runId; if (!runId && previous && connected) runs.reconcileDeliveries(previous); },
+    submit(runId: string, text: string, steer: boolean, deliveryId = `web-${crypto.randomUUID()}`) {
+      const operationId = crypto.randomUUID() as OperationId;
+      const result = new Promise((resolve, reject) => pending.set(operationId, { resolve, reject }));
+      runs.beginDelivery(runId, { id: deliveryId, attemptId: deliveryId, method: steer ? "steer" : "send", text, images: [] }, operationId);
+      return result;
+    },
+    stop(runId: string) { const operationId = crypto.randomUUID() as OperationId; const result = new Promise((resolve, reject) => pending.set(operationId, { resolve, reject })); runs.stop(runId, operationId); return result; },
+    resend(runId: string, intentId: string) { runs.dispatch({ type: "DELIVERY_RESEND", runId: runId as RunId, intentId }); },
+    dispose() { records.forEach((item) => item.unsubscribe?.()); records.clear(); pending.clear(); runs.setEffectExecutor(() => {}); },
+  };
+}
+export type DeliveryManager = ReturnType<typeof createDeliveryManager>;
 
 /** Stops the running turn and everything it started (zeta's default session-scope abort). */
 export const stopTurn = (client: ZetaClient) => client.request("abort", {}, { timeoutMs: 15_000 });

@@ -1,6 +1,7 @@
 import { fromZetaEvent, fromZetaHistory, type SessionLease, type ZetaClient } from "@fulcrum/zeta";
 import type { RunEvent } from "@fulcrum/core";
 import type { hostBindings, Registration } from "./host-client";
+import type { QueuedImage } from "./image-queue";
 type HostBindings = typeof hostBindings;
 
 /** The `SessionMetadata` fields this app reads from `list_sessions` (zeta docs/serve-protocol.md). */
@@ -23,39 +24,13 @@ export type ServerStatus = {
   pending_approvals_truncated?: boolean;
 };
 
-export const PAGE_SIZE = 100;
-
-/** The name, else the first prompt, else where it ran and a short id, so untitled rows still differ. */
-export const sessionTitle = (session: SessionMeta) =>
-  session.name?.trim() || session.first_message_preview?.trim() ||
-  (session.cwd ? `${session.cwd.split("/").filter(Boolean).at(-1) ?? "/"} · ${session.session_id.slice(0, 8)}` : "untitled session");
-
-/** "now", "4m", "3h", "2d", then a short date. Short, because the list is narrow and scanned, not read. */
-export function ago(iso: string, now: number): string {
-  const then = Date.parse(iso);
-  if (Number.isNaN(then)) return "";
-  const seconds = Math.max(0, Math.round((now - then) / 1000));
-  if (seconds < 60) return "now";
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
-  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h`;
-  if (seconds < 7 * 86_400) return `${Math.floor(seconds / 86_400)}d`;
-  return new Date(then).toLocaleDateString("en", { month: "short", day: "numeric", ...(new Date(then).getFullYear() === new Date(now).getFullYear() ? {} : { year: "numeric" }) });
-}
-
-/** Newest first. Child sessions (workers a session started) are left out; the parent row stands for them. */
-export const topLevel = (sessions: readonly SessionMeta[]) =>
-  sessions.filter((session) => !session.parent_session_id).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
-
-export async function listSessions(client: ZetaClient, offset = 0): Promise<{ sessions: SessionMeta[]; nextOffset: number | null }> {
-  const paged = client.features.includes("list_sessions_paging");
-  const result = (await client.request("list_sessions", paged ? { offset, limit: PAGE_SIZE } : {})) as { sessions?: SessionMeta[]; next_offset?: number | null };
-  return { sessions: result.sessions ?? [], nextOffset: paged ? result.next_offset ?? null : null };
-}
+/** The name, else the first prompt; null when zeta has neither yet. */
+export const sessionTitle = (session: SessionMeta | null) => session?.name?.trim() || session?.first_message_preview?.trim() || null;
 
 export const getStatus = (client: ZetaClient, signal?: AbortSignal) => client.request("status", {}, { timeoutMs: 15_000, signal }) as Promise<ServerStatus>;
 
 export type OpenProgress = (messages: number, complete: boolean) => void;
-export type OpenResult = { lease: SessionLease; syncing: boolean; complete: Promise<{ lease?: SessionLease; syncing: boolean }> };
+export type OpenResult = { lease: SessionLease; session: SessionMeta | null; syncing: boolean; complete: Promise<{ lease?: SessionLease; syncing: boolean }> };
 
 type HistoryPage = { messages?: unknown[]; next_offset?: number | null };
 const isApprovalEvent = (event: RunEvent) => event.type === "approval_request" || event.type === "approval_end";
@@ -229,289 +204,199 @@ export async function openSession(
       throw error;
     }
   })();
-  return { lease, syncing: initialStatus.state !== "idle", complete };
+  return { lease, session: initialStatus.session, syncing: initialStatus.state !== "idle", complete };
 }
 
 export const isBusyError = (error: unknown) => (error as { code?: unknown } | null)?.code === -32004;
 
 export type OpenRun = { id: string; lease: SessionLease; stale: boolean; history: { messages: number; complete: boolean }; syncing: boolean };
-export type OpenFailure = { id: string; message: string; busy: boolean; restored?: boolean };
-export type SessionTransition =
-  | { kind: "idle"; selected: string | null }
-  | { kind: "opening"; to: string; messages: number }
-  | { kind: "open"; run: OpenRun }
-  | { kind: "replacing"; from: OpenRun; to: string; messages: number }
-  | { kind: "failed"; run: OpenRun | null; to: string; error: OpenFailure };
-
-export const transitionRun = (transition: SessionTransition): OpenRun | null =>
-  transition.kind === "open" ? transition.run : transition.kind === "replacing" ? transition.from : transition.kind === "failed" ? transition.run : null;
-export const transitionSelected = (transition: SessionTransition): string | null => {
-  if (transition.kind === "idle") return transition.selected;
-  if (transition.kind === "open") return transition.run.id;
-  if (transition.kind === "failed" && transition.error.restored && transition.run) return transition.run.id;
-  return transition.kind === "replacing" || transition.kind === "opening" || transition.kind === "failed" ? transition.to : null;
-};
-
-type TransitionEvent =
-  | { type: "start"; id: string }
-  | { type: "progress"; id: string; messages: number }
-  | { type: "opened"; run: OpenRun }
-  | { type: "updated"; run: OpenRun }
-  | { type: "failed"; id: string; error: OpenFailure }
-  | { type: "stale" }
-  | { type: "dismiss" };
-
-export function reduceSessionTransition(transition: SessionTransition, event: TransitionEvent): SessionTransition {
-  const run = transitionRun(transition);
-  switch (event.type) {
-    case "start": return run ? { kind: "replacing", from: run, to: event.id, messages: 0 } : { kind: "opening", to: event.id, messages: 0 };
-    case "opened":
-    case "updated": return { kind: "open", run: event.run };
-    case "failed": return { kind: "failed", run, to: event.id, error: event.error };
-    case "stale": return run ? { kind: "open", run: { ...run, stale: true } } : transition;
-    case "dismiss": return run ? { kind: "open", run } : { kind: "idle", selected: transitionSelected(transition) };
-    case "progress": {
-      if (transition.kind === "opening" && transition.to === event.id) return { ...transition, messages: event.messages };
-      if (transition.kind === "replacing" && transition.to === event.id) return { ...transition, messages: event.messages };
-      return transition;
-    }
-  }
-}
-
-export const sessionPresentation = (transition: SessionTransition) => {
-  const run = transitionRun(transition);
-  const opening = transition.kind === "opening" ? { id: transition.to, messages: transition.messages }
-    : transition.kind === "replacing" ? { id: transition.to, messages: transition.messages } : null;
-  return {
-    selected: transitionSelected(transition),
-    open: run,
-    opening,
-    openError: transition.kind === "failed" ? transition.error : null,
-  };
-};
-
-export type SessionsState = {
-  sessions: SessionMeta[];
-  nextOffset: number | null;
-  listError: string | null;
-  listLoading: boolean;
-  listSlow: boolean;
-  listReady: boolean;
-  /** The server's own session from `status` and what it is doing. */
-  server: { id: string | null; state: ServerStatus["state"]; approvals: number } | null;
-  transition: SessionTransition;
-  /** A `new_session` in flight, and why the last one failed. */
-  creating: boolean;
-  createError: string | null;
+export type OpenFailure = { id: string; message: string; busy: boolean };
+export type RunState = {
+  selected: string | null;
+  open: OpenRun | null;
+  opening: { id: string; messages: number } | null;
+  openError: OpenFailure | null;
+  session: SessionMeta | null;
+  /** The attached run that owns zeta's active turn, independent from the selected URL. */
+  active: string | null;
+  attached: string | null;
 };
 
 type Source = { readonly client: ZetaClient | null; subscribe(listener: () => void): () => void };
-
+type RunStateStore = import("./run-state").RunStateStore;
+type WorkspaceEffect = import("./run-state").WorkspaceEffect;
+type OperationId = import("./run-state").OperationId;
+type SessionId = import("./run-state").SessionId;
+type DraftRunId = import("./run-state").DraftRunId;
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+const turn = (status: ServerStatus) => status.pending_approvals?.length ? "approval" as const : status.state === "idle" ? "idle" as const : status.state;
 
-/**
- * Session list and selection over a connection. On every connect it reloads the list and reopens the selected
- * session, or the server's own session when nothing is selected. The newest `select` wins; leases of abandoned
- * opens are released.
- */
-export function createSessions(connection: Source, { selected = null, onSelect, bindings }: { selected?: string | null; onSelect?: (id: string) => void; bindings?: HostBindings } = {}) {
-  let state: SessionsState = { sessions: [], nextOffset: null, listError: null, listLoading: false, listSlow: false, listReady: false, server: null, transition: { kind: "idle", selected }, creating: false, createError: null };
-  const listeners = new Set<() => void>();
-  const set = (patch: Partial<SessionsState>) => { state = { ...state, ...patch }; listeners.forEach((listener) => listener()); };
-  const transition = (event: TransitionEvent) => set({ transition: reduceSessionTransition(state.transition, event) });
+/** Executes tagged session effects. Run selection, leases, attachment, and active-turn truth remain in RunStateStore. */
+export function createSessionManager(connection: Source, runs: RunStateStore, bindings?: HostBindings) {
   let client: ZetaClient | null = null;
-  let openGeneration = 0;
+  let unsubscribe = () => {};
+  let started = false;
   let openAbort: AbortController | null = null;
+  let openOperation: { runId: SessionId; operationId: OperationId } | null = null;
+  const leaseSubscriptions = new Map<string, () => void>();
+  const leases = new Map<string, OpenRun>();
+  const knownStatus = new Map<string, ServerStatus>();
+  const pending = new Map<string, { resolve(value: unknown): void; reject(error: unknown): void }>();
   const live = (target: ZetaClient) => client === target;
-
-  type Catalog = { client: ZetaClient; inFlight: Promise<void> | null; slowTimer: ReturnType<typeof setTimeout> | null };
-  let catalog: Catalog | null = null;
-  const localSessions = new Map<string, { session: SessionMeta; createdGeneration: number }>();
-  let listGeneration = 0;
-  const currentCatalog = (owner: Catalog) => catalog === owner;
-  const retireCatalog = () => {
-    const timer = catalog?.slowTimer;
-    if (timer !== null && timer !== undefined) clearTimeout(timer);
-    catalog = null;
+  const register = (target: ZetaClient, id?: string) => bindings && target.features.includes("session_host_commands") ? bindings.register(id) : undefined;
+  const finish = (operationId: OperationId | undefined, value?: unknown, error?: unknown) => {
+    if (!operationId) return;
+    const waiter = pending.get(operationId); if (!waiter) return;
+    pending.delete(operationId); error === undefined ? waiter.resolve(value) : waiter.reject(error);
   };
-  const refresh = async () => {
-    const owner = catalog;
-    if (!owner) return;
-    if (owner.inFlight) return owner.inFlight;
-    const generation = ++listGeneration;
-    set({ listLoading: true, listSlow: false, listError: null, listReady: false });
-    owner.slowTimer = setTimeout(() => { if (currentCatalog(owner)) set({ listSlow: true }); }, 5_000);
-    owner.inFlight = (async () => {
-      try {
-        const list = await listSessions(owner.client);
-        if (!currentCatalog(owner)) return;
-        const visible = new Map(list.sessions.map((session) => [session.session_id, session]));
-        for (const [id, local] of localSessions) {
-          if (local.createdGeneration < generation) localSessions.delete(id);
-          else if (!visible.has(id)) visible.set(id, local.session);
-        }
-        set({ sessions: [...visible.values()], nextOffset: list.nextOffset, listError: null, listReady: true });
-      } catch (error) {
-        if (currentCatalog(owner)) set({ listError: message(error) });
-      } finally {
-        if (owner.slowTimer !== null) clearTimeout(owner.slowTimer);
-        owner.slowTimer = null;
-        owner.inFlight = null;
-        if (currentCatalog(owner)) set({ listLoading: false, listSlow: false });
-      }
-    })();
-    return owner.inFlight;
+  const current = (runId: string, operationId: OperationId) => runs.isCurrentOperation(runId, operationId);
+  const watch = (runId: SessionId, open: OpenRun) => {
+    leases.set(runId, open);
+    leaseSubscriptions.get(runId)?.();
+    let running = open.lease.store.getState().agent === "running";
+    const update = () => {
+      const next = open.lease.store.getState().agent === "running";
+      if (next === running) return;
+      running = next;
+      runs.dispatch(next ? { type: "TURN_START", runId } : { type: "TURN_END", runId });
+    };
+    leaseSubscriptions.set(runId, open.lease.store.subscribe(update));
+    if (running) runs.dispatch({ type: "TURN_START", runId });
   };
-
-  const open = async (id: string, knownStatus?: ServerStatus) => {
+  const handleStatus = async (effect: Extract<WorkspaceEffect, { type: "status" }>) => {
     const target = client;
-    const mine = ++openGeneration;
-    openAbort?.abort();
-    const abort = new AbortController();
-    openAbort = abort;
-    transition({ type: "start", id });
     if (!target) return;
-    const previous = transitionRun(state.transition);
-    const previousId = previous?.id !== id ? previous?.id : null;
-    try {
-      let history = { messages: 0, complete: false };
-      const registration = bindings && target.features.includes("session_host_commands") ? await bindings.register(id) : undefined;
-      const opened = await openSession(target, id, (messages, complete) => {
-        history = { messages, complete };
-        if (mine !== openGeneration) return;
-        transition({ type: "progress", id, messages });
-      }, abort.signal, knownStatus, registration);
-      if (!state.listLoading && !state.listReady) void refresh();
-      const { lease } = opened;
-      if (mine !== openGeneration || !live(target)) return lease.release();
-      previous?.lease.release();
-      transition({ type: "opened", run: { id, lease, stale: false, history, syncing: opened.syncing } });
-      void opened.complete.then((result) => {
-        if (mine !== openGeneration || !live(target)) return result.lease?.release();
-        if (result.lease) {
-          const run = transitionRun(state.transition);
-          run?.lease.release();
-          transition({ type: "updated", run: { id, lease: result.lease, stale: false, history: { ...history, complete: true }, syncing: result.syncing } });
-        } else {
-          const run = transitionRun(state.transition);
-          if (run?.id === id) transition({ type: "updated", run: { ...run, history: { ...history, complete: true }, syncing: result.syncing } });
-        }
-      }).catch((error) => {
-        if (mine === openGeneration && live(target) && (error as { name?: string }).name !== "AbortError")
-          transition({ type: "failed", id, error: { id, message: message(error), busy: isBusyError(error) } });
-      });
-    } catch (error) {
-      if (mine !== openGeneration || !live(target)) return;
-      let restored = false;
-      if (previousId) {
-        try {
-          const binding = bindings && target.features.includes("session_host_commands") ? await bindings.register(previousId) : undefined;
-          await target.request("resume", { session_id: previousId, ...(binding ? { host_commands: [binding.command] } : {}) }, { timeoutMs: 30_000 });
-          restored = true;
-        } catch { /* keep the retained run read-only with an explicit reopen action */ }
-      }
-      if (mine !== openGeneration || !live(target)) return;
-      if (restored && previousId) onSelect?.(previousId);
-      transition({ type: "failed", id, error: { id, message: message(error), busy: isBusyError(error), ...(restored ? { restored: true } : {}) } });
-    }
-  };
-
-  const markApprovalsReconnecting = (disconnected: ZetaClient | null) => {
-    const run = transitionRun(state.transition);
-    if (!run || !disconnected?.features.includes("approval_reconnect")) return;
-    for (const { id: itemId } of run.lease.store.getOutline()) {
-      const item = run.lease.store.getItem(itemId);
-      if (item?.type === "approval" && !item.ended && item.request.type === "approval_request")
-        run.lease.store.dispatch({ ...item.request, state: "reconnecting", status: "reconnecting…", disabled_reason: "decisions are disabled while disconnected" });
-    }
-  };
-  const disconnect = (disconnected: ZetaClient | null) => {
-    retireCatalog();
-    set({ listLoading: false, listSlow: false, listReady: false });
-    openGeneration++;
-    openAbort?.abort();
-    markApprovalsReconnecting(disconnected);
-    transition({ type: "stale" });
-  };
-  const loadConnection = async (target: ZetaClient) => {
     try {
       const status = await getStatus(target);
       if (!live(target)) return;
-      set({ server: { id: status.session?.session_id ?? null, state: status.state, approvals: status.pending_approvals?.length ?? 0 } });
-      const id = transitionSelected(state.transition) ?? status.session?.session_id ?? null;
-      if (id) {
-        await open(id, status);
-        if (!live(target)) return;
-      } else void refresh();
+      knownStatus.clear();
+      if (status.session) knownStatus.set(status.session.session_id, status);
+      runs.dispatch({ type: "STATUS", ...(status.session ? { sessionId: status.session.session_id as SessionId, session: status.session } : {}), turn: turn(status), operationId: effect.operationId });
+      finish(effect.operationId, status);
+    } catch (error) { finish(effect.operationId, undefined, error); }
+  };
+  const handleOpen = async (effect: Extract<WorkspaceEffect, { type: "open-session" }>) => {
+    const target = client;
+    if (!target || !current(effect.runId, effect.operationId)) return;
+    openAbort?.abort();
+    const abort = new AbortController();
+    openAbort = abort;
+    openOperation = { runId: effect.runId, operationId: effect.operationId };
+    const previous = runs.get(effect.runId).open;
+    if (previous) {
+      leaseSubscriptions.get(effect.runId)?.();
+      leaseSubscriptions.delete(effect.runId);
+      leases.delete(effect.runId);
+      previous.lease.release();
+    }
+    try {
+      let history = { messages: 0, complete: false };
+      const registration = await register(target, effect.runId);
+      const initialStatus = knownStatus.get(effect.runId);
+      knownStatus.clear();
+      const opened = await openSession(target, effect.runId, (messages, complete) => {
+        history = { messages, complete };
+        runs.dispatch({ type: "OPEN_PROGRESS", runId: effect.runId, operationId: effect.operationId, messages });
+      }, abort.signal, initialStatus, registration);
+      if (!live(target) || !current(effect.runId, effect.operationId)) { opened.lease.release(); return; }
+      const open: OpenRun = { id: effect.runId, lease: opened.lease, stale: false, history, syncing: true };
+      runs.dispatch({ type: "RESUME_OK", runId: effect.runId, operationId: effect.operationId });
+      runs.dispatch({ type: "OPEN_OK", runId: effect.runId, operationId: effect.operationId, open, ...(opened.session ? { session: opened.session } : {}) });
+      watch(effect.runId, open);
+      void opened.complete.then((result) => {
+        if (!current(effect.runId, effect.operationId)) { result.lease?.release(); return; }
+        const active = runs.get(effect.runId).open ?? open;
+        const complete: OpenRun = { ...active, ...(result.lease ? { lease: result.lease } : {}), history: { ...history, complete: true }, syncing: result.syncing };
+        if (result.lease && active.lease !== result.lease) active.lease.release();
+        runs.dispatch({ type: "OPEN_COMPLETE", runId: effect.runId, operationId: effect.operationId, open: complete });
+        watch(effect.runId, complete);
+      }).catch((error) => {
+        if (current(effect.runId, effect.operationId) && (error as { name?: string }).name !== "AbortError") runs.dispatch({ type: "OPEN_FAIL", runId: effect.runId, operationId: effect.operationId, error: message(error), busy: isBusyError(error) });
+      });
     } catch (error) {
-      if (!live(target)) return;
-      const id = transitionSelected(state.transition) ?? "";
-      transition({ type: "failed", id, error: { id, message: message(error), busy: isBusyError(error) } });
+      if (!live(target) || !current(effect.runId, effect.operationId) || (error as { name?: string }).name === "AbortError") return;
+      runs.dispatch({ type: "OPEN_FAIL", runId: effect.runId, operationId: effect.operationId, error: message(error), busy: isBusyError(error) });
     }
   };
-  const connect = (target: ZetaClient) => {
-    retireCatalog();
-    catalog = { client: target, inFlight: null, slowTimer: null };
-    set({ listLoading: false, listSlow: false, listReady: false, listError: null });
-    void loadConnection(target);
+  const handleCreate = async (effect: Extract<WorkspaceEffect, { type: "new-session" }>) => {
+    const target = client;
+    if (!target) { const error = new Error("not connected to zeta serve"); runs.dispatch({ type: "NEW_SESSION_FAIL", runId: effect.runId, operationId: effect.operationId, error: error.message }); return finish(effect.operationId, undefined, error); }
+    try {
+      const binding = await register(target);
+      const { approval_mode, ...sessionChoice } = effect.choice ?? {};
+      const params = { ...sessionChoice, ...(target.features.includes("new_session_settings") && approval_mode ? { approval_mode } : {}), ...(binding ? { host_commands: [binding.command] } : {}) };
+      const { session } = await target.request("new_session", params, { timeoutMs: 30_000 }) as { session: SessionMeta };
+      if (binding) await bindings!.bind(binding.registration_id, session.session_id);
+      if (!live(target) || !current(effect.runId, effect.operationId)) return;
+      runs.dispatch({ type: "NEW_SESSION_OK", runId: effect.runId, sessionId: session.session_id as SessionId, operationId: effect.operationId, session });
+      finish(effect.operationId, session.session_id);
+    } catch (error) {
+      if (!live(target) || !current(effect.runId, effect.operationId)) return;
+      runs.dispatch({ type: "NEW_SESSION_FAIL", runId: effect.runId, operationId: effect.operationId, error: message(error), busy: isBusyError(error) });
+      finish(effect.operationId, undefined, error);
+    }
+  };
+  const handleImages = async (effect: Extract<WorkspaceEffect, { type: "send-images" }>) => {
+    const delivery = runs.get(effect.runId).deliveries.get(effect.intentId);
+    if (!client || !delivery) { const error = new Error("session is not attached"); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false, failed: true }); finish(effect.operationId, undefined, error); return; }
+    try {
+      await client.request("send_images", { session_id: effect.runId, text: delivery.text, images: delivery.images.map(({ name, mime_type, data }) => ({ name, mime_type, data })), delivery_id: effect.intentId }, { timeoutMs: 30_000 });
+      runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false }); finish(effect.operationId, true);
+    } catch (error) { runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false, failed: true }); finish(effect.operationId, undefined, error); }
+  };
+  const executeOne = (effect: WorkspaceEffect) => {
+    if (effect.type === "status") return void handleStatus(effect);
+    if (effect.type === "send-images") return void handleImages(effect);
+    if (effect.type === "open-session") return void handleOpen(effect);
+    if (effect.type === "new-session") return void handleCreate(effect);
+    if (effect.type === "release-lease") { const open = leases.get(effect.runId); leaseSubscriptions.get(effect.runId)?.(); leaseSubscriptions.delete(effect.runId); leases.delete(effect.runId); open?.lease.release(); }
   };
   const onConnection = () => {
     if (connection.client === client) return;
-    const disconnected = client;
+    if (client) {
+      openAbort?.abort(); openOperation = null; leaseSubscriptions.forEach((stop) => stop()); leaseSubscriptions.clear();
+      if (client.features.includes("approval_reconnect")) for (const record of runs.getCatalog().runs.values()) if (record.open) for (const { id } of record.open.lease.store.getOutline()) {
+        const item = record.open.lease.store.getItem(id);
+        if (item?.type === "approval" && !item.ended && item.request.type === "approval_request") record.open.lease.store.dispatch({ ...item.request, state: "reconnecting", status: "reconnecting…", disabled_reason: "decisions are disabled while disconnected" });
+      }
+      runs.dispatch({ type: "DISCONNECT" });
+    }
     client = connection.client;
-    if (client) connect(client);
-    else disconnect(disconnected);
+    if (client) runs.dispatch({ type: "RECONNECT" });
   };
-  const unsubscribe = connection.subscribe(onConnection);
-  onConnection();
-
   return {
-    get state() { return state; },
-    subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    select(id: string) {
-      const run = transitionRun(state.transition);
-      if (id === transitionSelected(state.transition) && ((state.transition.kind === "opening" || state.transition.kind === "replacing") || (run?.id === id && !run.stale))) return;
-      onSelect?.(id);
-      void open(id);
+    execute(effects: readonly WorkspaceEffect[]) {
+      if (openOperation && !current(openOperation.runId, openOperation.operationId)) { openAbort?.abort(); openOperation = null; }
+      for (const effect of effects) executeOne(effect);
     },
-    refresh,
-    dismissOpenError() { transition({ type: "dismiss" }); },
-    /** Starts a session with zeta's `new_session` (which makes it the server's own), then opens it. */
-    async create() {
-      const target = client;
-      if (!target || state.creating) return;
-      set({ creating: true, createError: null });
-      try {
-        const binding = bindings && target.features.includes("session_host_commands") ? await bindings.register() : undefined;
-        const { session } = (await target.request("new_session", binding ? { host_commands: [binding.command] } : {}, { timeoutMs: 30_000 })) as { session: SessionMeta };
-        if (binding) await bindings!.bind(binding.registration_id, session.session_id);
-        if (!live(target)) return set({ creating: false });
-        localSessions.set(session.session_id, { session, createdGeneration: listGeneration });
-        set({ creating: false, sessions: [session, ...state.sessions.filter((item) => item.session_id !== session.session_id)] });
-        onSelect?.(session.session_id);
-        await open(session.session_id);
-        void refresh();
-      } catch (error) {
-        set({ creating: false, createError: live(target) ? message(error) : null });
-      }
+    start() { if (started) return; started = true; unsubscribe = connection.subscribe(onConnection); onConnection(); },
+    create(runId: string, choice: { model?: string; provider?: string; approval_mode?: "ask" | "allow" } = {}) {
+      const operationId = crypto.randomUUID() as OperationId;
+      const result = new Promise<string>((resolve, reject) => pending.set(operationId, { resolve: (value) => resolve(String(value)), reject }));
+      runs.startSession(runId, choice, operationId);
+      return result;
     },
-    async loadMore() {
-      const target = client;
-      if (!target || state.nextOffset === null) return;
-      try {
-        const page = await listSessions(target, state.nextOffset);
-        if (live(target)) set({ sessions: [...state.sessions, ...page.sessions], nextOffset: page.nextOffset });
-      } catch (error) {
-        if (live(target)) set({ listError: message(error) });
-      }
+    refreshStatus() {
+      const operationId = crypto.randomUUID() as OperationId;
+      const result = new Promise<ServerStatus>((resolve, reject) => pending.set(operationId, { resolve: (value) => resolve(value as ServerStatus), reject }));
+      void handleStatus({ type: "status", operationId });
+      return result;
     },
-    dispose() {
-      unsubscribe();
-      retireCatalog();
-      openGeneration++;
-      openAbort?.abort();
-      transitionRun(state.transition)?.lease.release();
+    dismissOpenError(runId: string) { runs.dispatch({ type: "OPEN_DISMISS", runId: runId as SessionId }); },
+    retryOpen(runId: string) { runs.requestOpen(runId); },
+    abort(runId: string) {
+      const attachment = runs.getCatalog().attachment;
+      if (!client || attachment.kind !== "attached" || attachment.sessionId !== runId) throw Object.assign(new Error("session is not attached"), { code: -32003 });
+      return client.request("abort", {}, { timeoutMs: 10_000 });
     },
+    sendImages(sessionId: string, deliveryId: string, text: string, images: readonly QueuedImage[]) {
+      const operationId = crypto.randomUUID() as OperationId;
+      return new Promise<void>((resolve, reject) => {
+        pending.set(operationId, { resolve: () => resolve(), reject });
+        runs.dispatch({ type: "DELIVERY_BEGIN", runId: sessionId as SessionId, operationId, delivery: { id: deliveryId, attemptId: deliveryId, operationId, method: "send_images", text, images, state: "requesting" } });
+      });
+    },
+    dispose() { unsubscribe(); openAbort?.abort(); openOperation = null; leaseSubscriptions.forEach((stop) => stop()); leaseSubscriptions.clear(); pending.clear(); },
   };
 }
-export type Sessions = ReturnType<typeof createSessions>;
+export type SessionManager = ReturnType<typeof createSessionManager>;

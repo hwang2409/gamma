@@ -1,14 +1,17 @@
-// Browser gate for apps/web against the fake zeta server (scripts/fake-zeta.ts), at 1440 and 390 px.
+// Browser gate for gamma's single run against the fake zeta server (scripts/fake-zeta.ts), at 1440, 1024, and 390 px.
 // Fails on: a console error; a page that scrolls sideways; a button under 36 px (44 px at touch widths) or with no
 // name; a native select/input/textarea (the composer's field is the one textarea, styled by @fulcrum/react); a composer
-// that cannot send, steer the running turn, or stop it, or that offers input while offline; UI text under 4.5:1 on its real background in any of the 12 themes (syntax
-// token colors are reported, not gated yet: they are the palettes' own); a connection state that does not show its
-// title, the exact `zeta serve --ws-origin` command, or a retry; a session list, history, markdown, highlighting,
-// tool card, approval, or follow-bottom that does not work; a reconnect that loses or duplicates rows; a drawer,
-// theme picker, or session list that the keyboard cannot drive; a fresh zeta where the page cannot start a session;
-// a run header that says "running" while an approval waits; or a discovery retry that logs an error.
-// Screenshots go to $WEB_SHOTS (default apps/web/gate-artifacts).
-import { mkdir } from "node:fs/promises";
+// that cannot send, steer the running turn, or stop it, or that offers input while offline; UI text under 4.5:1 on its
+// real background in any of the 12 themes (syntax token colors are reported, not gated yet: they are the palettes' own);
+// a connection state that does not show its title, the exact `zeta serve --ws-origin` command, or a retry, or that
+// shows the problem a second time in the status line; history, markdown, highlighting, tool cards, approvals, or
+// follow-bottom that do not work; a reconnect that loses or duplicates rows; a settings popover or theme picker that the
+// keyboard cannot drive; model, YOLO, or image attach controls that do not reach zeta; a startup that shows a busy or
+// error panel for a remembered run on an idle zeta; a status line that says "ready" while an approval waits; or a
+// discovery retry that logs an error.
+// Screenshots go to $WEB_SHOTS (default gate-artifacts).
+import { mkdir, mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { chromium, type Page } from "playwright";
@@ -20,8 +23,10 @@ const port = Number(process.env.WEB_GATE_PORT ?? 4180);
 const origin = `http://127.0.0.1:${port}`;
 const shots = process.env.WEB_SHOTS ?? join(root, "gate-artifacts");
 await mkdir(shots, { recursive: true });
+// A private gamma host, so the gate never touches a running one.
+const gammaHome = await mkdtemp(join(tmpdir(), "gamma-gate-"));
 const fake = await startFakeZeta({ origins: [origin] });
-const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: root, env: { ...process.env, ZETA_HOME: fake.home }, stdio: "ignore" });
+const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: root, env: { ...process.env, ZETA_HOME: fake.home, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin, VITE_ZETA_PORT: String(fake.port) }, stdio: "ignore" });
 const failures: string[] = [];
 const fail = (message: string) => { failures.push(message); console.log(`FAIL ${message}`); };
 const ok = (message: string) => console.log(`ok   ${message}`);
@@ -83,6 +88,8 @@ function audit(minHeight: number) {
   return { problems, tokens };
 }
 
+/** The composer takes input: connected, with the run (or the blank run) open. */
+const ready = (page: Page, timeout = 10_000) => page.locator('.dock form[data-part="composer"]').waitFor({ timeout });
 const settle = (page: Page) => page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 const shoot = (page: Page, name: string) => page.screenshot({ path: join(shots, `${name}.png`) });
 const tokenReport = new Map<string, Set<string>>();
@@ -127,7 +134,6 @@ try {
       ["auth-failed-token", async () => { await fake.start(); await fake.wrongToken(); }, /auth failed/, true],
       ["busy", async () => { await fake.start(); fake.setMode("busy"); }, /zeta serve is in use/, false],
       ["incompatible", async () => { fake.setMode("incompatible"); }, /unsupported protocol version/, false],
-      ["connecting", async () => { fake.setMode("slow"); }, /connecting to zeta serve/, false],
     ];
     for (const [name, arrange, title, command] of states) {
       await check(`state ${name}`, async () => {
@@ -136,61 +142,54 @@ try {
         await page.getByRole("heading", { name: title }).waitFor({ timeout: 5000 });
         if (command) {
           const shown = await page.locator(".panel .command code").textContent();
-          // The port of the server the page found; zeta's default 8765 when it never found one.
-          const port = name === "not-running" ? 8765 : fake.port;
-          if (shown !== `zeta serve --ws ${port} --ws-origin ${origin}`) throw new Error(`command is "${shown}"`);
+          // The isolated fake port is required even while stopped; the gate must never suggest or probe zeta's live default.
+          if (shown !== `zeta serve --ws ${fake.port} --ws-origin ${origin}`) throw new Error(`command is "${shown}"`);
           await page.locator('.panel .command code [class*="tok-"]').first().waitFor({ timeout: 3000 }).catch(() => { throw new Error("the command is not highlighted"); });
         }
-        if (name !== "incompatible" && name !== "connecting") await page.getByRole("button", { name: "retry now" }).waitFor();
+        if (name !== "incompatible") await page.getByRole("button", { name: "retry now" }).waitFor();
+        // One problem, one home: the panel. The dock adds no status line and no composer note about it.
+        if (await page.locator(".status-line").count()) throw new Error("the problem shows again in the dock");
         await shoot(page, `state-${name}-1440`);
       });
     }
+    await check("state connecting: the status line says connecting, with no panel", async () => {
+      fake.setMode("slow");
+      await page.goto(`${origin}/?theme=tokyo-night`);
+      await page.locator('.status-line[data-state="connecting"]').waitFor({ timeout: 5000 });
+      if (await page.locator(".panel").count()) throw new Error("a panel shows while connecting");
+      await shoot(page, "state-connecting-1440");
+    });
     fake.setMode("ok");
     await fake.start();
     await check("retry now connects once the server is back", async () => {
       await page.goto(`${origin}/?theme=tokyo-night`);
-      await page.locator(".badge", { hasText: "connected" }).waitFor({ timeout: 5000 });
+      await ready(page, 5000);
     });
 
-    await check("slow catalog keeps the selected transcript and composer usable", async () => {
+    await check("startup: a remembered run on an idle zeta reopens with no busy or error panel", async () => {
       fake.setLive(false);
-      fake.setMode("slow-catalog");
       try {
         await page.goto("about:blank");
         fake.drop();
         await fake.start();
-        await page.goto(`${origin}/?theme=tokyo-night#session=${ACTIVE}`);
-        await page.locator('[data-part="timeline"] [data-kind="user"]').first().waitFor({ timeout: 15_000 }).catch(() => { throw new Error("selected transcript did not open before the slow catalog"); });
-        await page.getByText(/loading sessions/).waitFor({ timeout: 10_000 }).catch(() => { throw new Error("slow catalog did not show its loading state"); });
-        await page.locator(".dock textarea").fill("sent while the catalog loads");
-        await page.locator(".dock textarea").press("Enter");
-        await page.getByText("sent while the catalog loads", { exact: true }).waitFor({ timeout: 2000 });
-        await shoot(page, "slow-catalog-1440");
-        await page.setViewportSize({ width: 390, height: 844 });
-        await page.locator(".menu").click();
-        await page.getByRole("button", { name: "new session" }).waitFor();
-        await shoot(page, "slow-catalog-390");
-      } finally {
-        await page.setViewportSize({ width: 1440, height: 900 });
-        fake.setMode("ok");
-        await Bun.sleep(31_000);
-        fake.clearSent();
-        await fake.start();
-        fake.setLive(true);
         await page.goto(`${origin}/?theme=tokyo-night`);
-        await page.locator(".badge", { hasText: "connected" }).waitFor({ timeout: 5000 });
+        await page.evaluate(() => localStorage.setItem("gamma-run", "s-themes"));
+        await page.goto(`${origin}/?theme=tokyo-night`);
+        await page.locator('[data-part="timeline"] [data-kind="user"]').first().waitFor({ timeout: 15_000 });
+        await ready(page);
+        if (await page.locator(".panel, [role=alert]").count()) throw new Error(`startup shows "${await page.locator(".panel, [role=alert]").first().textContent()}"`);
+        if (!new URL(page.url()).searchParams.get("run")) throw new Error("the remembered run is not in the url");
+      } finally {
+        await page.evaluate(() => localStorage.removeItem("gamma-run"));
+        fake.setLive(true);
+        fake.drop();
+        await fake.start();
       }
     });
 
-    // Connected: list, history, live run, approval, follow-bottom.
-    await check("session list shows top-level sessions with title, time, and status", async () => {
-      const rows = page.locator("button.session");
-      await rows.first().waitFor();
-      if ((await rows.count()) !== 6) throw new Error(`${await rows.count()} rows, expected 6 (child hidden)`);
-      await page.locator("button.session", { hasText: "fix the flaky reconnect test" }).locator(".state").waitFor();
-      if (!(await page.locator("button.session", { hasText: "fulcrum · s-untitl" }).count())) throw new Error("no fallback title");
-    });
+    // Connected: the server's active run, history, live run, approval, follow-bottom.
     await check("the server's session opens with history, markdown, highlighting, and tool cards", async () => {
+      await page.goto(`${origin}/?theme=tokyo-night&run=${ACTIVE}`);
       await page.locator('[data-part="timeline"] [data-part="message"]').first().waitFor();
       if (!(await page.locator('[data-part="timeline"] [data-part="tool"]').count())) throw new Error("no tool card");
       if (await page.locator('[data-part="timeline"] [data-part="tool"][data-state="streaming"]').count() > 1) throw new Error("history tool left running");
@@ -207,20 +206,21 @@ try {
       await page.locator(".scroll").evaluate((element) => { element.scrollTop = element.scrollHeight; });
       const approval = page.locator('[data-part="approval"][data-state="pending"]');
       await approval.waitFor({ timeout: 5000 });
-      // The run is blocked on the user, not running: the header says so, with the warn color.
-      const header = page.locator(".run-meta .state");
-      await header.filter({ hasText: "waiting for approval" }).waitFor({ timeout: 10_000 }).catch(async () => { throw new Error(`the run header says "${await header.textContent()}" while an approval waits`); });
+      // The run is blocked on the user, not running: the status line says so, with the warn color.
+      const header = page.locator(".status-line");
+      await header.filter({ hasText: "waiting for your approval" }).waitFor({ timeout: 10_000 }).catch(async () => { throw new Error(`the status line says "${await header.textContent()}" while an approval waits`); });
       const [mark, warn] = await header.evaluate((node) => [getComputedStyle(node, "::before").backgroundColor, (() => { const probe = document.createElement("span"); probe.style.color = "var(--fulcrum-warn)"; node.append(probe); const color = getComputedStyle(probe).color; probe.remove(); return color; })()]);
       if (mark !== warn) throw new Error(`the header mark is ${mark}, not the warn color ${warn}`);
-      const row = await page.locator("button.session[aria-current] .state").textContent();
-      if (row !== "needs approval") throw new Error(`the session row says "${row}" while an approval waits`);
       await shoot(page, "connected-approval-1440-tokyo-night");
       await fake.start();
       // A stopped server (not a blip): the banner and the offline composer resize the scroll box while it waits.
       await fake.stop();
       await page.getByText(/connection lost|reconnecting/).first().waitFor({ timeout: 3000 });
-      // A drop keeps the reader where they were: still pinned to the bottom, the pending approval still in view.
-      await page.getByText(/sending is paused/).first().waitFor({ timeout: 3000 });
+      // A drop keeps the reader where they were and the draft editable, but blocks sending.
+      const offlineField = page.locator('.dock textarea[aria-label="message"]');
+      await offlineField.waitFor({ timeout: 3000 });
+      if (await offlineField.evaluate((node) => (node as HTMLTextAreaElement).readOnly)) throw new Error("the outage made the draft read-only");
+      if (!(await page.getByRole("button", { name: "send message" }).isDisabled())) throw new Error("sending stayed enabled while offline");
       await settle(page);
       await page.waitForTimeout(500);
       const kept = await page.locator(".scroll").evaluate((element) => {
@@ -237,7 +237,7 @@ try {
       await fake.start();
       // The client's retry backoff grows while the server is down; retry at once, as a user would.
       await page.locator(".notice").getByRole("button", { name: "retry now" }).click({ timeout: 2000 }).catch(() => {});
-      await page.locator(".badge", { hasText: "connected" }).waitFor({ timeout: 5000 });
+      await ready(page);
       await page.locator(".notice").waitFor({ state: "detached" });
       const reconnected = page.locator('[data-part="approval"]');
       await reconnected.getByRole("button", { name: "approve" }).waitFor({ timeout: 5000 });
@@ -270,7 +270,7 @@ try {
       // Virtual rows mount only near the viewport, so read the start of the history from the top.
       await page.locator(".scroll").evaluate((element) => { element.scrollTop = 0; });
       await page.locator('[data-part="timeline"] [data-kind="user"]').first().waitFor();
-      await page.locator('[data-part="timeline"] [data-part="md-code-block"] [class*="tok-"]').first().waitFor({ timeout: 5000 });
+      await page.locator('[data-part="timeline"] [data-part="md-code-block"] [class*="tok-"]').first().waitFor({ timeout: 10_000 });
 
       await page.locator('[data-part="jump-to-latest"]').waitFor({ state: "detached", timeout: 1000 }).catch(() => {});
     });
@@ -279,7 +279,7 @@ try {
     await check("a dropped socket shows 'connection lost', reconnects, and rebuilds without lost or duplicate rows", async () => {
       // Start with one current controller so this check also catches a late close releasing its replacement.
       await page.reload();
-      await page.locator(".badge", { hasText: "connected" }).waitFor({ timeout: 10_000 });
+      await ready(page);
       const initial = page.locator('.scroll[data-run-ready="true"]');
       await initial.waitFor({ timeout: 10_000 });
       await page.locator('[data-part="timeline"] [data-id]').first().waitFor({ timeout: 10_000 });
@@ -294,15 +294,14 @@ try {
       await Bun.sleep(2000); // a few quiet retries; the console listener fails the gate on any error
       await shoot(page, "state-lost-1440");
       if (!(await page.locator('[data-part="timeline"] [data-id]').count())) throw new Error("transcript hidden while offline");
-      await page.locator('.dock [data-part="composer"][data-state="read-only"] [data-part="composer-reason"]', { hasText: "sending is paused" }).waitFor({ timeout: 2000 });
-      if (await page.locator(".dock button").count()) throw new Error("the composer offers actions while offline");
-      const draft = page.locator('.dock [data-part="composer"][data-state="read-only"] textarea');
-      if (!(await draft.count()) || (await draft.inputValue()) !== "draft kept across disconnect" || !(await draft.evaluate((node) => (node as HTMLTextAreaElement).readOnly))) throw new Error("the read-only composer does not show the draft, read-only");
-      const stale = await page.locator("button.session .state").allTextContents();
-      if (stale.length) throw new Error(`the session list shows live status "${stale.join(", ")}" while not connected`);
+      const draft = page.locator('.dock textarea[aria-label="message"]');
+      await draft.waitFor({ timeout: 2000 });
+      if (await page.locator(".status-line").count()) throw new Error("the stopped server shows again in the dock");
+      if ((await draft.inputValue()) !== "draft kept across disconnect" || await draft.evaluate((node) => (node as HTMLTextAreaElement).readOnly)) throw new Error("the offline composer did not keep an editable draft");
+      if (!(await page.getByRole("button", { name: "send message" }).isDisabled())) throw new Error("sending stayed enabled while offline");
       await fake.start();
       await page.getByRole("button", { name: "retry now" }).click();
-      await page.locator(".badge", { hasText: "connected" }).waitFor({ timeout: 10_000 });
+      await ready(page);
       await page.locator(".notice").waitFor({ state: "detached" });
       try {
         // The replacement virtual timeline starts at the bottom, where an old user row need not be mounted.
@@ -319,27 +318,19 @@ try {
       if (await page.locator('[data-part="approval"][data-state="pending"]').count()) throw new Error("a dropped approval came back as pending");
     });
 
-    await check("keyboard: arrows move through sessions, Enter opens one, the theme picker works", async () => {
+    await check("keyboard: the settings popover and its theme picker work from the keyboard", async () => {
       fake.setLive(false);
       await fake.start();
-      await page.goto(`${origin}/?theme=tokyo-night`);
-      await page.locator(".badge", { hasText: "connected" }).waitFor({ timeout: 5000 });
-      await page.locator('[data-catalog-ready="true"]').waitFor({ timeout: 5000 });
       fake.setOpenDelay(200);
-      await page.goto(`${origin}/?theme=tokyo-night#session=${ACTIVE}`);
-      const selected = page.locator(`button.session[data-status]`, { hasText: "fix the flaky reconnect test" });
-      await selected.focus();
+      await page.goto(`${origin}/?theme=tokyo-night&run=s-themes`);
+      await page.getByRole("button", { name: "settings" }).focus();
       await page.waitForTimeout(250);
-      if (!(await page.evaluate(() => document.activeElement?.textContent?.includes("fix the flaky reconnect test")))) throw new Error("run readiness stole focus from the selected session");
+      if (!(await page.evaluate(() => document.activeElement?.textContent === "settings"))) throw new Error("opening the run stole focus from the settings button");
       fake.setOpenDelay(0);
-      await page.keyboard.press("ArrowDown");
-      const focused = await page.evaluate(() => document.activeElement?.textContent ?? "");
-      if (!focused.includes("check every theme")) throw new Error(`focus on "${focused}"`);
-      await page.keyboard.press("Enter");
-      await page.locator("button.session", { hasText: "fix the flaky reconnect test" }).focus();
       await page.locator('[data-run-ready="true"]').waitFor();
-      if (!(await page.evaluate(() => document.activeElement?.textContent?.includes("fix the flaky reconnect test")))) throw new Error("opening a run stole focus from the session list");
       await page.locator('[data-part="md-table"]').waitFor({ timeout: 5000 });
+      await page.keyboard.press("Enter");
+      await page.getByRole("dialog", { name: "settings" }).waitFor();
       await page.locator(".theme-button").focus();
       await page.keyboard.press("Enter");
       await page.getByRole("listbox", { name: "theme" }).waitFor();
@@ -352,43 +343,45 @@ try {
       await page.keyboard.press("ArrowDown");
       await page.keyboard.press("Escape");
       if (await page.getByRole("listbox").count()) throw new Error("Escape did not close the picker");
+      await page.keyboard.press("Escape");
+      if (await page.getByRole("dialog", { name: "settings" }).count()) throw new Error("Escape did not close the settings popover");
+      if (!(await page.evaluate(() => document.activeElement?.textContent === "settings"))) throw new Error("focus did not return to the settings button");
     });
     await check("model, YOLO, reconnect persistence, image queue, and image viewer", async () => {
-      await page.locator("button.session", { hasText: "check every theme" }).click({ timeout: 5000 }).catch(() => { throw new Error("could not open the settings fixture session"); });
-      await page.locator('[aria-label="session settings"]').waitFor({ timeout: 5000 });
-      const settings = page.locator('[aria-label="session settings"]');
-      await settings.getByRole("button", { name: "claude-opus-4-6" }).click({ timeout: 5000 }).catch(() => { throw new Error("model picker did not open"); });
-      await settings.getByRole("option", { name: "gpt-5.1-codex" }).click({ timeout: 5000 }).catch(() => { throw new Error("model option could not be selected"); });
-      await page.waitForFunction(() => document.querySelector('[aria-label="session settings"]')?.textContent?.includes("gpt-5.1-codex"), undefined, { timeout: 5000 }).catch(() => { throw new Error("model change did not reload from zeta"); });
+      const footer = page.locator('.dock [data-part="composer"] .composer-tools');
+      await footer.getByRole("button", { name: /model: (?:default \()?claude-opus-4-6/ }).click({ timeout: 5000 }).catch(() => { throw new Error("footer model picker did not open"); });
+      await footer.getByRole("option", { name: "gpt-5.1-codex" }).click({ timeout: 5000 }).catch(() => { throw new Error("model option could not be selected"); });
+      await footer.getByRole("button", { name: "model: gpt-5.1-codex" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("model change did not reload from zeta"); });
       if (fake.settings.model !== "gpt-5.1-codex") throw new Error("model change did not reach zeta");
 
-      page.once("dialog", (dialog) => dialog.accept());
-      await page.getByRole("button", { name: "Ask", exact: true }).click({ timeout: 5000 }).catch(() => { throw new Error("Ask control could not enable YOLO"); });
-      await page.locator(".topbar-yolo", { hasText: "YOLO · auto-approve tools" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("top bar YOLO indicator did not appear"); });
-      await page.locator(".composer-yolo", { hasText: "YOLO · auto-approve tools" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("composer YOLO indicator did not appear"); });
+      await footer.getByRole("button", { name: /^approval mode: Ask/ }).click({ timeout: 5000 }).catch(() => { throw new Error("Ask control could not open YOLO confirmation"); });
+      await page.getByRole("button", { name: "allow" }).click();
+      await page.locator(".topbar-yolo", { hasText: "YOLO" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("top bar YOLO indicator did not appear"); });
+      await footer.locator(".approval-mode[data-yolo]", { hasText: "YOLO" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("footer YOLO control did not turn on"); });
       if (fake.settings.approval_mode !== "allow") throw new Error("YOLO mode did not reach zeta");
       await shoot(page, "yolo-1440");
       fake.drop();
       await page.getByText(/connection lost|reconnecting/).first().waitFor({ timeout: 3000 });
-      await page.locator(".badge", { hasText: "connected" }).waitFor({ timeout: 10_000 });
-      await page.locator(".topbar-yolo", { hasText: "YOLO · auto-approve tools" }).waitFor({ timeout: 5000 });
+      await ready(page);
+      await page.locator(".topbar-yolo", { hasText: "YOLO" }).waitFor({ timeout: 5000 });
+      await footer.locator(".approval-mode[data-yolo]").waitFor({ timeout: 5000 });
 
-      const input = page.locator('.attach-button input[type="file"]');
+      const input = page.locator('.dock [data-part="composer"] input[type="file"]');
       const image = { name: "pixel.png", mimeType: "image/png", buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64") };
       await input.setInputFiles(image);
       await page.getByRole("button", { name: "remove pixel.png" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("file chooser image did not queue"); });
       await page.getByRole("button", { name: "remove pixel.png" }).click();
-      await page.locator(".dock").evaluate((dock) => {
+      await page.locator('.dock [data-part="composer"] textarea').evaluate((field) => {
         const transfer = new DataTransfer();
         transfer.items.add(new File([new Uint8Array([137, 80, 78, 71])], "pasted.png", { type: "image/png" }));
-        dock.dispatchEvent(new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true }));
+        field.dispatchEvent(new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true }));
       });
       await page.getByRole("button", { name: "remove pasted.png" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("pasted image did not queue"); });
       await page.getByRole("button", { name: "remove pasted.png" }).click();
-      await page.locator(".dock").evaluate((dock) => {
+      await page.locator('.dock [data-part="composer"]').evaluate((composer) => {
         const transfer = new DataTransfer();
         transfer.items.add(new File([new Uint8Array([137, 80, 78, 71])], "dropped.png", { type: "image/png" }));
-        dock.dispatchEvent(new DragEvent("drop", { dataTransfer: transfer, bubbles: true }));
+        composer.dispatchEvent(new DragEvent("drop", { dataTransfer: transfer, bubbles: true }));
       });
       await page.getByRole("button", { name: "remove dropped.png" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("dropped image did not queue"); });
       await shoot(page, "queued-images-1440");
@@ -410,24 +403,25 @@ try {
       await page.keyboard.press("Escape");
       if (!(await openImage.evaluate((element) => document.activeElement === element))) throw new Error("image viewer did not return focus");
 
+      // A zeta without these requests answers "method not found": the footer then offers neither control.
       fake.setSettingsEnabled(false);
       fake.drop();
-      await page.locator(".badge", { hasText: "connected" }).waitFor({ timeout: 10_000 });
-      await page.getByText("settings are not supported by this server").waitFor({ timeout: 5000 });
-      if (await page.getByRole("button", { name: /Ask|YOLO/ }).count()) throw new Error("unsupported server kept approval controls");
+      await ready(page);
+      await page.locator(".dock .model-picker").waitFor({ state: "detached", timeout: 5000 }).catch(() => { throw new Error("unsupported server kept the model picker"); });
+      if (await page.getByRole("button", { name: /^approval mode/ }).count()) throw new Error("unsupported server kept approval controls");
       fake.setSettingsEnabled(true);
       fake.drop();
-      await page.locator(".badge", { hasText: "connected" }).waitFor({ timeout: 10_000 });
+      await ready(page);
     });
     await check("a 400-row history opens in virtual mode and lands at the bottom", async () => {
-      await page.locator("button.session", { hasText: "400 rows" }).click();
+      await page.goto(`${origin}/?theme=tokyo-night&run=s-long`);
       await page.locator('[data-part="timeline"][data-virtual="true"]').waitFor({ timeout: 10_000 });
       await page.getByText("frame 399 took").waitFor({ timeout: 5000 });
-      if (!(await page.evaluate(() => location.hash.includes("s-long")))) throw new Error("selection not in the url");
     });
     await check("composer: Enter sends, steer while running, a steer the turn dropped is resent, stop ends it, all with delivery ids", async () => {
-      await page.locator("button.session", { hasText: "check every theme" }).click();
+      await page.goto(`${origin}/?theme=tokyo-night&run=s-themes`);
       await page.locator('[data-part="md-table"]').waitFor({ timeout: 5000 });
+      await ready(page);
       const composer = page.locator('.dock [data-part="composer"]');
       const field = composer.locator("textarea");
       await field.click();
@@ -500,8 +494,9 @@ try {
     });
     await check("the page never scrolls: after IME typing the document fits the viewport and the headers stay in view", async () => {
       // A tall run: the Timeline's hidden live region sits at the end of 400 rows.
-      await page.locator("button.session", { hasText: "400 rows" }).click();
+      await page.goto(`${origin}/?theme=tokyo-night&run=s-long`);
       await page.locator('[data-part="timeline"][data-virtual="true"]').waitFor({ timeout: 10_000 });
+      await ready(page);
       const field = page.locator(".dock textarea");
       await field.click();
       const cdp = await context.newCDPSession(page);
@@ -544,28 +539,27 @@ try {
       if (insets.font !== 14) throw new Error(`desktop field text is ${insets.font} px`);
     });
     await check("composer: layout, controls, and contrast in all 12 themes after a run", () => auditThemes(page, "1440 composer", 36));
-    await check("a fresh zeta: new session from the empty state opens it with the composer focused and a hint", async () => {
+    await check("a fresh zeta: the blank run focuses the composer; the first send creates the run; new run clears it", async () => {
       fake.setEmpty(true);
+      await page.evaluate(() => { localStorage.removeItem("gamma-run"); localStorage.removeItem("gamma-model"); });
       await page.goto(`${origin}/?theme=tokyo-night`);
-      await page.locator(".badge", { hasText: "connected" }).waitFor({ timeout: 5000 });
-      await page.locator(".list-head").getByRole("button", { name: "new session" }).waitFor({ timeout: 3000 });
-      await shoot(page, "empty-1440-tokyo-night");
-      await page.locator(".panel").getByRole("button", { name: "new session" }).click();
-      await page.locator("[data-run-ready]").waitFor({ timeout: 5000 });
-      await page.locator("button.session[aria-current]").waitFor({ timeout: 3000 });
+      await ready(page, 5000);
+      await page.locator(".empty-run", { hasText: "start a conversation" }).waitFor({ timeout: 3000 });
       const focused = await page.evaluate(() => document.activeElement?.closest(".dock") !== null && document.activeElement?.tagName === "TEXTAREA");
       if (!focused) throw new Error(`focus is on ${await page.evaluate(() => document.activeElement?.outerHTML.slice(0, 60))}, not the composer`);
-      await page.locator(".empty-run", { hasText: /no messages yet/ }).waitFor({ timeout: 3000 });
-      await shoot(page, "new-session-1440-tokyo-night");
-      await page.keyboard.type("hello from a new session");
+      await shoot(page, "empty-1440-tokyo-night");
+      await page.keyboard.type("hello from a new run");
       await page.keyboard.press("Enter");
-      await page.locator('[data-part="timeline"] [data-kind="user"]', { hasText: "hello from a new session" }).waitFor({ timeout: 3000 });
+      await page.waitForURL(/[?&]run=/, { timeout: 5000 });
+      await page.locator('[data-part="timeline"] [data-kind="user"]', { hasText: "hello from a new run" }).waitFor({ timeout: 3000 });
       await page.locator(".empty-run").waitFor({ state: "detached", timeout: 3000 });
       await page.locator('.dock [data-part="composer"][data-state="idle"]').waitFor({ timeout: 10_000 });
-      await page.locator(".list-head").getByRole("button", { name: "new session" }).click();
+      const oldRun = new URL(page.url()).searchParams.get("run");
+      await page.getByRole("button", { name: "new run" }).click();
       await page.locator(".empty-run").waitFor({ timeout: 5000 });
-      if ((await page.locator("button.session").count()) !== 2) throw new Error(`${await page.locator("button.session").count()} sessions after two creates`);
-      await auditThemes(page, "1440 new session", 36);
+      const draftRun = new URL(page.url()).searchParams.get("run");
+      if (!draftRun?.startsWith("draft:") || draftRun === oldRun) throw new Error("new run did not get its own draft history entry");
+      await auditThemes(page, "1440 new run", 36);
       fake.setEmpty(false);
     });
     if (errors.length) fail(`desktop console: ${errors.join("; ")}`);
@@ -577,6 +571,7 @@ try {
       const cut: string[] = [];
       for (const theme of themes) {
         await tablet.goto(`${origin}/?theme=${theme}`);
+        await tablet.getByRole("button", { name: "settings" }).click();
         const name = tablet.locator(".theme-name");
         await name.waitFor({ timeout: 5000 });
         if (await name.evaluate((node) => node.scrollWidth > node.clientWidth + 0.5)) cut.push(theme);
@@ -592,8 +587,8 @@ try {
     const mobile = await phone.newPage();
     const mobileErrors: string[] = [];
     mobile.on("pageerror", (error) => mobileErrors.push(error.message));
-    await check("390: the run fills the width; the session list is a drawer", async () => {
-      await mobile.goto(`${origin}/?theme=gruvbox-dark#session=s-themes`);
+    await check("390: the run fills the width; settings, model, YOLO, images, and the viewer work", async () => {
+      await mobile.goto(`${origin}/?theme=gruvbox-dark&run=s-themes`);
       await mobile.locator('[data-part="timeline"] [data-kind="user"]').first().waitFor({ timeout: 5000 });
       // A reopened, approved bash call is the live shell card: its command (from the approval row), its output without
       // zeta's raw "stdout:"/"stderr:" labels, and exit 0.
@@ -601,34 +596,21 @@ try {
       await reopened.waitFor({ timeout: 5000 }).catch(() => { throw new Error("the reopened bash call is not a shell card with its command"); });
       const card = await reopened.innerText();
       if (/\bstdout:|\bstderr:/.test(card) || !card.includes("themes.ts") || !card.includes("exit 0")) throw new Error(`the reopened bash card reads "${card.replace(/\s+/g, " ")}"`);
-      if (await mobile.locator("button.session").first().isVisible()) throw new Error("sidebar visible without the drawer");
+      await ready(mobile);
       await shoot(mobile, "connected-390-gruvbox-dark");
-      await mobile.getByRole("button", { name: "sessions" }).click({ timeout: 5000 }).catch(() => { throw new Error("mobile session drawer did not open"); });
-      await mobile.getByRole("dialog", { name: "sessions" }).waitFor();
-      await settle(mobile);
-      await mobile.waitForTimeout(250);
-      if (!(await mobile.evaluate(() => document.activeElement?.closest("#sessions") !== null))) throw new Error("focus did not move into the drawer");
-      await mobile.getByRole("dialog", { name: "sessions" }).getByRole("button", { name: "new session" }).waitFor({ timeout: 2000 });
-      await shoot(mobile, "drawer-390-gruvbox-dark");
-      await auditThemes(mobile, "390 drawer", 44);
-      // A rejected new session keeps the modal focusable; Escape must close it even if Chromium moved focus to body.
-      fake.setRejectCreate(true);
-      await mobile.getByRole("dialog", { name: "sessions" }).getByRole("button", { name: "new session" }).click({ timeout: 5000 }).catch(() => { throw new Error("mobile new-session control could not be pressed"); });
-      await mobile.getByRole("dialog", { name: "sessions" }).getByRole("alert").filter({ hasText: "could not start a session" }).waitFor({ timeout: 3000 })
-        .catch(() => { throw new Error("a failed new session at 390 px closed the drawer or showed no error"); });
-      fake.setRejectCreate(false);
+      await mobile.getByRole("button", { name: "settings" }).click();
+      await mobile.getByRole("dialog", { name: "settings" }).waitFor();
+      await auditThemes(mobile, "390 settings", 44);
       await mobile.keyboard.press("Escape");
-      if (await mobile.getByRole("dialog").count()) throw new Error("Escape did not close the drawer");
-      if (!(await mobile.evaluate(() => document.activeElement?.getAttribute("aria-label") === "sessions"))) throw new Error("focus did not return to the menu button");
-      await mobile.getByRole("button", { name: "sessions" }).click({ timeout: 5000 }).catch(() => { throw new Error("mobile session drawer did not reopen"); });
-      await mobile.locator("button.session", { hasText: "check every theme" }).click({ timeout: 5000 }).catch(() => { throw new Error("mobile fixture session could not be selected"); });
-      if (await mobile.getByRole("dialog").count()) throw new Error("choosing a session did not close the drawer");
+      if (await mobile.getByRole("dialog").count()) throw new Error("Escape did not close the settings popover");
       await mobile.locator('[data-part="md-table"]').waitFor({ timeout: 5000 });
       await mobile.evaluate(() => { document.documentElement.dataset.fulcrumTheme = "solarized-light"; });
-      await mobile.waitForTimeout(300); // the drawer's 180 ms slide-out
       await shoot(mobile, "connected-390-solarized-light");
-      await mobile.locator(".topbar-yolo", { hasText: "YOLO · auto-approve tools" }).waitFor();
-      await mobile.locator(".composer-yolo", { hasText: "YOLO · auto-approve tools" }).waitFor();
+      const footer = mobile.locator('.dock [data-part="composer"] .composer-tools');
+      await footer.locator(".approval-mode").waitFor();
+      await footer.getByRole("button", { name: /^model: / }).waitFor();
+      for (const control of [footer.getByRole("button", { name: /^model: / }), footer.locator(".approval-mode")])
+        if (await control.evaluate((node) => { const box = node.getBoundingClientRect(); return box.right > innerWidth || box.left < 0; })) throw new Error("a footer control is off screen at 390");
       await shoot(mobile, "yolo-390");
       await mobile.locator(".scroll").evaluate((element) => { element.scrollTop = element.scrollHeight; });
       await settle(mobile);
@@ -640,8 +622,9 @@ try {
       await mobile.getByRole("dialog", { name: "contrast-preview.png" }).waitFor();
       await shoot(mobile, "image-viewer-390");
       await mobile.keyboard.press("Escape");
-      await mobile.locator('.attach-button input[type="file"]').setInputFiles({ name: "mobile.png", mimeType: "image/png", buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64") });
+      await mobile.locator('.dock [data-part="composer"] input[type="file"]').setInputFiles({ name: "mobile.png", mimeType: "image/png", buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64") });
       await mobile.getByRole("button", { name: "remove mobile.png" }).waitFor();
+      if (!(await mobile.locator('[data-part="attachment"] img').evaluate((node) => (node as HTMLImageElement).complete && (node as HTMLImageElement).naturalWidth > 0))) throw new Error("the queued image thumbnail did not load");
       await shoot(mobile, "queued-images-390");
     });
     await check("390: the field text is at least 16 px, so iOS does not zoom on focus", async () => {
