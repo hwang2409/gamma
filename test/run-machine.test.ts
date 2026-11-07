@@ -112,4 +112,3 @@ test("mutation: reconnect reconciles each durable delivery", () => {
   const mutant = { ...correct, effects: correct.effects.filter((effect) => effect.type !== "delivery-status") };
   expect(observe(correct.state, correct.effects)).not.toEqual(observe(mutant.state, mutant.effects));
 });
-
