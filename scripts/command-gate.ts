@@ -240,7 +240,9 @@ try {
       const sends = calls.filter((request) => request.method === "send");
       if (calls.filter((request) => request.method === "slash_run").length !== 1 || sends.length !== 1) throw new Error(`expected one prepare and one send, got ${calls.map((call) => call.method)}`);
       if (sends[0]?.params.input_id !== "opaque-review-input" || "text" in (sends[0]?.params ?? {})) throw new Error("opaque send used the wrong shape");
-      if (fake.sent.at(-1)?.text !== "/review") throw new Error("opaque send did not keep its display text for the user row");
+      // The fake records the delivery after it logs the request, so wait for the recorded user row text.
+      for (let attempt = 0; attempt < 100 && fake.sent.at(-1)?.text !== "/review"; attempt++) await Bun.sleep(50);
+      if (fake.sent.at(-1)?.text !== "/review") throw new Error(`opaque send did not keep its display text for the user row: ${JSON.stringify(fake.sent.at(-1))}`);
       if ((await page.locator("body").innerText()).includes("opaque-review-input")) throw new Error("opaque id reached visible text");
       await page.getByRole("button", { name: "stop" }).waitFor({ timeout: 15_000 });
     });
