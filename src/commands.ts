@@ -1,7 +1,6 @@
 import {
   listSlashCommands,
   parseModelInput,
-  parseSlashRun,
   runSlashCommand,
   type CommandClient,
   type ParsedSlashRunResult,
