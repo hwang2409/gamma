@@ -12,7 +12,7 @@ const shots = process.env.WEB_SHOTS ?? join(root, "gate-artifacts", "navigation"
 await mkdir(shots, { recursive: true });
 const gammaHome = await mkdtemp(join(tmpdir(), "gamma-navigation-"));
 const fake = await startFakeZeta({ origins: [origin], live: false, serialDelays: { send: Array(20).fill(3_000), new_session: Array(20).fill(3_000) } });
-const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: root, env: { ...process.env, ZETA_HOME: fake.home, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin }, stdio: "ignore" });
+const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: root, env: { ...process.env, ZETA_HOME: fake.home, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin, VITE_ZETA_PORT: String(fake.port) }, stdio: "ignore" });
 const failures: string[] = [];
 let passed = 0;
 

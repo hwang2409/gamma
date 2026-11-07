@@ -123,16 +123,17 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
   let aborts = 0;
   let echo = true;
   const withheldEchoes: Array<() => void> = [];
-  let chat: { session: string; steers: string[]; aborted: boolean } | null = null;
+  const withheldHistory: Array<() => void> = [];
+  let chat: { session: string; sendDelivery: string | null; steers: string[]; aborted: boolean } | null = null;
   type Send = (event: Json) => void;
-  const chatTurn = async (session: string, send: Send, prompt: string) => {
-    const turn = { session, steers: [] as string[], aborted: false }; // steers holds delivery ids
+  const chatTurn = async (session: string, send: Send, prompt: string, sendDelivery: string | null) => {
+    const turn = { session, sendDelivery, steers: [] as string[], aborted: false }; // steers holds delivery ids
     chat = turn;
     running.set(true);
     const e = (event: string, body: Json = {}) => { if (!turn.aborted) send({ event, session_id: session, ...body }); };
     e("agent_start");
     e("turn_start", { data: { turn: sent.length } });
-    const finish = () => { e("turn_end", { data: { turn: sent.length } }); chat = null; running.set(false); e("agent_end"); };
+    const finish = () => { if (turn.sendDelivery) statuses.set(turn.sendDelivery, "delivered"); e("turn_end", { data: { turn: sent.length } }); chat = null; running.set(false); e("agent_end"); };
     // Prompts that steer the scripted turn, for the status line: a provider failure, and a slow tool call.
     if (prompt.includes("fail this turn")) {
       await wait(200);
@@ -177,23 +178,20 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
     const value = String(params.text ?? "");
     sent.push({ method, text: value, delivery_id: delivery });
     const userMessage = { event: "user_message", session_id: active, text: value, mode: method, attachments: images.map((image) => ({ name: image.name, mime_type: image.mime_type, size: Math.floor(String(image.data).length * 3 / 4) })), ...(delivery ? { delivery_id: delivery } : {}) };
-    const persistAndEcho = () => {
-      // serve-protocol.md:811-817: the accepted echo and durable history row become visible together.
-      histories[active] = [...(histories[active] ?? []), { id: `sent-${sent.length}`, role: "user", content: [text(value)], ...(delivery ? { delivery_id: delivery } : {}), tool_result: null }];
-      if (delivery && method === "send") statuses.set(delivery, "delivered");
-      send(userMessage);
-    };
-    if (echo) persistAndEcho(); else withheldEchoes.push(persistAndEcho);
+    const emitEcho = () => send(userMessage);
     const accepted = method === "send" ? { accepted: true, session_id: active } : { accepted: true };
     if (delivery) { deliveries.set(delivery, accepted); statuses.set(delivery, "queued"); }
+    const persistHistory = () => { if (delivery && method === "send") statuses.set(delivery, "delivered"); histories[active] = [...(histories[active] ?? []), { id: `sent-${sent.length}`, role: "user", content: [text(value)], ...(delivery ? { delivery_id: delivery } : {}), tool_result: null }]; };
+    if (echo) { persistHistory(); emitEcho(); } else { withheldHistory.push(persistHistory); withheldEchoes.push(emitEcho); }
     if (method === "steer") { if (delivery) chat?.steers.push(delivery); return { result: accepted }; }
     // After the reply, as zeta starts the turn once the send is persisted.
-    queueMicrotask(() => void chatTurn(active, send, value));
+    queueMicrotask(() => void chatTurn(active, send, value, delivery));
     return { result: accepted };
   };
   const abort = (send: Send): Json => {
     if (!chat) return { result: { aborted: false } };
     const turn = chat;
+    if (turn.sendDelivery) statuses.set(turn.sendDelivery, "delivered");
     for (const id of turn.steers) {
       statuses.set(id, "dropped");
       histories[turn.session]!.push({ id: `delivery-${id}`, role: "system", event: "delivery_status", delivery_id: id, method: "steer", status: "dropped" });
@@ -211,7 +209,8 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
     sent,
     clearSent() { sent.splice(0); },
     setEcho(value: boolean) { echo = value; },
-    flushEchoes() { withheldEchoes.splice(0).forEach((send) => send()); },
+    persistWithheldHistory() { withheldHistory.splice(0).forEach((persist) => persist()); },
+    flushEchoes() { this.persistWithheldHistory(); withheldEchoes.splice(0).forEach((send) => send()); },
     get history() { return histories[ACTIVE] ?? []; },
     get aborts() { return aborts; },
     disconnect() {
@@ -473,7 +472,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     flushEchoes() { composer.flushEchoes(); },
     get aborts() { return composer.aborts; },
     /** Closes every socket, like a network blip; the server keeps running. */
-    drop() { for (const socket of sockets) socket.close(1012, "restart"); },
+    drop() { composer.persistWithheldHistory(); for (const socket of sockets) socket.close(1012, "restart"); },
     /** Removes the discovery file and refuses upgrades, like a stopped server. */
     async stop() {
       allowed = [];

@@ -22,7 +22,7 @@ const gammaHome = await mkdtemp(join(tmpdir(), "gamma-gate-"));
 // No live turn until the approval states ask for one: a turn running elsewhere makes zeta refuse to open other runs.
 const fake = await startFakeZeta({ origins: [origin], live: false });
 fake.setSettingsEnabled(true);
-const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: root, env: { ...process.env, ZETA_HOME: fake.home, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin }, stdio: "ignore" });
+const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: root, env: { ...process.env, ZETA_HOME: fake.home, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin, VITE_ZETA_PORT: String(fake.port) }, stdio: "ignore" });
 const rows: Array<[string, string]> = [];
 const check = async (name: string, run: () => Promise<void>) => { try { await run(); rows.push([name, "pass"]); } catch (error) { rows.push([name, `fail: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}`]); } };
 const ready = (page: Page) => page.locator('.dock form[data-part="composer"]').waitFor({ timeout: 10_000 });

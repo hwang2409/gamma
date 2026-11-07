@@ -12,7 +12,7 @@ const shots = process.env.WEB_SHOTS ?? join(root, "gate-artifacts");
 await mkdir(shots, { recursive: true });
 const gammaHome = await mkdtemp(join(tmpdir(), "gamma-round7-"));
 const fake = await startFakeZeta({ origins: [origin], live: false });
-const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: root, env: { ...process.env, ZETA_HOME: fake.home, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin }, stdio: "ignore" });
+const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: root, env: { ...process.env, ZETA_HOME: fake.home, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin, VITE_ZETA_PORT: String(fake.port) }, stdio: "ignore" });
 const failures: string[] = [];
 
 async function freshPage(browser: Awaited<ReturnType<typeof chromium.launch>>, viewport = { width: 1440, height: 900 }, newSessionSettings = true) {

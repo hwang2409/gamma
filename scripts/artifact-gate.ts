@@ -12,7 +12,7 @@ const shots = process.env.WEB_SHOTS ?? join(root, "gate-artifacts");
 const gammaHome = await mkdtemp(join(tmpdir(), "gamma-artifact-gate-"));
 await mkdir(shots, { recursive: true });
 const fake = await startFakeZeta({ origins: [origin] });
-const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: root, env: { ...process.env, ZETA_HOME: fake.home, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin }, stdio: ["ignore", "ignore", "inherit"] });
+const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: root, env: { ...process.env, ZETA_HOME: fake.home, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin, VITE_ZETA_PORT: String(fake.port) }, stdio: ["ignore", "ignore", "inherit"] });
 const png = Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
 const fixtures: Array<[string, string, Uint8Array | string]> = [
   ["image/png", "pixel png", png],

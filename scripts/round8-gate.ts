@@ -12,7 +12,7 @@ const shots = process.env.WEB_SHOTS ?? join(root, "gate-artifacts", "round8");
 await mkdir(shots, { recursive: true });
 const gammaHome = await mkdtemp(join(tmpdir(), "gamma-round8-"));
 const fake = await startFakeZeta({ origins: [origin], live: false });
-const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: root, env: { ...process.env, ZETA_HOME: fake.home, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin }, stdio: "ignore" });
+const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: root, env: { ...process.env, ZETA_HOME: fake.home, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin, VITE_ZETA_PORT: String(fake.port) }, stdio: "ignore" });
 const failures: string[] = [];
 
 async function waitUntil(test: () => boolean, message: string) {
@@ -67,7 +67,7 @@ try {
     });
     await check("reply-first-reconnect-replay-reconciles", async () => {
       const { context, page } = await fresh(browser, 390);
-      try { fake.setEcho(false); await send(page, "hold this turn while the echo is withheld"); await page.getByRole("status", { name: "message queued" }).waitFor(); if (await page.locator('[data-kind="user"]', { hasText: "hold this turn" }).count() !== 1) throw new Error("provisional row duplicated"); fake.drop(); await page.getByText(/connection lost|reconnecting/).first().waitFor({ timeout: 3_000 }); await page.getByRole("status", { name: "message queued" }).waitFor({ state: "detached", timeout: 10_000 }); if (await page.locator('[data-kind="user"]', { hasText: "hold this turn" }).count() !== 1) throw new Error("echo row duplicated"); await page.screenshot({ path: join(shots, "b1-reply-first-390.png") }); await page.getByRole("button", { name: "stop the running turn" }).click(); await Bun.sleep(300); }
+      try { fake.setEcho(false); await send(page, "hold this turn while the echo is withheld"); await page.getByRole("status", { name: "message queued" }).waitFor(); if (await page.locator('[data-kind="user"]', { hasText: "hold this turn" }).count() !== 1) throw new Error("provisional row duplicated"); fake.drop(); await page.getByText(/connection lost|reconnecting/).first().waitFor({ timeout: 3_000 }); await page.getByRole("status", { name: "message queued" }).waitFor({ state: "detached", timeout: 10_000 }); if (await page.locator('[data-kind="user"]', { hasText: "hold this turn" }).count() !== 1) throw new Error("echo row duplicated"); await page.screenshot({ path: join(shots, "b1-reply-first-390.png") }); const stop = page.getByRole("button", { name: "stop the running turn" }); if (await stop.count()) await stop.click(); await Bun.sleep(300); }
       finally { fake.setEcho(true); fake.flushEchoes(); await close(context); }
     });
     await check("stopped-turn-clears-queued", async () => {

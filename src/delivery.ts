@@ -128,6 +128,7 @@ type DeliveryStore = {
 };
 type DurableDelivery = { intent: string; attempt: string; text: string; method: Method; state: "requesting" | "queued" | "retrying" | "dropped" };
 type DeliveryRecord = {
+  runId: string;
   delivery: ReturnType<typeof createDelivery>;
   store?: DeliveryStore;
   unsubscribe?: () => void;
@@ -154,7 +155,7 @@ export function createDeliveryManager(client: () => ZetaClient | null, storage: 
   const find = (store: DeliveryStore, id: string) => store.getState().outline.map(({ id: itemId }) => ({ itemId, item: store.getItem(itemId) as { type?: string; event?: { type?: string; delivery_id?: string; intent?: string } } | undefined })).find(({ item }) => item?.type === "user" && item.event?.type === "user_message" && item.event.delivery_id === id);
   const record = (runId: string): DeliveryRecord => {
     const prior = records.get(runId); if (prior) return prior;
-    const next = {} as DeliveryRecord;
+    const next = { runId } as DeliveryRecord;
     next.provisional = new Map(); next.text = new Map(); next.durable = new Map(); next.waiting = new Set(); next.undelivered = new Set();
     for (const delivery of saved[runId] ?? []) {
       if (!delivery?.intent || !delivery.attempt || !delivery.text) continue;
@@ -183,8 +184,10 @@ export function createDeliveryManager(client: () => ZetaClient | null, storage: 
     if (!item.store || item.publishing) return;
     for (const [intent, delivery] of item.durable) {
       const current = find(item.store, delivery.attempt);
-      // A synthetic row carries intent; only a server/history row without it is durable proof.
-      if (current && !current.item?.event?.intent) { item.provisional.delete(delivery.attempt); settle(item, intent); }
+      if (!current) continue;
+      // A later server/history update resolves a provisional row through delivery_status.
+      if (item.provisional.has(delivery.attempt)) void reconcile(item.runId);
+      else if (!current.item?.event?.intent) settle(item, intent);
     }
   };
   const reconcile = async (runId: string) => {
