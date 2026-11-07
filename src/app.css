@@ -80,7 +80,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .vim-toggle[aria-pressed="true"] .vim-state { color: var(--fulcrum-fg); font-weight: 700; }
 .vim-toggle[aria-pressed="true"] .vim-state::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px; vertical-align: 1px; background: var(--fulcrum-ok); }
 
-.note { padding: 8px var(--gutter); color: var(--fulcrum-muted); font-size: 12px; }
+.note { width: min(var(--measure), calc(100% - 2 * var(--gutter))); margin-inline: auto; padding: 8px var(--gutter); color: var(--fulcrum-muted); font-size: 12px; }
 .note[data-tone="danger"] { border-left: var(--rail) solid var(--fulcrum-danger); color: var(--fulcrum-fg); }
 
 /* Theme picker: a listbox under its button in the settings popover. */
