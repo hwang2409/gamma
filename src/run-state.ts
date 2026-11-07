@@ -1,4 +1,5 @@
 import type { QueuedImage } from "./image-queue";
+import { catalogModels, catalogProviders } from "./settings";
 
 export type Brand<T, Name extends string> = T & { readonly __brand: Name };
 export type DraftRunId = Brand<`draft:${string}`, "DraftRunId">;
@@ -9,14 +10,18 @@ export type IntentId = Brand<string, "IntentId">;
 export type OperationId = Brand<string, "OperationId">;
 export type DeliveryMethod = "send" | "steer" | "send_images";
 export type PendingDelivery = { id: string; attemptId: string; operationId: OperationId; method: DeliveryMethod; text: string; images: readonly QueuedImage[]; state: "requesting" | "queued" | "retrying" | "dropped" };
-export type RunModel =
+export type SessionSettings = { model?: string; approval_mode?: "ask" | "allow" };
+export type RunModel = (
   | { choice: "default"; resolvedDefault?: string }
-  | { choice: "explicit"; model: string; resolvedDefault?: string };
-export type RunSettingsState =
-  | { kind: "unknown"; desired?: { model?: string; approval_mode?: "ask" | "allow" } }
-  | { kind: "loading"; operationId: OperationId; desired?: { model?: string; approval_mode?: "ask" | "allow" } }
-  | { kind: "ready"; model?: string; approval_mode?: "ask" | "allow"; desired?: { model?: string; approval_mode?: "ask" | "allow" } }
-  | { kind: "failed"; error: string };
+  | { choice: "explicit"; model: string; resolvedDefault?: string }
+) & { loaded?: string; pending?: OperationId; error?: string; deferred?: boolean };
+export type RunSettingsState = {
+  readonly loaded?: SessionSettings;
+  readonly desired?: SessionSettings;
+  readonly pending?: { operationId: OperationId; kind: "load" | "write" };
+  readonly error?: string;
+};
+export type ModelCatalog = { models: readonly string[]; providers: Readonly<Record<string, string>> };
 export type RunLifecycle =
   | { kind: "draft" }
   | { kind: "creating"; operationId: OperationId }
@@ -45,13 +50,20 @@ export type WorkspaceState = {
   readonly aliases: ReadonlyMap<DraftRunId, SessionId>;
   readonly attachment: AttachmentState;
   readonly notice?: { runId: SessionId };
+  readonly modelCatalog?: ModelCatalog;
+  readonly catalogPending?: OperationId;
+  readonly catalogError?: string;
 };
 export type WorkspaceEffect =
   | { type: "history-push" | "history-replace-current"; entryId: EntryId; runId: RunId }
   | { type: "status" }
-  | { type: "resume" | "open-history" | "load-settings" | "abort"; runId: SessionId; operationId: OperationId }
+  | { type: "resume" | "open-history"; runId: SessionId; operationId: OperationId }
+  | { type: "load-settings"; runId: SessionId; operationId: OperationId }
+  | { type: "abort"; runId: SessionId; operationId: OperationId }
   | { type: "delivery-status"; runId: SessionId; operationId: OperationId; intentId: string }
-  | { type: "new-session" | "set-settings"; runId: RunId; operationId: OperationId }
+  | { type: "new-session"; runId: RunId; operationId: OperationId }
+  | { type: "load-catalog"; operationId: OperationId; runId?: SessionId }
+  | { type: "set-settings"; runId: SessionId; operationId: OperationId; settings: SessionSettings }
   | { type: "deliver"; runId: RunId; operationId: OperationId; intentId: string }
   | { type: "persist-draft"; runId: RunId; text: string }
   | { type: "release-lease"; runId: SessionId };
@@ -62,6 +74,7 @@ export type WorkspaceEvent =
   | { type: "DELIVERY_SETTLE"; runId: RunId; intentId: string; accepted: boolean }
   | { type: "PROMOTE"; runId: DraftRunId; sessionId: SessionId }
   | { type: "MODEL_SET"; runId: RunId; model: RunModel }
+  | { type: "MODEL_DEFERRED"; runId: RunId; deferred: boolean }
   | { type: "APPROVAL_MODE_SET"; runId: RunId; approval_mode: "ask" | "allow" }
   | { type: "DISMISS_NOTICE" }
   | { type: "NEW_RUN"; entryId: EntryId; runId: DraftRunId }
@@ -82,6 +95,10 @@ export type WorkspaceEvent =
   | { type: "DELIVERY_RECONCILE"; runId: RunId }
   | { type: "DELIVERY_RESEND"; runId: RunId; intentId: string }
   | { type: "SETTINGS_DESIRED"; runId: RunId; model?: string; approval_mode?: "ask" | "allow" }
+  | { type: "SETTINGS_LOAD" | "SETTINGS_WRITE"; runId: SessionId; operationId: OperationId }
+  | { type: "CATALOG_LOAD"; runId?: SessionId; operationId: OperationId }
+  | { type: "CATALOG_OK"; operationId: OperationId; catalog: ModelCatalog }
+  | { type: "CATALOG_FAIL"; operationId: OperationId; error: string }
   | { type: "STOP"; runId: SessionId; operationId?: OperationId }
   | { type: "STOP_OK" | "STOP_FAIL"; runId: SessionId; operationId: OperationId }
   | { type: "DISCONNECT" }
@@ -90,7 +107,7 @@ export type WorkspaceEvent =
   | { type: "SETTINGS_FAIL"; runId: SessionId; operationId: OperationId; error: string };
 
 const canonical = (state: WorkspaceState, id: RunId): RunId => state.aliases.get(id as DraftRunId) ?? id;
-const blank = (id: RunId): RunRecord => ({ id, lifecycle: id.startsWith("draft:") ? { kind: "draft" } : { kind: "opening" }, text: "", attachments: [], deliveries: new Map(), model: { choice: "default" }, settings: { kind: "unknown" } });
+const blank = (id: RunId): RunRecord => ({ id, lifecycle: id.startsWith("draft:") ? { kind: "draft" } : { kind: "opening" }, text: "", attachments: [], deliveries: new Map(), model: { choice: "default" }, settings: {} });
 const operationMatches = (record: RunRecord | undefined, operationId: OperationId) => record?.lifecycle.kind === "creating" ? record.lifecycle.operationId === operationId : record?.lifecycle.kind === "opening" ? !record.lifecycle.operationId || record.lifecycle.operationId === operationId : false;
 
 /** Pure owner of run identity, lifecycle, attachment, settings, delivery, and browser-entry policy. */
@@ -111,8 +128,9 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     case "REMOVE_ATTACHMENT": update(event.runId, (record) => ({ ...record, attachments: record.attachments.filter((_, index) => index !== event.index) })); break;
     case "DELIVERY_SETTLE": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); const delivery = deliveries.get(event.intentId); deliveries.delete(event.intentId); if (!delivery || !event.accepted) return { ...record, deliveries }; return { ...record, text: record.text.startsWith(delivery.text) ? record.text.slice(delivery.text.length) : record.text, attachments: record.attachments.filter((image) => !delivery.images.includes(image)), deliveries }; }); break;
     case "PROMOTE": { const source = runs.get(event.runId) ?? blank(event.runId); const target = runs.get(event.sessionId); runs.delete(event.runId); runs.set(event.sessionId, target && (target.text || target.attachments.length || target.deliveries.size) ? target : { ...source, id: event.sessionId, lifecycle: { kind: "opening" } }); aliases.set(event.runId, event.sessionId); if (entry.run === event.runId) entry = { ...entry, run: event.sessionId }; else notice = { runId: event.sessionId }; break; }
-    case "MODEL_SET": update(event.runId, (record) => ({ ...record, model: event.model })); break;
-    case "APPROVAL_MODE_SET": update(event.runId, (record) => ({ ...record, settings: record.settings.kind === "ready" ? { ...record.settings, approval_mode: event.approval_mode } : { kind: "ready", approval_mode: event.approval_mode } })); break;
+    case "MODEL_SET": update(event.runId, (record) => ({ ...record, model: { ...event.model, loaded: record.model.loaded, deferred: record.model.deferred }, settings: { ...record.settings, desired: { ...record.settings.desired, model: event.model.choice === "explicit" ? event.model.model : undefined } } })); break;
+    case "MODEL_DEFERRED": update(event.runId, (record) => ({ ...record, model: { ...record.model, deferred: event.deferred } })); break;
+    case "APPROVAL_MODE_SET": update(event.runId, (record) => ({ ...record, settings: { ...record.settings, desired: { ...record.settings.desired, approval_mode: event.approval_mode }, error: undefined } })); break;
     case "DISMISS_NOTICE": notice = undefined; break;
     case "NEW_RUN":
       runs.set(event.runId, blank(event.runId)); entry = { id: event.entryId, run: event.runId };
@@ -140,7 +158,7 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
       break;
     case "RESUME_OK":
       if (attachment.kind === "attached" && attachment.turn !== "idle" && attachment.sessionId !== event.runId) break;
-      attachment = { kind: "attached", sessionId: event.runId, turn: "idle" }; update(event.runId, (record) => ({ ...record, lifecycle: { kind: "opening", operationId: event.operationId }, settings: { kind: "loading", operationId: event.operationId, ...(record.settings.kind === "unknown" && record.settings.desired ? { desired: record.settings.desired } : {}) } })); effects.push({ type: "load-settings", runId: event.runId, operationId: event.operationId });
+      attachment = { kind: "attached", sessionId: event.runId, turn: "idle" }; update(event.runId, (record) => ({ ...record, lifecycle: { kind: "opening", operationId: event.operationId }, settings: { ...record.settings, pending: { operationId: event.operationId, kind: "load" }, error: undefined }, model: { ...record.model, pending: event.operationId, error: undefined } })); effects.push({ type: "load-settings", runId: event.runId, operationId: event.operationId });
       for (const intentId of runs.get(event.runId)?.deliveries.keys() ?? []) effects.push({ type: "delivery-status", runId: event.runId, operationId: crypto.randomUUID() as OperationId, intentId }); break;
     case "RESUME_BUSY": update(event.runId, (record) => ({ ...record, lifecycle: { kind: "opening", operationId: event.operationId, waitingForIdle: event.owner } })); break;
     case "RESUME_FAIL": update(event.runId, (record) => operationMatches(record, event.operationId) ? { ...record, lifecycle: { kind: "failed", error: event.error } } : record); break;
@@ -152,7 +170,12 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     case "DELIVERY_RESEND": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); const delivery = deliveries.get(event.intentId); if (delivery?.state === "dropped") { const operationId = crypto.randomUUID() as OperationId; deliveries.set(event.intentId, { ...delivery, operationId, state: "retrying" }); effects.push({ type: "deliver", runId: record.id, operationId, intentId: event.intentId }); } return { ...record, deliveries }; }); break;
     case "DELIVERY_RECONCILE": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); for (const [intentId, delivery] of deliveries) { if (delivery.state === "dropped" || delivery.state === "requesting") continue; const operationId = crypto.randomUUID() as OperationId; deliveries.set(intentId, { ...delivery, operationId }); effects.push({ type: "delivery-status", runId: record.id as SessionId, operationId, intentId }); } return { ...record, deliveries }; }); break;
     case "DELIVERY_STATUS": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); const delivery = deliveries.get(event.intentId); if (delivery?.operationId !== event.operationId) return record; if (event.status === "delivered") deliveries.delete(event.intentId); else if (delivery.state !== "dropped") { const operationId = crypto.randomUUID() as OperationId; deliveries.set(event.intentId, { ...delivery, operationId, state: "retrying" }); effects.push({ type: "deliver", runId: record.id, operationId, intentId: event.intentId }); } return { ...record, deliveries }; }); break;
-    case "SETTINGS_DESIRED": update(event.runId, (record) => ({ ...record, settings: { kind: "unknown", desired: { model: event.model, approval_mode: event.approval_mode } } })); break;
+    case "SETTINGS_DESIRED": update(event.runId, (record) => ({ ...record, model: event.model === undefined ? record.model : { ...(event.model ? { choice: "explicit" as const, model: event.model } : { choice: "default" as const, resolvedDefault: record.model.resolvedDefault }), loaded: record.model.loaded, deferred: record.model.deferred }, settings: { ...record.settings, desired: { ...record.settings.desired, ...(event.model !== undefined ? { model: event.model || undefined } : {}), ...(event.approval_mode !== undefined ? { approval_mode: event.approval_mode } : {}) }, error: undefined } })); break;
+    case "SETTINGS_LOAD": update(event.runId, (record) => { effects.push({ type: "load-settings", runId: event.runId, operationId: event.operationId }); return { ...record, settings: { ...record.settings, pending: { operationId: event.operationId, kind: "load" }, error: undefined }, model: { ...record.model, pending: event.operationId, error: undefined } }; }); break;
+    case "SETTINGS_WRITE": update(event.runId, (record) => { const settings = { ...record.settings.loaded, ...record.settings.desired }; effects.push({ type: "set-settings", runId: event.runId, operationId: event.operationId, settings }); return { ...record, settings: { ...record.settings, pending: { operationId: event.operationId, kind: "write" }, error: undefined }, model: { ...record.model, pending: event.operationId, error: undefined } }; }); break;
+    case "CATALOG_LOAD": state = { ...state, catalogPending: event.operationId, catalogError: undefined }; effects.push({ type: "load-catalog", operationId: event.operationId, ...(event.runId ? { runId: event.runId } : {}) }); break;
+    case "CATALOG_OK": if (state.catalogPending === event.operationId) { state = { ...state, modelCatalog: event.catalog, catalogPending: undefined, catalogError: undefined }; } break;
+    case "CATALOG_FAIL": if (state.catalogPending === event.operationId) state = { ...state, catalogPending: undefined, catalogError: event.error }; break;
     case "STOP": { const operationId = event.operationId ?? crypto.randomUUID() as OperationId; update(event.runId, (record) => ({ ...record, stopOperation: operationId })); effects.push({ type: "abort", runId: event.runId, operationId }); break; }
     case "STOP_OK": update(event.runId, (record) => record.stopOperation !== event.operationId ? record : ({ ...record, stopOperation: undefined, deliveries: new Map([...record.deliveries].map(([id, delivery]) => [id, delivery.method === "steer" ? { ...delivery, state: "dropped" as const } : delivery])) })); break;
     case "STOP_FAIL": update(event.runId, (record) => record.stopOperation === event.operationId ? { ...record, stopOperation: undefined } : record); break;
@@ -161,10 +184,10 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
       effects.push({ type: "status" });
       if (attachment.kind === "disconnected" && attachment.lastAttached) for (const intentId of runs.get(attachment.lastAttached)?.deliveries.keys() ?? []) effects.push({ type: "delivery-status", runId: attachment.lastAttached, operationId: crypto.randomUUID() as OperationId, intentId });
       break;
-    case "SETTINGS_OK": update(event.runId, (record) => record.settings.kind === "loading" && record.settings.operationId !== event.operationId ? record : { ...record, settings: { kind: "ready", model: (record.settings.kind === "unknown" || record.settings.kind === "loading") ? record.settings.desired?.model ?? event.model : event.model, approval_mode: (record.settings.kind === "unknown" || record.settings.kind === "loading") ? record.settings.desired?.approval_mode ?? event.approval_mode : event.approval_mode } }); break;
-    case "SETTINGS_FAIL": update(event.runId, (record) => record.settings.kind === "loading" && record.settings.operationId !== event.operationId ? record : { ...record, settings: { kind: "failed", error: event.error } }); break;
+    case "SETTINGS_OK": update(event.runId, (record) => record.settings.pending?.operationId !== event.operationId ? record : { ...record, settings: { loaded: { model: event.model, approval_mode: event.approval_mode }, desired: record.settings.desired }, model: { ...record.model, loaded: event.model, pending: undefined, error: undefined } }); break;
+    case "SETTINGS_FAIL": update(event.runId, (record) => record.settings.pending?.operationId !== event.operationId ? record : { ...record, settings: { ...record.settings, pending: undefined, error: event.error }, model: { ...record.model, pending: undefined, error: event.error } }); break;
   }
-  return { state: { entry, runs, aliases, attachment, ...(notice ? { notice } : {}) }, effects };
+  return { state: { ...state, entry, runs, aliases, attachment, ...(notice ? { notice } : { notice: undefined }) }, effects };
 }
 
 export const selectedRun = (state: WorkspaceState) => state.runs.get(canonical(state, state.entry.run));
@@ -180,7 +203,9 @@ const parseMap = (storage: RunStorage | undefined, key: string): Record<string, 
 /** React facade over the live reducer. It owns no run facts; every change is a WorkspaceEvent. */
 export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefined = globalThis.localStorage, draftStorage: RunStorage | undefined = globalThis.sessionStorage, initialEntry: BrowserEntry = { id: "initial" as EntryId, run: "draft:initial" as DraftRunId }) {
   const seed = initialEntry.run;
-  let state: WorkspaceState = { entry: initialEntry, runs: new Map(), aliases: new Map(), attachment: { kind: "detached" } };
+  let cachedCatalog: ModelCatalog | undefined;
+  try { const raw = JSON.parse(storage?.getItem("gamma-catalog") ?? "null"); cachedCatalog = { models: catalogModels(raw), providers: catalogProviders(raw) }; } catch {}
+  let state: WorkspaceState = { entry: initialEntry, runs: new Map(), aliases: new Map(), attachment: { kind: "detached" }, ...(cachedCatalog ? { modelCatalog: cachedCatalog } : {}) };
   const listeners = new Set<() => void>();
   let active: RunId = seed;
   let defaults = parseMap(storage, DEFAULTS_KEY);
@@ -206,6 +231,7 @@ export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefi
     get(id: string) { return value(id); },
     getEntry() { return state.entry; },
     getNotice() { return state.notice ?? null; },
+    getCatalog() { return state; },
     dispatch,
     subscribe(listener: () => void) { listeners.add(listener); return () => listeners.delete(listener); },
     activate(id: string, initialModel: RunModel = { choice: "default" }) { active = key(id); const existed = state.runs.has(active); value(active); if (!existed) dispatch({ type: "MODEL_SET", runId: active, model: initialModel }); evict(); },
@@ -218,7 +244,12 @@ export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefi
     settleDelivery(id: string, deliveryId: string, status: "accepted" | "rejected") { const delivery = value(id).deliveries.get(deliveryId); if (!delivery) return; const kept = value(id).attachments.filter((image) => !delivery.images.includes(image)); if (status === "accepted") revoke(delivery.images.filter((image) => !kept.includes(image))); dispatch({ type: "DELIVERY_SETTLE", runId: key(id), intentId: deliveryId, accepted: status === "accepted" }); queueDraft(id, value(id).text); evict(); },
     promote(from: string, to: string) { if (from === to) return; dispatch({ type: "PROMOTE", runId: from as DraftRunId, sessionId: to as SessionId }); if (drafts[from]) { drafts[to] = drafts[from]; delete drafts[from]; queueDraft(to, drafts[to]!); } if (active === from) active = to as SessionId; },
     setModel(id: string, model: RunModel) { dispatch({ type: "MODEL_SET", runId: key(id), model }); },
+    setModelDeferred(id: string, deferred: boolean) { dispatch({ type: "MODEL_DEFERRED", runId: key(id), deferred }); },
     setApprovalMode(id: string, approval_mode: "ask" | "allow") { dispatch({ type: "APPROVAL_MODE_SET", runId: key(id), approval_mode }); },
+    desireSettings(id: string, settings: SessionSettings) { dispatch({ type: "SETTINGS_DESIRED", runId: key(id), ...settings }); },
+    loadSettings(id: string, operationId: OperationId) { const runId = key(id); if (!runId.startsWith("draft:")) dispatch({ type: "SETTINGS_LOAD", runId: runId as SessionId, operationId }); },
+    writeSettings(id: string, operationId: OperationId) { const runId = key(id); if (!runId.startsWith("draft:")) dispatch({ type: "SETTINGS_WRITE", runId: runId as SessionId, operationId }); },
+    loadCatalog(id: string | null, operationId: OperationId) { const runId = id ? key(id) : null; dispatch({ type: "CATALOG_LOAD", ...(runId && !runId.startsWith("draft:") ? { runId: runId as SessionId } : {}), operationId }); },
     dismissNotice() { dispatch({ type: "DISMISS_NOTICE" }); },
     resolveDefault(id: string, currentModel: string, createdWithDefault: boolean) { const persisted = defaults[id]; if (persisted) return facade.setModel(id, currentModel === persisted ? { choice: "default", resolvedDefault: persisted } : { choice: "explicit", model: currentModel, resolvedDefault: persisted }); if (createdWithDefault) { persistDefault(id, currentModel); return facade.setModel(id, { choice: "default", resolvedDefault: currentModel }); } facade.setModel(id, { choice: "explicit", model: currentModel }); },
     dispose() { if (persistTimer) { clearTimeout(persistTimer); persistDrafts(); } executeEffects = () => {}; state.runs.forEach((record) => revoke(record.attachments)); state = { ...state, runs: new Map(), aliases: new Map() }; listeners.clear(); },

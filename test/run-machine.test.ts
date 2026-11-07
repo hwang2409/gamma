@@ -18,17 +18,17 @@ class Reference {
   deliveryMethods = new Map<string, string>();
   deliveryOperations = new Map<string, string>();
   stopOperations = new Map<string, string>();
-  settings = new Map<string, string>();
+  settings = new Map<string, { desired?: string; loaded?: string; pending?: string; error?: string }>();
   canonical(id: string) { return this.aliases.get(id) ?? id; }
   apply(event: WorkspaceEvent) {
     switch (event.type) {
       case "NEW_RUN": this.entry = event.entryId; this.selected = event.runId; this.lifecycle.set(event.runId, { kind: "draft" }); break;
       case "NAVIGATED": this.entry = event.entryId; this.selected = this.canonical(event.runId); if (!this.lifecycle.has(this.selected)) this.lifecycle.set(this.selected, { kind: this.selected.startsWith("draft:") ? "draft" : "opening" }); break;
       case "FIRST_SEND": if ((this.lifecycle.get(event.runId)?.kind ?? "draft") === "draft") this.lifecycle.set(event.runId, { kind: "creating", operation: event.operationId }); break;
-      case "NEW_SESSION_OK": if (this.lifecycle.get(event.runId)?.operation === event.operationId) { const old = this.lifecycle.get(event.runId)!; this.lifecycle.delete(event.runId); this.lifecycle.set(event.sessionId, { ...old, kind: "opening" }); this.aliases.set(event.runId, event.sessionId); if (this.selected === event.runId) this.selected = event.sessionId; } break;
+      case "NEW_SESSION_OK": if (this.lifecycle.get(event.runId)?.operation === event.operationId) { const old = this.lifecycle.get(event.runId)!; this.lifecycle.delete(event.runId); this.lifecycle.set(event.sessionId, { ...old, kind: "opening" }); const moved = this.settings.get(event.runId); this.settings.delete(event.runId); if (moved) this.settings.set(event.sessionId, moved); else this.settings.delete(event.sessionId); this.aliases.set(event.runId, event.sessionId); if (this.selected === event.runId) this.selected = event.sessionId; } break;
       case "NEW_SESSION_FAIL": if (this.lifecycle.get(event.runId)?.operation === event.operationId) this.lifecycle.set(event.runId, { kind: "failed" }); break;
       case "STATUS": this.attached = event.sessionId ?? null; this.turn = event.sessionId ? event.turn : null; break;
-      case "RESUME_OK": if (!this.attached || this.turn === "idle" || this.attached === event.runId) { this.attached = event.runId; this.turn = "idle"; this.lifecycle.set(event.runId, { kind: "opening", operation: event.operationId }); } break;
+      case "RESUME_OK": if (!this.attached || this.turn === "idle" || this.attached === event.runId) { this.attached = event.runId; this.turn = "idle"; this.lifecycle.set(event.runId, { kind: "opening", operation: event.operationId }); const value = this.settings.get(event.runId) ?? {}; this.settings.set(event.runId, { ...value, pending: event.operationId, error: undefined }); } break;
       case "RESUME_BUSY": this.lifecycle.set(event.runId, { kind: "opening", operation: event.operationId }); break;
       case "RESUME_FAIL": if (this.lifecycle.get(event.runId)?.operation === event.operationId) this.lifecycle.set(event.runId, { kind: "failed" }); break;
       case "FIRST_PAGE": if (!event.operationId || !this.lifecycle.get(event.runId)?.operation || this.lifecycle.get(event.runId)?.operation === event.operationId) this.lifecycle.set(event.runId, { kind: "open" }); break;
@@ -40,8 +40,10 @@ class Reference {
       case "STOP": this.stopOperations.set(event.runId, event.operationId ?? "generated"); break;
       case "STOP_OK": { if (this.stopOperations.get(event.runId) !== event.operationId) break; this.stopOperations.delete(event.runId); const items = this.deliveries.get(event.runId); for (const [id] of items ?? []) if (this.deliveryMethods.get(id) === "steer") items!.set(id, "dropped"); break; }
       case "STOP_FAIL": if (this.stopOperations.get(event.runId) === event.operationId) this.stopOperations.delete(event.runId); break;
-      case "SETTINGS_DESIRED": this.settings.set(event.runId, event.approval_mode ?? "unknown"); break;
-      case "SETTINGS_OK": this.settings.set(event.runId, event.approval_mode ?? "unknown"); break;
+      case "SETTINGS_DESIRED": { const value = this.settings.get(event.runId) ?? {}; this.settings.set(event.runId, { ...value, desired: event.approval_mode ?? value.desired, error: undefined }); break; }
+      case "SETTINGS_LOAD": case "SETTINGS_WRITE": { const value = this.settings.get(event.runId) ?? {}; this.settings.set(event.runId, { ...value, pending: event.operationId, error: undefined }); break; }
+      case "SETTINGS_OK": { const value = this.settings.get(event.runId); if (value?.pending === event.operationId) this.settings.set(event.runId, { desired: value.desired, loaded: event.approval_mode, pending: undefined }); break; }
+      case "SETTINGS_FAIL": { const value = this.settings.get(event.runId); if (value?.pending === event.operationId) this.settings.set(event.runId, { ...value, pending: undefined, error: event.error }); break; }
       case "DISCONNECT": this.attached = null; this.turn = null; for (const items of this.deliveries.values()) for (const [id, state] of items) if (state === "requesting") items.set(id, "queued"); break;
       default: break;
     }
@@ -51,14 +53,14 @@ class Reference {
 const random = (seed: number) => () => { seed = Math.imul(seed ^ seed >>> 15, 1 | seed); seed ^= seed + Math.imul(seed ^ seed >>> 7, 61 | seed); return ((seed ^ seed >>> 14) >>> 0) / 4294967296; };
 
 test("workspace reducer matches an independent model across navigation, activity, and stale completions", () => {
-  const names = ["NEW_RUN", "NAVIGATED", "FIRST_SEND", "NEW_SESSION_OK", "NEW_SESSION_FAIL", "STATUS", "RESUME_OK", "RESUME_BUSY", "RESUME_FAIL", "FIRST_PAGE", "TURN_START", "TURN_END", "DELIVERY_BEGIN", "DELIVERY_ACK", "DELIVERY_STATUS", "STOP", "STOP_OK", "STOP_FAIL", "DISCONNECT", "RECONNECT", "SETTINGS_DESIRED", "SETTINGS_OK", "SETTINGS_FAIL"] as const;
+  const names = ["NEW_RUN", "NAVIGATED", "FIRST_SEND", "NEW_SESSION_OK", "NEW_SESSION_FAIL", "STATUS", "RESUME_OK", "RESUME_BUSY", "RESUME_FAIL", "FIRST_PAGE", "TURN_START", "TURN_END", "DELIVERY_BEGIN", "DELIVERY_ACK", "DELIVERY_STATUS", "STOP", "STOP_OK", "STOP_FAIL", "DISCONNECT", "RECONNECT", "SETTINGS_DESIRED", "SETTINGS_LOAD", "SETTINGS_WRITE", "SETTINGS_OK", "SETTINGS_FAIL"] as const;
   for (let seed = 0; seed < 100; seed++) {
     const next = random(seed + 1); let state = initial(); const reference = new Reference(); const prefix: WorkspaceEvent[] = [];
     for (let step = 0; step < 500; step++) {
       const n = Math.floor(next() * 8); const d = draft(n); const s = session(n); const op = operation(Math.floor(next() * 20));
       const name = names[Math.floor(next() * names.length)]!;
       const event = ({
-        NEW_RUN: { type: "NEW_RUN", entryId: entry(step + 1), runId: draft(step + 100) }, NAVIGATED: { type: "NAVIGATED", entryId: entry(step + 1), runId: next() < .35 ? d : s }, FIRST_SEND: { type: "FIRST_SEND", runId: d, operationId: op }, NEW_SESSION_OK: { type: "NEW_SESSION_OK", runId: d, sessionId: s, operationId: op }, NEW_SESSION_FAIL: { type: "NEW_SESSION_FAIL", runId: d, operationId: op, error: "create failed" }, STATUS: { type: "STATUS", ...(next() < .2 ? {} : { sessionId: s }), turn: next() < .6 ? "idle" : "running" }, RESUME_OK: { type: "RESUME_OK", runId: s, operationId: op }, RESUME_BUSY: { type: "RESUME_BUSY", runId: s, owner: session((n + 1) % 8), operationId: op }, RESUME_FAIL: { type: "RESUME_FAIL", runId: s, operationId: op, error: "open failed" }, FIRST_PAGE: { type: "FIRST_PAGE", runId: s, operationId: op, transcript: `history ${n}` }, TURN_START: { type: "TURN_START", runId: s, turn: "running" }, TURN_END: { type: "TURN_END", runId: s }, DELIVERY_BEGIN: { type: "DELIVERY_BEGIN", runId: s, delivery: { id: `i-${n}`, attemptId: `i-${n}`, operationId: op, method: next() < .5 ? "send" : "steer", text: `message ${n}`, images: [], state: "requesting" }, operationId: op }, DELIVERY_ACK: { type: "DELIVERY_ACK", runId: s, intentId: `i-${n}`, operationId: op, attemptId: `i-${n}`, queued: next() < .5 }, DELIVERY_STATUS: { type: "DELIVERY_STATUS", runId: s, intentId: `i-${n}`, operationId: op, status: next() < .5 ? "delivered" : "dropped" }, STOP: { type: "STOP", runId: s, operationId: op }, STOP_OK: { type: "STOP_OK", runId: s, operationId: op }, STOP_FAIL: { type: "STOP_FAIL", runId: s, operationId: op }, DISCONNECT: { type: "DISCONNECT" }, RECONNECT: { type: "RECONNECT" }, SETTINGS_DESIRED: { type: "SETTINGS_DESIRED", runId: s, approval_mode: next() < .5 ? "ask" : "allow" }, SETTINGS_OK: { type: "SETTINGS_OK", runId: s, operationId: op, model: "m" }, SETTINGS_FAIL: { type: "SETTINGS_FAIL", runId: s, operationId: op, error: "settings failed" },
+        NEW_RUN: { type: "NEW_RUN", entryId: entry(step + 1), runId: draft(step + 100) }, NAVIGATED: { type: "NAVIGATED", entryId: entry(step + 1), runId: next() < .35 ? d : s }, FIRST_SEND: { type: "FIRST_SEND", runId: d, operationId: op }, NEW_SESSION_OK: { type: "NEW_SESSION_OK", runId: d, sessionId: s, operationId: op }, NEW_SESSION_FAIL: { type: "NEW_SESSION_FAIL", runId: d, operationId: op, error: "create failed" }, STATUS: { type: "STATUS", ...(next() < .2 ? {} : { sessionId: s }), turn: next() < .6 ? "idle" : "running" }, RESUME_OK: { type: "RESUME_OK", runId: s, operationId: op }, RESUME_BUSY: { type: "RESUME_BUSY", runId: s, owner: session((n + 1) % 8), operationId: op }, RESUME_FAIL: { type: "RESUME_FAIL", runId: s, operationId: op, error: "open failed" }, FIRST_PAGE: { type: "FIRST_PAGE", runId: s, operationId: op, transcript: `history ${n}` }, TURN_START: { type: "TURN_START", runId: s, turn: "running" }, TURN_END: { type: "TURN_END", runId: s }, DELIVERY_BEGIN: { type: "DELIVERY_BEGIN", runId: s, delivery: { id: `i-${n}`, attemptId: `i-${n}`, operationId: op, method: next() < .5 ? "send" : "steer", text: `message ${n}`, images: [], state: "requesting" }, operationId: op }, DELIVERY_ACK: { type: "DELIVERY_ACK", runId: s, intentId: `i-${n}`, operationId: op, attemptId: `i-${n}`, queued: next() < .5 }, DELIVERY_STATUS: { type: "DELIVERY_STATUS", runId: s, intentId: `i-${n}`, operationId: op, status: next() < .5 ? "delivered" : "dropped" }, STOP: { type: "STOP", runId: s, operationId: op }, STOP_OK: { type: "STOP_OK", runId: s, operationId: op }, STOP_FAIL: { type: "STOP_FAIL", runId: s, operationId: op }, DISCONNECT: { type: "DISCONNECT" }, RECONNECT: { type: "RECONNECT" }, SETTINGS_DESIRED: { type: "SETTINGS_DESIRED", runId: s, approval_mode: next() < .5 ? "ask" : "allow" }, SETTINGS_LOAD: { type: "SETTINGS_LOAD", runId: s, operationId: op }, SETTINGS_WRITE: { type: "SETTINGS_WRITE", runId: s, operationId: op }, SETTINGS_OK: { type: "SETTINGS_OK", runId: s, operationId: op, model: "m" }, SETTINGS_FAIL: { type: "SETTINGS_FAIL", runId: s, operationId: op, error: "settings failed" },
       } as const)[name] as WorkspaceEvent;
       prefix.push(event); reference.apply(event); const result = reduceWorkspace(state, event); state = result.state;
       try {
@@ -70,7 +72,14 @@ test("workspace reducer matches an independent model across navigation, activity
         for (const effect of result.effects) {
           if (effect.type === "history-replace-current") expect(effect.entryId).toBe(state.entry.id);
           if (effect.type === "resume" || effect.type === "new-session") expect(state.attachment.kind !== "attached" || state.attachment.turn === "idle").toBeTrue();
-          if (effect.type === "load-settings" || effect.type === "set-settings") expect(state.attachment.kind === "attached" && state.attachment.sessionId === effect.runId).toBeTrue();
+          if (effect.type === "load-settings" || effect.type === "set-settings") { expect(state.runs.get(effect.runId)?.settings.pending?.operationId).toBe(effect.operationId); expect(effect.runId).toBe(state.runs.get(effect.runId)?.id); }
+        }
+        for (const [runId, expected] of reference.settings) {
+          const actual = state.runs.get(runId)?.settings;
+          expect(actual?.desired?.approval_mode).toBe(expected.desired);
+          expect(actual?.loaded?.approval_mode).toBe(expected.loaded);
+          expect(actual?.pending?.operationId).toBe(expected.pending);
+          expect(actual?.error).toBe(expected.error);
         }
         const owners = new Set<string>();
         for (const [runId, record] of state.runs) for (const [intent, delivery] of record.deliveries) { expect(owners.has(intent)).toBeFalse(); owners.add(intent); expect(runId).toBe(record.id); expect(delivery.state).toBe(reference.deliveries.get(runId)?.get(intent)); }

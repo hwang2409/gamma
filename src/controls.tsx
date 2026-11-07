@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import type { RunStateStore } from "./run-state";
-import type { RunControl } from "./session";
-import { catalogModels, catalogProviders, settingModel, settingsRequest, type SessionSettings } from "./settings";
+import type { DeliveryManager } from "./delivery";
+import { catalogModels, catalogProviders } from "./settings";
 
 const CATALOG = "gamma-catalog";
 const MODEL = "gamma-model";
@@ -78,98 +78,62 @@ function ModelPicker({ value, models, resolvedDefault, allowDefault, onChange }:
  * The run's model and approval mode, from zeta. A blank run has no session yet: it shows zeta's catalog and the mode
  * the first send starts the run with (`nextRunModel`, then `set_settings` for YOLO).
  */
-export function RunSettings({ available, runs, sessionId, createdWithDefault, running, yolo, onYolo, store, runId }: { available: boolean; runs: RunControl; sessionId: string | null; createdWithDefault: boolean; running: boolean; yolo: boolean; onYolo(value: boolean): void; store: RunStateStore; runId: string }) {
-  const [unsupported, setUnsupported] = useState(false);
-  const [settings, setSettings] = useState<SessionSettings>({});
-  const [models, setModels] = useState<string[]>(() => cachedCatalog().models);
+export function RunSettings({ available, deliveries, sessionId, createdWithDefault, running, store, runId }: { available: boolean; deliveries: DeliveryManager; sessionId: string | null; createdWithDefault: boolean; running: boolean; store: RunStateStore; runId: string }) {
   const record = useSyncExternalStore(store.subscribe, () => store.get(runId));
-  const selected = record.model.choice === "explicit" ? record.model.model : "";
-  const resolvedDefault = record.model.resolvedDefault;
-  const [error, setError] = useState("");
+  const catalogState = useSyncExternalStore(store.subscribe, store.getCatalog);
+  const settings = record.settings;
+  const shown = sessionId ? (settings.pending ? settings.desired : settings.loaded ?? settings.desired) : settings.desired;
+  const shownModel = settings.error && sessionId ? settings.loaded?.model : shown?.model;
+  const selected = shownModel && shownModel !== record.model.resolvedDefault ? shownModel : "";
+  const yolo = (settings.error && sessionId ? settings.loaded : shown)?.approval_mode === "allow";
   const [confirmYolo, setConfirmYolo] = useState(false);
-  const [modelDeferred, setModelDeferred] = useState(false);
   const confirmRef = useRef<HTMLDivElement>(null);
   const approvalButton = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (!available) return;
-    let live = true;
-    setError("");
-    void runs.modelCatalog(sessionId).then((catalog) => {
-      if (!live) return;
-      localStorage.setItem(CATALOG, JSON.stringify(catalog));
-      setModels(catalogModels(catalog));
-    }, (cause: unknown) => {
-      if (!live) return;
-      if ((cause as { code?: unknown }).code === -32601) setUnsupported(true);
-    });
-    if (sessionId) void runs.loadSettings(sessionId).then((value) => {
-      if (!live) return;
-      const next = settingModel(value);
-      setSettings(next);
-      if (next.model) store.resolveDefault(runId, next.model, createdWithDefault);
-      // A blank run's desired mode survives promotion; an older settings read must not reverse what first-send applies.
-      if (record.settings.kind !== "ready") onYolo(next.approval_mode === "allow");
-    }, (cause: unknown) => { if (live) setError(cause instanceof Error ? cause.message : "settings unavailable"); });
-    return () => { live = false; };
-  }, [available, runs, sessionId, createdWithDefault, onYolo, store, runId, record.settings.kind]);
-  useEffect(() => { if (!running) setModelDeferred(false); }, [running]);
+    void deliveries.loadCatalog(sessionId).catch(() => {});
+    if (sessionId) void deliveries.loadSettings(sessionId).catch(() => {});
+  }, [available, deliveries, sessionId]);
+  useEffect(() => {
+    if (!sessionId || running || !record.model.deferred) return;
+    void deliveries.changeSettings(sessionId, {}).then(() => store.setModelDeferred(runId, false)).catch(() => {});
+  }, [deliveries, running, record.model.deferred, runId, sessionId, store]);
+  useEffect(() => {
+    if (sessionId && settings.loaded?.model) store.resolveDefault(runId, settings.loaded.model, createdWithDefault);
+  }, [sessionId, settings.loaded?.model, store, runId, createdWithDefault]);
   const closeConfirm = useCallback(() => { setConfirmYolo(false); approvalButton.current?.focus(); }, []);
   useDismiss(confirmYolo, confirmRef, closeConfirm);
   useEffect(() => { if (confirmYolo) confirmRef.current?.querySelector<HTMLButtonElement>("button[data-safe]")?.focus(); }, [confirmYolo]);
-  if (!available || unsupported) return null;
-  const change = async (patch: Partial<SessionSettings>) => {
-    setError("");
-    try {
-      if (!sessionId) throw new Error("the run has not started");
-      const next = settingModel(await runs.changeSettings(sessionId, settingsRequest(settings, patch)));
-      setSettings(next);
-      onYolo(next.approval_mode === "allow");
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "could not change settings"); }
+  if (!available || catalogState.catalogError?.includes("-32601")) return null;
+  const change = (patch: import("./run-state").SessionSettings) => {
+    if (!sessionId) { store.desireSettings(runId, patch); return; }
+    if (running) { store.desireSettings(runId, patch); store.setModelDeferred(runId, true); return; }
+    void deliveries.changeSettings(sessionId, patch).catch(() => {});
   };
   const pick = (model: string) => {
-    if (running) setModelDeferred(true);
-    if (!sessionId) {
-      if (model) localStorage.setItem(MODEL, model); else localStorage.removeItem(MODEL);
-      store.setModel(runId, model ? { choice: "explicit", model } : { choice: "default" });
-      return;
-    }
-    const target = model || resolvedDefault;
-    if (!target) return;
-    store.setModel(runId, model ? { choice: "explicit", model, resolvedDefault } : { choice: "default", resolvedDefault });
-    void change({ model: target });
+    if (model) localStorage.setItem(MODEL, model); else localStorage.removeItem(MODEL);
+    if (!sessionId) { store.setModel(runId, model ? { choice: "explicit", model } : { choice: "default" }); return; }
+    const target = model || record.model.resolvedDefault;
+    if (target) change({ model: target });
   };
-  const toggle = () => {
-    if (!yolo) { setConfirmYolo(true); return; }
-    if (sessionId) void change({ approval_mode: "ask" });
-    else onYolo(false);
-  };
-  const confirmAllow = () => { closeConfirm(); if (sessionId) void change({ approval_mode: "allow" }); else onYolo(true); };
+  const toggle = () => { if (!yolo) setConfirmYolo(true); else change({ approval_mode: "ask" }); };
+  const confirmAllow = () => { closeConfirm(); change({ approval_mode: "allow" }); };
   return (
     <>
-      <ModelPicker value={selected} models={models} resolvedDefault={sessionId ? resolvedDefault : undefined} allowDefault={!sessionId || Boolean(resolvedDefault)} onChange={pick} />
-      <button
-        ref={approvalButton}
-        type="button"
-        className="composer-tool approval-mode"
-        data-yolo={yolo || undefined}
-        aria-pressed={yolo}
-        aria-label={yolo ? "approval mode: YOLO, tools run without asking" : "approval mode: Ask, tools ask before they run"}
-        title={yolo ? "tools run without asking · press to ask again" : "tools ask before they run · press for YOLO"}
-        onClick={toggle}
-      >
+      <ModelPicker value={selected} models={[...(catalogState.modelCatalog?.models ?? [])]} resolvedDefault={sessionId ? record.model.resolvedDefault : undefined} allowDefault={!sessionId || Boolean(record.model.resolvedDefault)} onChange={pick} />
+      <button ref={approvalButton} type="button" className="composer-tool approval-mode" data-yolo={yolo || undefined} aria-pressed={yolo} aria-label={yolo ? "approval mode: YOLO, tools run without asking" : "approval mode: Ask, tools ask before they run"} title={yolo ? "tools run without asking · press to ask again" : "tools ask before they run · press for YOLO"} onClick={toggle}>
         {yolo ? "YOLO" : "Ask"}
       </button>
-      {modelDeferred ? <span className="model-deferred" role="status">model applies to the next turn</span> : null}
-      {error ? <span className="settings-error" role="alert" title={error}>{error}</span> : null}
-      {confirmYolo ? <div ref={confirmRef} className="confirm-popover" role="dialog" aria-label="allow tools without asking" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setConfirmYolo(false); }}>
-        <p>allow tools to run without asking in this run?</p>
-        <div className="actions"><button type="button" className="confirm-danger" onClick={confirmAllow}>allow</button><button type="button" className="confirm-primary" data-safe onClick={closeConfirm}>keep asking</button></div>
+      {record.model.deferred ? <span className="model-deferred" role="status">settings apply to the next turn</span> : null}
+      {settings.error ? <span className="settings-error" role="alert" title={settings.error}>{settings.error}</span> : null}
+      {confirmYolo ? <div ref={confirmRef} className="yolo-confirm" role="dialog" aria-modal="true" aria-label="enable YOLO mode">
+        <strong>run tools without asking?</strong><span>commands can change files and run programs.</span>
+        <div><button type="button" className="ghost" data-safe onClick={closeConfirm}>cancel</button><button type="button" className="danger" onClick={confirmAllow}>allow</button></div>
       </div> : null}
     </>
   );
 }
 
-/** The header's settings popover: theme and vim keys. */
 export function SettingsMenu({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);

@@ -379,19 +379,6 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
       set({ active: owner, attached: status.session?.session_id ?? state.attached });
       if (!owner && state.selected && !state.selected.startsWith("draft:")) await open(state.selected, status);
     },
-    modelCatalog(sessionId?: string | null) {
-      if (!client) throw new Error("not connected to zeta serve");
-      return client.request("model_catalog", sessionId ? { session_id: sessionId } : {}, { timeoutMs: 15_000 });
-    },
-    loadSettings(sessionId: string) {
-      if (!client || state.attached !== sessionId) throw Object.assign(new Error("session is not attached"), { code: -32003 });
-      return client.request("session_settings", { session_id: sessionId }, { timeoutMs: 15_000 });
-    },
-    async changeSettings(sessionId: string, settings: Record<string, unknown>) {
-      if (!client || state.attached !== sessionId) throw Object.assign(new Error("session is not attached"), { code: -32003 });
-      await client.request("set_settings", { session_id: sessionId, ...settings });
-      return client.request("session_settings", { session_id: sessionId }, { timeoutMs: 15_000 });
-    },
     sendImages(sessionId: string, deliveryId: string, text: string, images: readonly { name: string; mime_type: string; data: string }[]) {
       if (!client || state.attached !== sessionId) throw Object.assign(new Error("session is not attached"), { code: -32003 });
       return client.request("send_images", { session_id: sessionId, delivery_id: deliveryId, text, images }, { timeoutMs: 30_000 });

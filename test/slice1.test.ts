@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { addImage, MAX_BYTES, MAX_IMAGES, readImage, type QueuedImage } from "../src/image-queue";
 import { settingModel, settingsRequest, catalogModels, catalogProviders } from "../src/settings";
-import { applyFirstTurnSettings } from "../src/app";
 
 const image = (size: number): QueuedImage => ({ name: "a.png", mime_type: "image/png", data: "AA==", url: "blob:a", size });
 describe("slice 1 settings", () => {
@@ -22,24 +21,4 @@ describe("slice 1 image queue", () => {
     const nearLimit = await readImage(new File([new Uint8Array(MAX_BYTES - 1)], "near-limit.png", { type: "image/png" }));
     expect(nearLimit.data).toHaveLength(Math.ceil((MAX_BYTES - 1) / 3) * 4);
   });
-});
-
-describe("slice 1 first turn", () => {
-  test("applies approval mode after creating a default-model session", async () => {
-    const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
-    const target = { request: async (method: string, params: Record<string, unknown>) => {
-      calls.push({ method, params });
-      return method === "session_settings" ? { model: "claude-opus-4-6", approval_mode: "ask" } : { model: "claude-opus-4-6", approval_mode: "allow" };
-    } } as any;
-    await applyFirstTurnSettings(target, "s-new", {}, true);
-    expect(calls).toEqual([
-      { method: "session_settings", params: { session_id: "s-new" } },
-      { method: "set_settings", params: { session_id: "s-new", model: "claude-opus-4-6", approval_mode: "allow" } },
-    ]);
-  });
-
-  test("keeps the resolved default model as the choice after the first send", () => {
-    expect(settingsRequest({ model: "claude-opus-4-6", approval_mode: "ask" }, { approval_mode: "allow" })).toEqual({ model: "claude-opus-4-6", approval_mode: "allow" });
-  });
-
 });

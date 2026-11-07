@@ -11,7 +11,6 @@ import { createRun, sessionTitle, type OpenRun, type RunControl, type RunState, 
 import { ThemePicker, useTheme } from "./theme";
 import { GammaComposer, type Submit } from "./composer";
 import { nextRunModel, RunSettings, SettingsMenu, useVimSetting, VimToggle } from "./controls";
-import { settingModel, settingsRequest } from "./settings";
 import { createRunStateStore, type DraftRunId, type EntryId, type RunId, type RunStateStore } from "./run-state";
 import { artifactContentUrl, hostBindings, useArtifacts } from "./host-client";
 import type { Artifact } from "./host/types";
@@ -172,7 +171,8 @@ export function App() {
   const store = open?.lease.store ?? blank;
   const selectedRecord = useSyncExternalStore(runState.subscribe, () => runState.get(browserEntry.run));
   const landedNotice = useSyncExternalStore(runState.subscribe, runState.getNotice);
-  const yolo = selectedRecord.settings.kind === "ready" && selectedRecord.settings.approval_mode === "allow";
+  const shownSettings = selectedRecord.settings.error ? selectedRecord.settings.loaded : selectedRecord.settings.pending ? selectedRecord.settings.desired : selectedRecord.settings.loaded ?? selectedRecord.settings.desired;
+  const yolo = shownSettings?.approval_mode === "allow";
   const setYolo = useCallback((value: boolean) => runState.setApprovalMode(browserEntry.run, value ? "allow" : "ask"), [browserEntry.run, runState]);
   const [retryTurn, setRetryTurn] = useState<(() => void) | null>(null);
   const [viewer, setViewer] = useState<any>(null);
@@ -288,12 +288,6 @@ function useAgentPhase(): { kind: "idle" | "thinking" | "approval" } | { kind: "
 }
 
 /** Moves focus to the pending approval's first decision, scrolling the run to it first. */
-export async function applyFirstTurnSettings(target: ZetaClient, sessionId: string, choice: { model?: string; provider?: string }, yolo: boolean) {
-  const approval_mode = yolo ? "allow" : "ask";
-  const current = settingModel(await target.request("session_settings", { session_id: sessionId }));
-  await target.request("set_settings", { session_id: sessionId, ...settingsRequest(current, { approval_mode }) });
-}
-
 function focusApproval() {
   const scroll = document.querySelector<HTMLElement>(".scroll");
   const find = () => scroll?.querySelector<HTMLElement>('[data-part="approval"][data-state="pending"]');
@@ -326,21 +320,20 @@ function StatusLine({ phase }: { phase: RunPhase }) {
   );
 }
 
-async function submitRun({ text, images, steer, deliveryId, connection, runs, deliveries, yolo, runId, onCreated }: { text: string; images: readonly import("./image-queue").QueuedImage[]; steer: boolean; deliveryId: string; connection: Connection; runs: RunControl; deliveries: DeliveryManager; yolo: boolean; runId: string; onCreated(from: string, sessionId: string): void }) {
+async function submitRun({ text, images, steer, deliveryId, connection, runs, deliveries, choice, yolo, runId, onCreated }: { text: string; images: readonly import("./image-queue").QueuedImage[]; steer: boolean; deliveryId: string; connection: Connection; runs: RunControl; deliveries: DeliveryManager; choice: { model?: string; provider?: string }; yolo: boolean; runId: string; onCreated(from: string, sessionId: string): void }) {
   const target = connection.client;
   if (!target) throw new Error("not connected to zeta serve");
   let id = runs.state.open?.id;
   const release = id ? null : runs.holdAttachment();
   try {
     if (!id) {
-      const choice = nextRunModel();
       try { id = await runs.create(choice.model && target.features.includes("new_session_settings") ? { ...choice, approval_mode: yolo ? "allow" : "ask" } : choice); }
       catch (cause) {
         if ((cause as { code?: unknown }).code === -32004) throw new Error("another run has the active zeta turn; wait for it to finish, then send again");
         throw cause;
       }
       onCreated(runId, id);
-      if (!choice.model || !target.features.includes("new_session_settings")) await applyFirstTurnSettings(target, id, choice, yolo);
+      if (!choice.model || !target.features.includes("new_session_settings")) await deliveries.changeSettings(id, { ...(choice.model ? { model: choice.model } : {}), approval_mode: yolo ? "allow" : "ask" });
     }
     if (!images.length) return await deliveries.submit(id, text, steer, deliveryId);
     return await runs.sendImages(id, deliveryId, text, images.map(({ name, mime_type, data }) => ({ name, mime_type, data })));
@@ -356,9 +349,9 @@ function dockPhase(state: ConnectionState, present: RunState, open: OpenRun | nu
   return { kind: "ready" };
 }
 
-function DockComposer({ readOnly, blockedReason, running, vim, onSubmit, onStop, onImageOpen, client, runs, sessionId, yolo, onYolo, runState, runId, createdWithDefault }: { readOnly: string | null; blockedReason: string | null; running: boolean; vim: boolean; onSubmit: Submit; onStop(): Promise<unknown>; onImageOpen(block: any): void; client: ZetaClient | null; runs: RunControl; sessionId: string | null; yolo: boolean; onYolo(value: boolean): void; runState: RunStateStore; runId: string; createdWithDefault: boolean }) {
+function DockComposer({ readOnly, blockedReason, running, vim, onSubmit, onStop, onImageOpen, client, deliveries, sessionId, runState, runId, createdWithDefault }: { readOnly: string | null; blockedReason: string | null; running: boolean; vim: boolean; onSubmit: Submit; onStop(): Promise<unknown>; onImageOpen(block: any): void; client: ZetaClient | null; deliveries: DeliveryManager; sessionId: string | null; runState: RunStateStore; runId: string; createdWithDefault: boolean }) {
   if (readOnly !== null) return <GammaComposer state="read-only" reason={readOnly} vim={vim} onSubmit={onSubmit} onImageOpen={onImageOpen} store={runState} runId={runId} />;
-  return <GammaComposer state={running ? "steerable" : "idle"} blockedReason={blockedReason ?? undefined} vim={vim} autoFocus onSubmit={onSubmit} onStop={running ? onStop : undefined} onImageOpen={onImageOpen} store={runState} runId={runId} footer={<RunSettings available={Boolean(client)} runs={runs} sessionId={sessionId} createdWithDefault={createdWithDefault} running={running} yolo={yolo} onYolo={onYolo} store={runState} runId={runId} />} />;
+  return <GammaComposer state={running ? "steerable" : "idle"} blockedReason={blockedReason ?? undefined} vim={vim} autoFocus onSubmit={onSubmit} onStop={running ? onStop : undefined} onImageOpen={onImageOpen} store={runState} runId={runId} footer={<RunSettings available={Boolean(client)} deliveries={deliveries} sessionId={sessionId} createdWithDefault={createdWithDefault} running={running} store={runState} runId={runId} />} />;
 }
 
 
@@ -399,8 +392,11 @@ function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, ru
 
   const onSubmit: Submit = useCallback(async (text, images, { steer, deliveryId }) => {
     if (runId.startsWith("draft:")) runState.dispatch({ type: "FIRST_SEND", runId: runId as DraftRunId, operationId: crypto.randomUUID() as import("./run-state").OperationId });
-    return submitRun({ text, images, steer, deliveryId, connection, runs, deliveries, yolo, runId, onCreated });
-  }, [connection, runs, deliveries, yolo, runId, onCreated]);
+    const preferred = record.model.choice === "explicit" ? record.model.model : undefined;
+    const local = nextRunModel();
+    const choice = preferred ? { model: preferred, ...(local.model === preferred && local.provider ? { provider: local.provider } : {}) } : {};
+    return submitRun({ text, images, steer, deliveryId, connection, runs, deliveries, choice, yolo, runId, onCreated });
+  }, [connection, runs, deliveries, yolo, runId, onCreated, record.model]);
   const onStop = useCallback(async () => { await deliveries.stop(runId); await runs.refreshStatus(); }, [deliveries, runId, runs]);
   const lastPrompt = useLastPrompt();
 
@@ -412,7 +408,7 @@ function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, ru
   const readOnly = blank ? null : dockReadOnlyReason(open?.id ?? null, view.active);
   const blockedReason = starting ? null : pendingDelivery ? "sending waits while the previous message is pending or retrying" : view.active && blank ? `sending waits for the active run ${view.active}` : dockBlockedReason(state, present, open);
   const sessionId = blank || starting || view.attached !== open?.id ? null : open.id;
-  return <div className="dock"><>{problem ? null : <StatusLine phase={phase} />}</><DockComposer runs={runs} readOnly={readOnly} blockedReason={blockedReason} running={running} vim={vim} onSubmit={onSubmit} onStop={onStop} onImageOpen={onImageOpen} client={client} sessionId={sessionId} createdWithDefault={record.model.choice === "default"} yolo={yolo} onYolo={setYolo} runState={runState} runId={runId} /></div>;
+  return <div className="dock"><>{problem ? null : <StatusLine phase={phase} />}</><DockComposer deliveries={deliveries} readOnly={readOnly} blockedReason={blockedReason} running={running} vim={vim} onSubmit={onSubmit} onStop={onStop} onImageOpen={onImageOpen} client={client} sessionId={sessionId} createdWithDefault={record.model.choice === "default"} runState={runState} runId={runId} /></div>;
 }
 
 /** The last prompt the user sent, so a failed turn can be retried with it. */
