@@ -302,6 +302,39 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
     update();
   };
 
+  const prepareCachedOpen = async (target: ZetaClient, id: string, knownStatus: ServerStatus | undefined, signal: AbortSignal) => {
+    const registration = await register(target, id);
+    if (knownStatus) return { knownStatus, registration };
+    const resumed = await target.request("resume", { session_id: id, ...(registration ? { host_commands: [registration.command] } : {}) }, { timeoutMs: 30_000, signal }) as { session?: SessionMeta };
+    const status = await getStatus(target, signal);
+    attached = id;
+    return { knownStatus: status.session ? status : { ...status, session: resumed.session ?? null }, registration };
+  };
+  const restoreAttached = async (target: ZetaClient, id: string | null) => {
+    if (!id) return false;
+    try {
+      const binding = await register(target, id);
+      await target.request("resume", { session_id: id, ...(binding ? { host_commands: [binding.command] } : {}) }, { timeoutMs: 30_000 });
+      attached = id;
+      return true;
+    } catch { return false; }
+  };
+  const trackCompletion = (target: ZetaClient, mine: number, id: string, opened: Awaited<ReturnType<typeof openSession>>, history: () => OpenRun["history"]) => {
+    void opened.complete.then((result) => {
+      if (mine !== openGeneration || !live(target)) return result.lease?.release();
+      if (result.lease) {
+        transitionRun(state.transition)?.lease.release();
+        transition({ type: "updated", run: { id, lease: result.lease, stale: false, history: { ...history(), complete: true }, syncing: result.syncing } });
+        return;
+      }
+      const run = transitionRun(state.transition);
+      if (run?.id === id) transition({ type: "updated", run: { ...run, history: { ...history(), complete: true }, syncing: result.syncing } });
+    }).catch((error) => {
+      if (mine === openGeneration && live(target) && (error as { name?: string }).name !== "AbortError")
+        transition({ type: "failed", id, error: { id, message: message(error), busy: isBusyError(error) } });
+    });
+  };
+
   const open = async (id: string, knownStatus?: ServerStatus) => {
     const target = client;
     const mine = ++openGeneration;
@@ -317,14 +350,8 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
     if (!target || (cached && attached === id)) return;
     try {
       let registration: Registration | undefined;
-      if (cached && !knownStatus) {
-        registration = await register(target, id);
-        const resumed = await target.request("resume", { session_id: id, ...(registration ? { host_commands: [registration.command] } : {}) }, { timeoutMs: 30_000, signal: abort.signal }) as { session?: SessionMeta };
-        knownStatus = await getStatus(target, abort.signal);
-        if (!knownStatus.session) knownStatus = { ...knownStatus, session: resumed.session ?? null };
-        if (mine !== openGeneration || !live(target)) return;
-        attached = id;
-      }
+      if (cached) ({ knownStatus, registration } = await prepareCachedOpen(target, id, knownStatus, abort.signal));
+      if (mine !== openGeneration || !live(target)) return;
       let history = { messages: 0, complete: false };
       const opened = await openSession(target, id, (messages, complete) => {
         history = { messages, complete };
@@ -341,33 +368,12 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
       set(opened.session ? { session: opened.session } : {});
       transition({ type: "opened", run });
       watchActiveTurn(id, run);
-      void opened.complete.then((result) => {
-        if (mine !== openGeneration || !live(target)) return result.lease?.release();
-        if (result.lease) {
-          const run = transitionRun(state.transition);
-          run?.lease.release();
-          transition({ type: "updated", run: { id, lease: result.lease, stale: false, history: { ...history, complete: true }, syncing: result.syncing } });
-        } else {
-          const run = transitionRun(state.transition);
-          if (run?.id === id) transition({ type: "updated", run: { ...run, history: { ...history, complete: true }, syncing: result.syncing } });
-        }
-      }).catch((error) => {
-        if (mine === openGeneration && live(target) && (error as { name?: string }).name !== "AbortError")
-          transition({ type: "failed", id, error: { id, message: message(error), busy: isBusyError(error) } });
-      });
+      trackCompletion(target, mine, id, opened, () => history);
     } catch (error) {
       if (mine !== openGeneration || !live(target)) return;
       const busy = isBusyError(error);
-      let restored = busy && previousAttached !== null;
       const previousId = previousAttached !== id ? previousAttached : null;
-      if (!busy && previousId) {
-        try {
-          const binding = await register(target, previousId);
-          await target.request("resume", { session_id: previousId, ...(binding ? { host_commands: [binding.command] } : {}) }, { timeoutMs: 30_000 });
-          attached = previousId;
-          restored = true;
-        } catch { /* keep the selected transcript visible with an explicit reopen action */ }
-      }
+      const restored = busy ? previousAttached !== null : await restoreAttached(target, previousId);
       if (mine !== openGeneration || !live(target)) return;
       transition({ type: "failed", id, error: { id, message: message(error), busy, ...(restored ? { restored: true } : {}) } });
     }
