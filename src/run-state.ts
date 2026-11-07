@@ -30,6 +30,7 @@ export type RunRecord = {
   readonly text: string;
   readonly attachments: readonly QueuedImage[];
   readonly deliveries: ReadonlyMap<string, PendingDelivery>;
+  readonly stopOperation?: OperationId;
   readonly model: RunModel;
   readonly settings: RunSettingsState;
 };
@@ -82,6 +83,7 @@ export type WorkspaceEvent =
   | { type: "DELIVERY_RESEND"; runId: RunId; intentId: string }
   | { type: "SETTINGS_DESIRED"; runId: RunId; model?: string; approval_mode?: "ask" | "allow" }
   | { type: "STOP"; runId: SessionId; operationId?: OperationId }
+  | { type: "STOP_OK" | "STOP_FAIL"; runId: SessionId; operationId: OperationId }
   | { type: "DISCONNECT" }
   | { type: "RECONNECT" }
   | { type: "SETTINGS_OK"; runId: SessionId; operationId: OperationId; model?: string; approval_mode?: "ask" | "allow" }
@@ -151,7 +153,9 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     case "DELIVERY_RECONCILE": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); for (const [intentId, delivery] of deliveries) { if (delivery.state === "dropped") continue; const operationId = crypto.randomUUID() as OperationId; deliveries.set(intentId, { ...delivery, operationId }); effects.push({ type: "delivery-status", runId: record.id as SessionId, operationId, intentId }); } return { ...record, deliveries }; }); break;
     case "DELIVERY_STATUS": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); const delivery = deliveries.get(event.intentId); if (delivery?.operationId !== event.operationId) return record; if (event.status === "delivered") deliveries.delete(event.intentId); else if (delivery.state !== "dropped") { const operationId = crypto.randomUUID() as OperationId; deliveries.set(event.intentId, { ...delivery, operationId, state: "retrying" }); effects.push({ type: "deliver", runId: record.id, operationId, intentId: event.intentId }); } return { ...record, deliveries }; }); break;
     case "SETTINGS_DESIRED": update(event.runId, (record) => ({ ...record, settings: { kind: "unknown", desired: { model: event.model, approval_mode: event.approval_mode } } })); break;
-    case "STOP": update(event.runId, (record) => ({ ...record, deliveries: new Map([...record.deliveries].map(([id, delivery]) => [id, delivery.method === "steer" ? { ...delivery, state: "dropped" as const } : delivery])) })); effects.push({ type: "abort", runId: event.runId, operationId: event.operationId ?? crypto.randomUUID() as OperationId }); break;
+    case "STOP": { const operationId = event.operationId ?? crypto.randomUUID() as OperationId; update(event.runId, (record) => ({ ...record, stopOperation: operationId })); effects.push({ type: "abort", runId: event.runId, operationId }); break; }
+    case "STOP_OK": update(event.runId, (record) => record.stopOperation !== event.operationId ? record : ({ ...record, stopOperation: undefined, deliveries: new Map([...record.deliveries].map(([id, delivery]) => [id, delivery.method === "steer" ? { ...delivery, state: "dropped" as const } : delivery])) })); break;
+    case "STOP_FAIL": update(event.runId, (record) => record.stopOperation === event.operationId ? { ...record, stopOperation: undefined } : record); break;
     case "DISCONNECT": attachment = { kind: "disconnected", ...(attachment.kind === "attached" ? { lastAttached: attachment.sessionId, ...(attachment.turn !== "idle" ? { lastTurnOwner: attachment.sessionId } : {}) } : {}) }; break;
     case "RECONNECT":
       effects.push({ type: "status" });

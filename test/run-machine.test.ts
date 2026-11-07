@@ -17,6 +17,7 @@ class Reference {
   deliveries = new Map<string, Map<string, string>>();
   deliveryMethods = new Map<string, string>();
   deliveryOperations = new Map<string, string>();
+  stopOperations = new Map<string, string>();
   settings = new Map<string, string>();
   canonical(id: string) { return this.aliases.get(id) ?? id; }
   apply(event: WorkspaceEvent) {
@@ -36,7 +37,9 @@ class Reference {
       case "DELIVERY_BEGIN": { const items = this.deliveries.get(event.runId) ?? new Map(); items.set(event.delivery.id, "requesting"); this.deliveryMethods.set(event.delivery.id, event.delivery.method); this.deliveryOperations.set(event.delivery.id, event.operationId); this.deliveries.set(event.runId, items); break; }
       case "DELIVERY_ACK": { if (this.deliveryOperations.get(event.intentId) !== event.operationId) break; const items = this.deliveries.get(event.runId); if (event.queued && !event.failed) items?.set(event.intentId, "queued"); else items?.delete(event.intentId); break; }
       case "DELIVERY_STATUS": { if (this.deliveryOperations.get(event.intentId) !== event.operationId) break; const items = this.deliveries.get(event.runId); if (event.status === "delivered") items?.delete(event.intentId); else if (items?.get(event.intentId) !== "dropped") { items?.set(event.intentId, "retrying"); this.deliveryOperations.set(event.intentId, "generated"); } break; }
-      case "STOP": { const items = this.deliveries.get(event.runId); for (const [id] of items ?? []) if (this.deliveryMethods.get(id) === "steer") items!.set(id, "dropped"); break; }
+      case "STOP": this.stopOperations.set(event.runId, event.operationId ?? "generated"); break;
+      case "STOP_OK": { if (this.stopOperations.get(event.runId) !== event.operationId) break; this.stopOperations.delete(event.runId); const items = this.deliveries.get(event.runId); for (const [id] of items ?? []) if (this.deliveryMethods.get(id) === "steer") items!.set(id, "dropped"); break; }
+      case "STOP_FAIL": if (this.stopOperations.get(event.runId) === event.operationId) this.stopOperations.delete(event.runId); break;
       case "SETTINGS_DESIRED": this.settings.set(event.runId, event.approval_mode ?? "unknown"); break;
       case "SETTINGS_OK": this.settings.set(event.runId, event.approval_mode ?? "unknown"); break;
       case "DISCONNECT": this.attached = null; this.turn = null; break;
@@ -48,14 +51,14 @@ class Reference {
 const random = (seed: number) => () => { seed = Math.imul(seed ^ seed >>> 15, 1 | seed); seed ^= seed + Math.imul(seed ^ seed >>> 7, 61 | seed); return ((seed ^ seed >>> 14) >>> 0) / 4294967296; };
 
 test("workspace reducer matches an independent model across navigation, activity, and stale completions", () => {
-  const names = ["NEW_RUN", "NAVIGATED", "FIRST_SEND", "NEW_SESSION_OK", "NEW_SESSION_FAIL", "STATUS", "RESUME_OK", "RESUME_BUSY", "RESUME_FAIL", "FIRST_PAGE", "TURN_START", "TURN_END", "DELIVERY_BEGIN", "DELIVERY_ACK", "DELIVERY_STATUS", "STOP", "DISCONNECT", "RECONNECT", "SETTINGS_DESIRED", "SETTINGS_OK", "SETTINGS_FAIL"] as const;
+  const names = ["NEW_RUN", "NAVIGATED", "FIRST_SEND", "NEW_SESSION_OK", "NEW_SESSION_FAIL", "STATUS", "RESUME_OK", "RESUME_BUSY", "RESUME_FAIL", "FIRST_PAGE", "TURN_START", "TURN_END", "DELIVERY_BEGIN", "DELIVERY_ACK", "DELIVERY_STATUS", "STOP", "STOP_OK", "STOP_FAIL", "DISCONNECT", "RECONNECT", "SETTINGS_DESIRED", "SETTINGS_OK", "SETTINGS_FAIL"] as const;
   for (let seed = 0; seed < 100; seed++) {
     const next = random(seed + 1); let state = initial(); const reference = new Reference(); const prefix: WorkspaceEvent[] = [];
     for (let step = 0; step < 500; step++) {
       const n = Math.floor(next() * 8); const d = draft(n); const s = session(n); const op = operation(Math.floor(next() * 20));
       const name = names[Math.floor(next() * names.length)]!;
       const event = ({
-        NEW_RUN: { type: "NEW_RUN", entryId: entry(step + 1), runId: draft(step + 100) }, NAVIGATED: { type: "NAVIGATED", entryId: entry(step + 1), runId: next() < .35 ? d : s }, FIRST_SEND: { type: "FIRST_SEND", runId: d, operationId: op }, NEW_SESSION_OK: { type: "NEW_SESSION_OK", runId: d, sessionId: s, operationId: op }, NEW_SESSION_FAIL: { type: "NEW_SESSION_FAIL", runId: d, operationId: op, error: "create failed" }, STATUS: { type: "STATUS", ...(next() < .2 ? {} : { sessionId: s }), turn: next() < .6 ? "idle" : "running" }, RESUME_OK: { type: "RESUME_OK", runId: s, operationId: op }, RESUME_BUSY: { type: "RESUME_BUSY", runId: s, owner: session((n + 1) % 8), operationId: op }, RESUME_FAIL: { type: "RESUME_FAIL", runId: s, operationId: op, error: "open failed" }, FIRST_PAGE: { type: "FIRST_PAGE", runId: s, operationId: op, transcript: `history ${n}` }, TURN_START: { type: "TURN_START", runId: s, turn: "running" }, TURN_END: { type: "TURN_END", runId: s }, DELIVERY_BEGIN: { type: "DELIVERY_BEGIN", runId: s, delivery: { id: `i-${n}`, attemptId: `i-${n}`, operationId: op, method: next() < .5 ? "send" : "steer", text: `message ${n}`, images: [], state: "requesting" }, operationId: op }, DELIVERY_ACK: { type: "DELIVERY_ACK", runId: s, intentId: `i-${n}`, operationId: op, attemptId: `i-${n}`, queued: next() < .5 }, DELIVERY_STATUS: { type: "DELIVERY_STATUS", runId: s, intentId: `i-${n}`, operationId: op, status: next() < .5 ? "delivered" : "dropped" }, STOP: { type: "STOP", runId: s }, DISCONNECT: { type: "DISCONNECT" }, RECONNECT: { type: "RECONNECT" }, SETTINGS_DESIRED: { type: "SETTINGS_DESIRED", runId: s, approval_mode: next() < .5 ? "ask" : "allow" }, SETTINGS_OK: { type: "SETTINGS_OK", runId: s, operationId: op, model: "m" }, SETTINGS_FAIL: { type: "SETTINGS_FAIL", runId: s, operationId: op, error: "settings failed" },
+        NEW_RUN: { type: "NEW_RUN", entryId: entry(step + 1), runId: draft(step + 100) }, NAVIGATED: { type: "NAVIGATED", entryId: entry(step + 1), runId: next() < .35 ? d : s }, FIRST_SEND: { type: "FIRST_SEND", runId: d, operationId: op }, NEW_SESSION_OK: { type: "NEW_SESSION_OK", runId: d, sessionId: s, operationId: op }, NEW_SESSION_FAIL: { type: "NEW_SESSION_FAIL", runId: d, operationId: op, error: "create failed" }, STATUS: { type: "STATUS", ...(next() < .2 ? {} : { sessionId: s }), turn: next() < .6 ? "idle" : "running" }, RESUME_OK: { type: "RESUME_OK", runId: s, operationId: op }, RESUME_BUSY: { type: "RESUME_BUSY", runId: s, owner: session((n + 1) % 8), operationId: op }, RESUME_FAIL: { type: "RESUME_FAIL", runId: s, operationId: op, error: "open failed" }, FIRST_PAGE: { type: "FIRST_PAGE", runId: s, operationId: op, transcript: `history ${n}` }, TURN_START: { type: "TURN_START", runId: s, turn: "running" }, TURN_END: { type: "TURN_END", runId: s }, DELIVERY_BEGIN: { type: "DELIVERY_BEGIN", runId: s, delivery: { id: `i-${n}`, attemptId: `i-${n}`, operationId: op, method: next() < .5 ? "send" : "steer", text: `message ${n}`, images: [], state: "requesting" }, operationId: op }, DELIVERY_ACK: { type: "DELIVERY_ACK", runId: s, intentId: `i-${n}`, operationId: op, attemptId: `i-${n}`, queued: next() < .5 }, DELIVERY_STATUS: { type: "DELIVERY_STATUS", runId: s, intentId: `i-${n}`, operationId: op, status: next() < .5 ? "delivered" : "dropped" }, STOP: { type: "STOP", runId: s, operationId: op }, STOP_OK: { type: "STOP_OK", runId: s, operationId: op }, STOP_FAIL: { type: "STOP_FAIL", runId: s, operationId: op }, DISCONNECT: { type: "DISCONNECT" }, RECONNECT: { type: "RECONNECT" }, SETTINGS_DESIRED: { type: "SETTINGS_DESIRED", runId: s, approval_mode: next() < .5 ? "ask" : "allow" }, SETTINGS_OK: { type: "SETTINGS_OK", runId: s, operationId: op, model: "m" }, SETTINGS_FAIL: { type: "SETTINGS_FAIL", runId: s, operationId: op, error: "settings failed" },
       } as const)[name] as WorkspaceEvent;
       prefix.push(event); reference.apply(event); const result = reduceWorkspace(state, event); state = result.state;
       try {
@@ -108,4 +111,14 @@ test("mutation: reconnect reconciles each durable delivery", () => {
   const correct = reduceWorkspace(state, { type: "RECONNECT" });
   const mutant = { ...correct, effects: correct.effects.filter((effect) => effect.type !== "delivery-status") };
   expect(observe(correct.state, correct.effects)).not.toEqual(observe(mutant.state, mutant.effects));
+});
+
+test("a failed stop does not mark queued steers as dropped", () => {
+  const run = session(1); const intent = "i-1"; const deliveryOperation = operation(1); const stopOperation = operation(2);
+  let state = reduceWorkspace(initial(), { type: "ENSURE_RUN", runId: run }).state;
+  state = reduceWorkspace(state, { type: "DELIVERY_BEGIN", runId: run, operationId: deliveryOperation, delivery: { id: intent, attemptId: intent, operationId: deliveryOperation, method: "steer", text: "keep it", images: [], state: "queued" } }).state;
+  state = reduceWorkspace(state, { type: "STOP", runId: run, operationId: stopOperation }).state;
+  expect(state.runs.get(run)?.deliveries.get(intent)?.state).toBe("queued");
+  state = reduceWorkspace(state, { type: "STOP_FAIL", runId: run, operationId: stopOperation }).state;
+  expect(state.runs.get(run)?.deliveries.get(intent)?.state).toBe("queued");
 });

@@ -85,11 +85,11 @@ function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: Del
     const target = client();
     if (!target) {
       const error = new Error("not connected to zeta serve");
-      if (effect.type === "abort") finish(effect.operationId, error);
+      if (effect.type === "abort") { runs.dispatch({ type: "STOP_FAIL", runId: effect.runId, operationId: effect.operationId }); finish(effect.operationId, error); }
       if (effect.type === "deliver" && "intentId" in effect) { const delivery = runs.get(effect.runId).deliveries.get(effect.intentId); if (delivery?.state !== "retrying") runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery?.attemptId ?? effect.intentId, failed: true }); finish(effect.operationId, error); }
       return;
     }
-    if (effect.type === "abort") { try { await record(effect.runId).delivery.stop(target); } finally { finish(effect.operationId); } return; }
+    if (effect.type === "abort") { try { await record(effect.runId).delivery.stop(target); runs.dispatch({ type: "STOP_OK", runId: effect.runId, operationId: effect.operationId }); finish(effect.operationId); } catch (error) { runs.dispatch({ type: "STOP_FAIL", runId: effect.runId, operationId: effect.operationId }); finish(effect.operationId, error); } return; }
     if (!("intentId" in effect)) return;
     const delivery = runs.get(effect.runId).deliveries.get(effect.intentId);
     if (!delivery || delivery.operationId !== effect.operationId) return;
