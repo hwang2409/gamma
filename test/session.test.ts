@@ -81,6 +81,13 @@ function source(client: ZetaClient | null) {
   };
 }
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+async function waitFor(check: () => boolean, timeout = 5_000) {
+  const deadline = Date.now() + timeout;
+  while (!check()) {
+    if (Date.now() >= deadline) throw new Error(`timed out after ${timeout}ms`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
 
 function handlers(active: string | null, extra: Record<string, Handler> = {}): Record<string, Handler> {
   let current = active;
@@ -278,14 +285,31 @@ test("a busy resume displays the URL-selected cached run and forward restores th
   expect(view.state.session?.session_id).toBe("b");
 });
 
-test("an active owner is reported as busy and the selection stays", async () => {
-  const fake = await server(handlers("b", { status: () => ({ session: meta("b", "x"), state: "running", pending_approvals: [] }), resume: () => { throw { code: -32004, message: "a turn is already running" }; } }));
+test("an active owner is reported as busy without a resume request", async () => {
+  let resumeCalls = 0;
+  const fake = await server(handlers("b", {
+    status: () => ({ session: meta("b", "x"), state: "running", pending_approvals: [] }),
+    resume: () => { resumeCalls++; throw { code: -32004, message: "a turn is already running" }; },
+  }));
   const view = harness(source(fake.client));
   await tick();
   view.select("a");
   for (let attempt = 0; attempt < 400 && !present(view).openError; attempt++) await tick();
   expect(present(view).openError).toMatchObject({ id: "a", busy: true });
   expect(present(view).selected).toBe("a");
+  expect(resumeCalls).toBe(0);
+});
+
+test("a busy server is reported as busy and the selection stays", async () => {
+  let resumeCalls = 0;
+  const fake = await server(handlers(null, { resume: () => { resumeCalls++; throw { code: -32004, message: "a turn is already running" }; } }));
+  const view = createSessions(source(fake.client));
+  await tick();
+  view.select("a");
+  await waitFor(() => present(view).openError !== null);
+  expect(present(view).openError).toEqual({ id: "a", message: "a turn is already running", busy: true });
+  expect(present(view).selected).toBe("a");
+  expect(resumeCalls).toBe(4);
 });
 
 test("a drop keeps the old transcript as stale; the reconnect rebuilds it on a fresh store without duplicates", async () => {
