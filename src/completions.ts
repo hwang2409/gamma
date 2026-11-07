@@ -1,7 +1,13 @@
-// provisional path_complete shape from ~/.zeta/scratch/gamma-tui-parity.md, g2; zeta z2 has not shipped it.
+// Provisional path_complete shape from design-serve-capability-registry.md sections 4 (z2) and 5.1; Zeta z2 has not shipped it.
+export type CompletionRequest = {
+  session_id: string;
+  text_before_cursor: string;
+};
+
 export type CompletionEntry = {
-  insert_text: string;
-  display_text: string;
+  text: string;
+  start_position: number;
+  display: string;
   kind: "file" | "directory";
 };
 
@@ -24,22 +30,27 @@ export type CompletionKeyResult = {
   accepted?: { value: string; caret: number };
 };
 
-type Token = { start: number; queryStart: number; query: string };
+type Token = { start: number; query: string };
 
-// Matches zeta src/zeta/tui/completion.py:19-20 against text before the caret.
+// Matches Zeta src/zeta/tui/completion.py:19-20 against text before the caret.
 const PATH_TOKEN = /(?<!\S)@(?:"(?<quoted>[^"\n]*)|(?<unquoted>[^\s]*))$/;
 const CLOSED: CompletionSnapshot = { open: false, entries: [], truncated: false, activeIndex: 0, error: false };
+const MAX_TEXT_BEFORE_CURSOR_BYTES = 4096;
+const UTF8 = new TextEncoder();
 
 function tokenAt(value: string, caret: number): Token | undefined {
   if (caret < 0 || caret > value.length) return;
   const match = PATH_TOKEN.exec(value.slice(0, caret));
   if (!match || match.index === undefined) return;
-  const quoted = match.groups?.quoted;
   return {
     start: match.index,
-    queryStart: match.index + (quoted === undefined ? 1 : 2),
-    query: quoted ?? match.groups?.unquoted ?? "",
+    query: match.groups?.quoted ?? match.groups?.unquoted ?? "",
   };
+}
+
+function positionAtCodePointOffset(value: string, caret: number, offset: number): number {
+  const codePoints = Array.from(value.slice(0, caret));
+  return codePoints.slice(0, Math.max(0, codePoints.length + offset)).join("").length;
 }
 
 export function findCompletionToken(value: string, selectionStart: number, selectionEnd = selectionStart): Token | undefined {
@@ -56,7 +67,8 @@ export class CompletionModel {
   private readonly listeners = new Set<() => void>();
 
   constructor(
-    private readonly request: (query: string) => Promise<CompletionResponse>,
+    private readonly request: (params: CompletionRequest) => Promise<CompletionResponse>,
+    private readonly sessionId: string,
     private readonly featureNegotiated: boolean,
   ) {}
 
@@ -76,12 +88,15 @@ export class CompletionModel {
   update(value: string, selectionStart: number, selectionEnd = selectionStart): void {
     this.value = value;
     this.caret = selectionStart;
-    this.token = this.featureNegotiated ? findCompletionToken(value, selectionStart, selectionEnd) : undefined;
+    const textBeforeCursor = value.slice(0, selectionStart);
+    this.token = this.featureNegotiated && UTF8.encode(textBeforeCursor).length <= MAX_TEXT_BEFORE_CURSOR_BYTES
+      ? findCompletionToken(value, selectionStart, selectionEnd)
+      : undefined;
     const sequence = ++this.sequence;
     this.setState({ ...CLOSED });
     if (!this.token) return;
     const { query, start } = this.token;
-    void this.request(query).then(
+    void this.request({ session_id: this.sessionId, text_before_cursor: textBeforeCursor }).then(
       (response) => {
         if (!this.isCurrent(sequence, query, start)) return;
         this.setState({
@@ -107,10 +122,10 @@ export class CompletionModel {
   accept(): { value: string; caret: number } | undefined {
     if (!this.state.open || !this.token) return;
     const entry = this.state.entries[this.state.activeIndex];
-    const token = tokenAt(this.value, this.caret);
-    if (!entry || !token) return;
-    const value = this.value.slice(0, token.queryStart) + entry.insert_text + this.value.slice(this.caret);
-    return { value, caret: token.queryStart + entry.insert_text.length };
+    if (!entry || !tokenAt(this.value, this.caret)) return;
+    const replaceStart = positionAtCodePointOffset(this.value, this.caret, entry.start_position);
+    const value = this.value.slice(0, replaceStart) + entry.text + this.value.slice(this.caret);
+    return { value, caret: replaceStart + entry.text.length };
   }
 
   key(key: "ArrowUp" | "ArrowDown" | "Tab" | "Enter" | "Escape", isComposing = false): CompletionKeyResult {
