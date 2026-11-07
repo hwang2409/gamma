@@ -58,6 +58,27 @@ test("settings calls cross the effect executor and a failed write keeps the load
   } finally { manager.dispose(); store.dispose(); }
 });
 
+test("an approval-only write reads and preserves zeta's default model", async () => {
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const client = { features: [], request: async (method: string, params: Record<string, unknown>) => {
+    calls.push({ method, params });
+    return method === "session_settings" ? { model: "server-default", approval_mode: "ask" } : {};
+  } } as any;
+  const store = createRunStateStore(8, undefined, undefined, { id: "entry" as EntryId, run: session });
+  store.activate(session);
+  const manager = createDeliveryManager(() => client, store);
+  try {
+    store.dispatch({ type: "SETTINGS_DESIRED", runId: session, approval_mode: "allow" });
+    store.dispatch({ type: "SETTINGS_WRITE", runId: session, operationId: operation("default-write") });
+    await Bun.sleep(0);
+    expect(calls).toEqual([
+      { method: "session_settings", params: { session_id: session } },
+      { method: "set_settings", params: { session_id: session, model: "server-default", approval_mode: "allow" } },
+      { method: "session_settings", params: { session_id: session } },
+    ]);
+  } finally { manager.dispose(); store.dispose(); }
+});
+
 test("a settings change during a turn stays desired until the idle write", () => {
   let state = initial();
   state = apply(state, { type: "PROMOTE", runId: draft, sessionId: session }).state;

@@ -118,7 +118,10 @@ function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: Del
   const handleSettings = async (effect: Extract<WorkspaceEffect, { type: "load-settings" | "set-settings" }>) => {
     const target = client(); if (!target) return settingsFailure(effect, unavailable());
     try {
-      if (effect.type === "set-settings") await target.request("set_settings", { session_id: effect.runId, ...effect.settings }, { timeoutMs: 15_000 });
+      if (effect.type === "set-settings") {
+        const current = effect.settings.model ? {} : settingModel(await target.request("session_settings", { session_id: effect.runId }, { timeoutMs: 15_000 }));
+        await target.request("set_settings", { session_id: effect.runId, ...effect.settings, ...(current.model ? { model: current.model } : {}) }, { timeoutMs: 15_000 });
+      }
       const value = settingModel(await target.request("session_settings", { session_id: effect.runId }, { timeoutMs: 15_000 }));
       runs.dispatch({ type: "SETTINGS_OK", runId: effect.runId, operationId: effect.operationId, ...(value.model ? { model: value.model } : {}), ...(value.approval_mode === "ask" || value.approval_mode === "allow" ? { approval_mode: value.approval_mode } : {}) }); finish(effect.operationId);
     } catch (error) { settingsFailure(effect, error); }
