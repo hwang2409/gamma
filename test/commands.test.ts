@@ -125,6 +125,8 @@ describe("inline dollar skills", () => {
     ["missing kind", {}],
     ["unknown kind", { kind: "future" }],
     ["model_input without required fields", { kind: "model_input" }],
+    ["model_input without input_id", { kind: "model_input", display_text: "please use $review now" }],
+    ["model_input text without input_id", { kind: "model_input", display_text: "please use $review now", text: "expanded" }],
     ["error without text", { kind: "error" }],
   ])("%s input_prepare frames become error receipts", async (_name, result) => {
     const { controller } = fake({ input_prepare: result }, inputPrepareCapabilities);
