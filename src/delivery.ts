@@ -156,6 +156,7 @@ export function createDeliveryManager(client: () => ZetaClient | null) {
     subscribe(listener: () => void) { listeners.add(listener); return () => listeners.delete(listener); },
     marks(runId: string) { const item = record(runId); return { waiting: item.waiting as ReadonlySet<string>, undelivered: item.undelivered as ReadonlySet<string> }; },
     bind(runId: string, store: DeliveryStore | undefined) { const item = record(runId); if (item.store === store) return; item.unsubscribe?.(); item.store = store; item.unsubscribe = store?.subscribe(() => reconcileRows(item)); reconcileRows(item); },
+    promote(from: string, to: string) { const item = records.get(from); if (!item || from === to) return; records.delete(from); records.set(to, item); emit(); },
     async submit(runId: string, text: string, steer: boolean, deliveryId?: string) { const target = client(); if (!target) throw new Error("not connected to zeta serve"); const item = record(runId); if (deliveryId) item.text.set(deliveryId, text); return item.delivery.submit(target, text, steer, deliveryId); },
     stop(runId: string) { const target = client(); return target ? record(runId).delivery.stop(target) : Promise.reject(new Error("not connected to zeta serve")); },
     async turnEnded(runId: string) { const target = client(); if (!target) return; const item = record(runId); for (const id of item.provisional.keys()) item.waiting.delete(id); item.provisional.clear(); const dropped = await item.delivery.turnEnded(target); dropped.forEach((id) => item.undelivered.add(id)); emit(); },

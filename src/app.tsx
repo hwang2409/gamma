@@ -198,12 +198,13 @@ export function App() {
     requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('.dock textarea[aria-label="message"]')?.focus());
   }, [runState, runs]);
   const onCreated = useCallback((from: string, sessionId: string) => {
+    deliveries.promote(from, sessionId);
     runState.promote(from, sessionId);
     const current = browserEntryRef.current;
     if (current.run !== from) return;
     const next = { ...current, run: sessionId };
     writeEntry(next, "replace"); setBrowserEntry(next);
-  }, [runState]);
+  }, [deliveries, runState]);
   const selectRun = useCallback((id: string) => {
     const next = { gammaEntryId: entryId(), run: id };
     writeEntry(next, "push"); setBrowserEntry(next); runState.activate(id, { choice: "explicit", model: "" }); runs.select(id);
@@ -344,7 +345,7 @@ async function submitRun({ text, images, steer, deliveryId, connection, runs, de
       onCreated(runId, id);
       if (!choice.model || !target.features.includes("new_session_settings")) await applyFirstTurnSettings(target, id, choice, yolo);
     }
-    if (!images.length) return await deliveries.submit(runId, text, steer, deliveryId);
+    if (!images.length) return await deliveries.submit(id, text, steer, deliveryId);
     return await runs.sendImages(id, deliveryId, text, images.map(({ name, mime_type, data }) => ({ name, mime_type, data })));
   } finally { release?.(); }
 }
