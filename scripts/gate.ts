@@ -540,9 +540,11 @@ try {
       await page.locator('[data-part="timeline"] [data-kind="user"]', { hasText: "hello from a new run" }).waitFor({ timeout: 3000 });
       await page.locator(".empty-run").waitFor({ state: "detached", timeout: 3000 });
       await page.locator('.dock [data-part="composer"][data-state="idle"]').waitFor({ timeout: 10_000 });
+      const oldRun = new URL(page.url()).searchParams.get("run");
       await page.getByRole("button", { name: "new run" }).click();
       await page.locator(".empty-run").waitFor({ timeout: 5000 });
-      if (new URL(page.url()).searchParams.has("run")) throw new Error("the old run stayed in the url");
+      const draftRun = new URL(page.url()).searchParams.get("run");
+      if (!draftRun?.startsWith("draft:") || draftRun === oldRun) throw new Error("new run did not get its own draft history entry");
       await auditThemes(page, "1440 new run", 36);
       fake.setEmpty(false);
     });
