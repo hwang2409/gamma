@@ -93,7 +93,7 @@ export function createCommandController(
     const trigger = slash ? "/" : "$";
     const prefix = (slash?.[1] ?? dollar?.[1] ?? "").toLowerCase();
     return (catalog ?? [])
-      .filter((entry) => (trigger === "/" || entry.kind === "skill") && entry.name.toLowerCase().startsWith(prefix))
+      .filter((entry) => entry.unavailable === null && (trigger === "/" || entry.kind === "skill") && entry.name.toLowerCase().startsWith(prefix))
       .sort((a, b) => Number(b.name.toLowerCase() === prefix) - Number(a.name.toLowerCase() === prefix) || a.name.localeCompare(b.name))
       .map((entry) => ({ trigger, name: entry.name, description: entry.description, sourceBadge: entry.source }));
   }
@@ -141,7 +141,7 @@ export function createCommandController(
         return { kind: "receipt", text: `unknown command: /${result.name}`, tone: "error" };
       case "client_only": {
         const name = CLIENT_ACTIONS[result.name];
-        return name ? { kind: "client-action", name, args: commandArgs(text) } : unavailableReceipt();
+        return name ? { kind: "client-action", name, args: commandArgs(text) } : unavailableCommandReceipt(result.name);
       }
       case "model_input":
         return capabilities.features.has("model_input_ids") && typeof result.input_id === "string"
@@ -163,6 +163,10 @@ function commandArgs(text: string): string {
 
 function unavailableReceipt(): ComposerAction {
   return { kind: "receipt", text: "not available in this server version", tone: "error" };
+}
+
+function unavailableCommandReceipt(name: string): ComposerAction {
+  return { kind: "receipt", text: `/${name} is not available in gamma yet`, tone: "error" };
 }
 
 function invalidResponseReceipt(): ComposerAction {
