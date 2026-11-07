@@ -279,8 +279,6 @@ button:active:not(:disabled) { transform: scale(0.97); }
   .new-run { margin-left: auto; }
   .topbar .run-title { order: 2; flex-basis: 100%; }
   .settings-popover { right: 0; width: min(320px, calc(100vw - 24px)); }
-  .attachments { flex-wrap: wrap; overflow-x: visible; }
-  [data-part="attachment"] { flex: 1 1 calc(50% - 3px); min-width: 0; }
   .dock .composer-tools { flex-wrap: wrap; justify-content: flex-start; }
   .dock .composer-tools > .model-picker { flex-basis: 100%; }
   .dock .model-picker > button { width: 100%; max-width: 100%; }
