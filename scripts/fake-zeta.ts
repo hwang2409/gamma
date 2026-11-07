@@ -476,6 +476,10 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         if (method === "slash_run") {
           const command = String(params.text ?? "").trim();
           if (command === "/status") return reply({ result: { kind: "output", text: longStatus ? `fake status\nready\n${Array.from({ length: 80 }, (_, index) => `status detail ${index + 1}`).join("\n")}` : "fake status\nready" } });
+          // Matches zeta origin/main src/zeta/server/slash_commands.py:159-240: these serve commands return output.
+          if (command === "/accounts") return reply({ result: { kind: "output", text: "no accounts" } });
+          if (command === "/model" || command.startsWith("/model ")) return reply({ result: { kind: "output", text: command === "/model" ? `model: ${activeSettings().model} (open Settings to switch)` : `model: ${command.slice("/model ".length).trim()}` } });
+          if (command === "/vim" || command.startsWith("/vim ")) return reply({ result: { kind: "output", text: `vim mode: ${command.endsWith("off") ? "off" : "on"}` } });
           if (command === "/review" || command.startsWith("/review ")) { opaqueInputs.set("opaque-review-input", command); return reply({ result: { kind: "model_input", input_id: "opaque-review-input", display_text: command } }); }
           if (command === "/malformed") return reply({ result: { unexpected: true } });
           if (command === "/legacy-output") return reply({ result: { kind: "text", text: "legacy output" } });

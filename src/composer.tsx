@@ -59,6 +59,7 @@ function Suggestions({ id, snapshot, onAccept }: { id: string; snapshot: Complet
     id={`${id}-${index}`}
     aria-selected={index === snapshot.activeIndex}
     className="command-option"
+    aria-label={`${row.trigger}${row.name}: ${row.description}`}
     key={`${row.trigger}${row.name}`}
     onPointerDown={(event) => { event.preventDefault(); onAccept(index); }}
   ><span className="command-name">{row.trigger}{row.name}</span><span className="command-description">{row.description}</span>{row.sourceBadge ? <span className="command-source">{row.sourceBadge}</span> : null}</button>)}</div>;

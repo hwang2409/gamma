@@ -45,6 +45,7 @@ export type RunRecord = {
   readonly openError?: OpenFailure;
   readonly session?: SessionMeta;
   readonly submitting?: boolean;
+  readonly lastDeliveryMethod?: DeliveryMethod;
 };
 export type AttachmentState =
   | { kind: "detached" }
@@ -219,7 +220,7 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
       attachment = { ...attachment, turn: "idle" };
       break;
     }
-    case "DELIVERY_BEGIN": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); deliveries.set(event.delivery.id, event.delivery); effects.push(event.delivery.method === "send_images" ? { type: "send-images", runId: record.id as SessionId, operationId: event.operationId, intentId: event.delivery.id } : { type: "deliver", runId: record.id, operationId: event.operationId, intentId: event.delivery.id }); return { ...record, deliveries, submitting: false }; }); break;
+    case "DELIVERY_BEGIN": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); deliveries.set(event.delivery.id, event.delivery); effects.push(event.delivery.method === "send_images" ? { type: "send-images", runId: record.id as SessionId, operationId: event.operationId, intentId: event.delivery.id } : { type: "deliver", runId: record.id, operationId: event.operationId, intentId: event.delivery.id }); return { ...record, deliveries, submitting: false, lastDeliveryMethod: event.delivery.method }; }); break;
     case "DELIVERY_ACK": {
       update(event.runId, (record) => { const deliveries = new Map(record.deliveries); const delivery = deliveries.get(event.intentId); if (delivery?.operationId !== event.operationId) return record; if (event.queued && !event.failed && delivery.state !== "retrying") deliveries.set(event.intentId, { ...delivery, attemptId: event.attemptId, state: "queued" }); else deliveries.delete(event.intentId); if (event.failed) return { ...record, deliveries }; return { ...record, text: record.text.startsWith(delivery.text) ? record.text.slice(delivery.text.length) : record.text, attachments: record.attachments.filter((image) => !delivery.images.includes(image)), deliveries }; });
       const selected = canonical({ ...state, aliases }, entry.run);
@@ -315,7 +316,7 @@ export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefi
     activate(id: string, initialModel: RunModel = { choice: "default" }) { active = key(id); const existed = state.runs.has(active); value(active); if (!existed) dispatch({ type: "MODEL_SET", runId: active, model: initialModel }); evict(); },
     edit(id: string, patch: { text?: string; attachments?: readonly QueuedImage[] }) { const current = value(id); const text = patch.text ?? current.text; dispatch({ type: "COMPOSER_EDIT", runId: key(id), text, ...(patch.attachments ? { attachments: patch.attachments } : {}) }); if (patch.text !== undefined) queueDraft(id, text); evict(); },
     consumeDraft(id: string, text: string) { const current = value(id).text; const next = current.startsWith(text) ? current.slice(text.length) : current; dispatch({ type: "COMPOSER_EDIT", runId: key(id), text: next }); queueDraft(id, next); },
-    restoreDraft(id: string, text: string) { const current = value(id).text; const next = current.startsWith(text) ? current : text + current; dispatch({ type: "COMPOSER_EDIT", runId: key(id), text: next }); queueDraft(id, next); },
+    restoreDraft(id: string, text: string) { const current = value(id).text; const next = current.startsWith(text) ? current : current ? text + "\n" + current : text; dispatch({ type: "COMPOSER_EDIT", runId: key(id), text: next }); queueDraft(id, next); },
     removeAttachment(id: string, index: number) { const image = value(id).attachments[index]; if (!image) return; URL.revokeObjectURL(image.url); dispatch({ type: "REMOVE_ATTACHMENT", runId: key(id), index }); },
     beginDelivery(id: string, delivery: Omit<PendingDelivery, "operationId" | "state">, operationId = crypto.randomUUID() as OperationId) { dispatch({ type: "DELIVERY_BEGIN", runId: key(id), delivery: { ...delivery, operationId, state: "requesting" }, operationId }); return operationId; },
     reconcileDeliveries(id: string) { dispatch({ type: "DELIVERY_RECONCILE", runId: key(id) }); },

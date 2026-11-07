@@ -28,7 +28,7 @@ type Decide = (requestId: string) => Promise<unknown>;
 const Decisions = createContext<{ approve?: Decide; always?: Decide; deny?: Decide; disabledReason?: string } | null>(null);
 function ZetaApproval({ id }: { id: string }) {
   const decide = useContext(Decisions);
-  return <Approval id={id} onApprove={decide?.approve} onApproveAlways={decide?.always} approveAlwaysLabel="always allow" onDeny={decide?.deny} disabledReason={decide?.disabledReason} />;
+  return <Approval id={id} onApprove={decide?.approve} onApproveAlways={decide?.always} approveAlwaysLabel="always allow for this session" onDeny={decide?.deny} disabledReason={decide?.disabledReason} />;
 }
 // The intents of steers a stop dropped: zeta never gave them to the agent, so their rows must not look delivered.
 const DeliveryStates = createContext<ReadonlyMap<string, import("./run-state").PendingDelivery>>(new Map());
@@ -92,7 +92,7 @@ function ErrorRow({ id }: { id: string }) {
   return (
     <div className="turn-error">
       <Fallback id={id} />
-      {retry && last ? <button type="button" className="ghost turn-retry" onClick={retry}>retry</button> : null}
+      {retry && last ? <button type="button" className="ghost turn-retry" onClick={retry}>edit and retry</button> : null}
     </div>
   );
 }
@@ -325,8 +325,10 @@ function focusComposer() {
 
 function CommandReceiptLine({ store, runId }: { store: ReceiptStore; runId: string }) {
   const receipt = useSyncExternalStore(store.subscribe, () => store.get(runId));
+  const text = useRef<HTMLSpanElement>(null);
+  useEffect(() => { if (receipt) text.current?.scrollTo(0, 0); }, [receipt?.text]);
   if (!receipt) return null;
-  return <div className="command-receipt" data-tone={receipt.tone} role={receipt.tone === "error" ? "alert" : "status"}>{receipt.tone === "error" ? <span className="command-receipt-label">error</span> : null}<span className="command-receipt-text">{receipt.text}</span><button type="button" className="ghost" aria-label="dismiss command result" onClick={() => { store.dismiss(runId); focusComposer(); }}>dismiss</button></div>;
+  return <div className="command-receipt" data-tone={receipt.tone} role={receipt.tone === "error" ? undefined : "status"}>{receipt.tone === "error" ? <span className="command-receipt-label">error</span> : null}<span ref={text} className="command-receipt-text" role={receipt.tone === "error" ? "alert" : undefined}>{receipt.text}</span><button type="button" className="ghost" aria-label="dismiss command result" onClick={() => { store.dismiss(runId); focusComposer(); }}>dismiss</button></div>;
 }
 
 async function submitRun({ text, images, steer, deliveryId, connection, runs, deliveries, choice, yolo, runId, onCreated }: { text: string; images: readonly import("./image-queue").QueuedImage[]; steer: boolean; deliveryId: string; connection: Connection; runs: SessionManager; deliveries: DeliveryManager; choice: { model?: string; provider?: string }; yolo: boolean; runId: string; onCreated(from: string, sessionId: string): void }) {
@@ -365,11 +367,16 @@ function DockComposer({ readOnly, blockedReason, running, vim, commands, onSubmi
  * Retry for a failed turn. Zeta echoes an opaque command's typed line (`/review x`) as the user message, so a slash-led
  * prompt goes back into the draft for the preparation seam instead of reaching `send {text}`.
  */
+function runChoice(model: ReturnType<RunStateStore["get"]>["model"], local: { model?: string; provider?: string }) {
+  const preferred = model.choice === "explicit" ? model.model : undefined;
+  return preferred ? { model: preferred, ...(local.model === preferred && local.provider ? { provider: local.provider } : {}) } : {};
+}
+
 function useDockRetry(agent: ReturnType<typeof useAgentPhase>, client: ZetaClient | null, deliveries: DeliveryManager, runState: RunStateStore, runId: string, lastPrompt: string | null, onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>) {
   const failed = agent.kind === "failed" && client && lastPrompt ? lastPrompt : null;
   useEffect(() => {
     const retry = failed && (isSlashCommandText(failed)
-      ? () => { runState.restoreDraft(runId, failed); focusComposer(); }
+      ? () => { runState.restoreDraft(runId, runState.get(runId).lastDeliveryMethod === "send" ? `/${failed}` : failed); focusComposer(); }
       : () => void deliveries.submit(runId, failed, false).catch(() => {}));
     onRetryTurn(retry ? () => retry : null);
     return () => onRetryTurn(null);
@@ -410,7 +417,7 @@ function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, ru
   const onSubmit: Submit = useCallback(async (action, images, { steer, deliveryId, sourceText }) => {
     const setReceipt = (text: string, tone: "quiet" | "error") => receipts.set(runState.canonical(runId), { text: images.length ? `${text}\nattachments are still attached and were not sent.` : text, tone });
     const consume = () => runState.consumeDraft(runId, sourceText);
-    const unavailableClientAction = (name: string) => async () => setReceipt(`/${name} is not available in gamma yet`, "error");
+    const unavailableClientAction = (name: string) => async () => setReceipt(!sessionId && client ? "commands need an open run; send a message first or open a run" : `/${name} is not available in gamma yet`, "error");
     const clientActions: Record<ClientActionName, () => Promise<void>> = {
       new_session: unavailableClientAction("new"), rename_session: unavailableClientAction("name"),
       approve: unavailableClientAction("approve"), always: unavailableClientAction("always"), deny: unavailableClientAction("deny"),
@@ -434,12 +441,16 @@ function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, ru
       const current = runState.get(runId).text;
       if (current.startsWith(sourceText)) runState.edit(runId, { text: action.text + current.slice(sourceText.length) });
     }
-    const preferred = record.model.choice === "explicit" ? record.model.model : undefined;
     const local = nextRunModel();
-    const choice = preferred ? { model: preferred, ...(local.model === preferred && local.provider ? { provider: local.provider } : {}) } : {};
-    const result = await submitRun({ text: action.text, images, steer, deliveryId, connection, runs, deliveries, choice, yolo, runId, onCreated });
-    onAccepted();
-    return result;
+    const choice = runChoice(record.model, local);
+    try {
+      const result = await submitRun({ text: action.text, images, steer, deliveryId, connection, runs, deliveries, choice, yolo, runId, onCreated });
+      onAccepted();
+      return result;
+    } catch (error) {
+      setReceipt(error instanceof Error ? error.message : String(error), "error");
+      throw error;
+    };
   }, [connection, deliveries, onAccepted, onCreated, receipts, record.model, runId, runState, runs, yolo]);
   const onStop = useCallback(async () => { await deliveries.stop(runId); await runs.refreshStatus(); }, [deliveries, runId, runs]);
   const lastPrompt = useLastPrompt();

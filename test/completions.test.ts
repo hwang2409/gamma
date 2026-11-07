@@ -45,7 +45,7 @@ test("dollar insertion replaces only the active token and always includes its tr
   const model = new CompletionModel(controller(async () => skill));
   model.update("ask $re later", 7);
   await Promise.resolve();
-  expect(model.choose(0)).toEqual({ value: "ask $review  later", caret: 12 });
+  expect(model.choose(0)).toEqual({ value: "ask $review later", caret: 11 });
 });
 
 test("selection and ime leave normal textarea behavior untouched", async () => {

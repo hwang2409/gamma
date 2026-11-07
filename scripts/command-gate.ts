@@ -190,6 +190,8 @@ try {
     await check("error receipts carry a text label and keyboard dismiss returns focus to the composer", async () => {
       await submit(page, "/does-not-exist");
       await page.locator('.command-receipt[data-tone="error"] .command-receipt-label', { hasText: "error" }).waitFor({ timeout: 5_000 }).catch(() => { throw new Error("error receipt has no text label"); });
+      const liveRegion = await page.locator('.command-receipt[data-tone="error"]').evaluate((receipt) => ({ receiptRole: receipt.getAttribute("role"), textRole: receipt.querySelector(".command-receipt-text")?.getAttribute("role"), dismissRole: receipt.querySelector("button")?.getAttribute("role") }));
+      if (liveRegion.receiptRole || liveRegion.textRole !== "alert" || liveRegion.dismissRole) throw new Error(`receipt live region includes the wrong node: ${JSON.stringify(liveRegion)}`);
       const dismiss = page.getByRole("button", { name: "dismiss command result" });
       await dismiss.focus();
       await dismiss.press("Enter");
