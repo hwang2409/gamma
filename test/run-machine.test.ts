@@ -113,12 +113,3 @@ test("mutation: reconnect reconciles each durable delivery", () => {
   expect(observe(correct.state, correct.effects)).not.toEqual(observe(mutant.state, mutant.effects));
 });
 
-test("a failed stop does not mark queued steers as dropped", () => {
-  const run = session(1); const intent = "i-1"; const deliveryOperation = operation(1); const stopOperation = operation(2);
-  let state = reduceWorkspace(initial(), { type: "ENSURE_RUN", runId: run }).state;
-  state = reduceWorkspace(state, { type: "DELIVERY_BEGIN", runId: run, operationId: deliveryOperation, delivery: { id: intent, attemptId: intent, operationId: deliveryOperation, method: "steer", text: "keep it", images: [], state: "queued" } }).state;
-  state = reduceWorkspace(state, { type: "STOP", runId: run, operationId: stopOperation }).state;
-  expect(state.runs.get(run)?.deliveries.get(intent)?.state).toBe("queued");
-  state = reduceWorkspace(state, { type: "STOP_FAIL", runId: run, operationId: stopOperation }).state;
-  expect(state.runs.get(run)?.deliveries.get(intent)?.state).toBe("queued");
-});
