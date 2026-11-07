@@ -5,7 +5,6 @@
 // Usage: bun scripts/live-check.ts   (ZETA_CMD overrides the zeta binary; WEB_LIVE_PORT the app port)
 import { spawn, type ChildProcess } from "node:child_process";
 import { cp, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
-import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Page } from "playwright";
@@ -34,10 +33,23 @@ for (const name of ["settings.toml", "accounts.json", "accounts"]) await cp(join
 const probe = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {}, close() {} } });
 const wsPort = probe.port;
 probe.stop(true);
-
-const server: ChildProcess = spawn(zeta, ["serve", "--ws", String(wsPort), "--ws-origin", origin, "--cwd", cwd, "--no-auto-memory"], {
-  cwd, env: { ...process.env, ZETA_HOME: home, ZETA_ANTHROPIC_OAUTH_COMPAT: "1" }, stdio: "ignore", detached: true,
-});
+let server: ChildProcess | undefined;
+const startZeta = async () => {
+  await rm(join(home, "run", "serve.ws.json"), { force: true });
+  server = spawn(zeta, ["serve", "--ws", String(wsPort), "--ws-origin", origin, "--cwd", cwd, "--no-auto-memory"], {
+    cwd, env: { ...process.env, ZETA_HOME: home, ZETA_ANTHROPIC_OAUTH_COMPAT: "1" }, stdio: "ignore", detached: true,
+  });
+  for (let i = 0; i < 100; i++) {
+    if (await readFile(join(home, "run", "serve.ws.json"), "utf8").then(() => true, () => false)) return;
+    await Bun.sleep(100);
+  }
+  throw new Error("zeta serve did not write its discovery file");
+};
+const stopZeta = async () => {
+  if (!server?.pid || server.exitCode !== null) return;
+  process.kill(-server.pid, "SIGTERM");
+  await new Promise((resolve) => server!.once("exit", resolve));
+};
 const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], {
   cwd: root, env: { ...process.env, ZETA_HOME: home, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin }, stdio: "ignore",
 });
@@ -52,10 +64,7 @@ const check = async (name: string, run: () => Promise<void>) => {
   }
 };
 try {
-  for (let i = 0; !existsSync(join(home, "run", "serve.ws.json")); i++) {
-    if (i > 300 || server.exitCode !== null) throw new Error("zeta serve did not write its discovery file");
-    await Bun.sleep(100);
-  }
+  await startZeta();
   for (let i = 0; !(await fetch(origin).then((response) => response.ok, () => false)); i++) {
     if (i > 600) throw new Error("vite did not start");
     await Bun.sleep(100);
@@ -119,6 +128,13 @@ try {
       replies.push("first turn: claude-sonnet-5 / YOLO", `text reply: ${reply}`);
       await page!.screenshot({ path: join(shots, "live-anthropic-text-1440.png") });
     });
+    await check("the live controller reconnects after zeta restarts", async () => {
+      await stopZeta();
+      await page!.getByText(/connection lost|reconnecting/).first().waitFor({ timeout: 10_000 });
+      await startZeta();
+      await field.waitFor({ timeout: 30_000 });
+      await page!.locator('.status-line[data-state="ready"]').waitFor({ timeout: 30_000 });
+    });
     await check("an image turn gets a reply that describes the image", async () => {
       await page.locator('.dock [data-part="composer"] input[type=file]').setInputFiles({ name: "circle.png", mimeType: "image/png", buffer: circle });
       const thumb = page.locator('.dock [data-part="attachment"] img');
@@ -136,7 +152,7 @@ try {
   }
 } finally {
   vite.kill("SIGTERM");
-  if (server.pid && server.exitCode === null) process.kill(-server.pid, "SIGTERM");
+  await stopZeta();
   // LIVE_KEEP=1 keeps the home (with its copied accounts) to read the session afterwards; delete it when done.
   if (process.env.LIVE_KEEP !== "1") await rm(home, { recursive: true, force: true });
   await rm(gammaHome, { recursive: true, force: true });

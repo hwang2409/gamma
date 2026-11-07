@@ -277,9 +277,15 @@ try {
     await check("desktop layout, controls, and contrast in all 12 themes", () => auditThemes(page, "1440", 36));
 
     await check("a dropped socket shows 'connection lost', reconnects, and rebuilds without lost or duplicate rows", async () => {
-      await page.locator(".scroll").evaluate((element) => { element.scrollTop = 0; });
+      // Start with one current controller so this check also catches a late close releasing its replacement.
+      await page.reload();
+      await ready(page);
+      const initial = page.locator('.scroll[data-run-ready="true"]');
+      await initial.waitFor({ timeout: 10_000 });
+      await page.locator('[data-part="timeline"] [data-id]').first().waitFor({ timeout: 10_000 });
       await settle(page);
       await page.locator(".dock textarea").fill("draft kept across disconnect");
+      const historyRequests = fake.requests.filter(({ method }) => method === "session_history").length;
       await fake.stop();
       await page.getByText("connection lost: zeta serve stopped").waitFor({ timeout: 5000 });
       // The command names the port the page was connected to, not a default.
@@ -287,7 +293,7 @@ try {
       if (command !== `zeta serve --ws ${fake.port} --ws-origin ${origin}`) throw new Error(`the banner command is "${command}"`);
       await Bun.sleep(2000); // a few quiet retries; the console listener fails the gate on any error
       await shoot(page, "state-lost-1440");
-      if (!(await page.locator('[data-part="timeline"] [data-kind="user"]').count())) throw new Error("transcript hidden while offline");
+      if (!(await page.locator('[data-part="timeline"] [data-id]').count())) throw new Error("transcript hidden while offline");
       const draft = page.locator('.dock textarea[aria-label="message"]');
       await draft.waitFor({ timeout: 2000 });
       if (await page.locator(".status-line").count()) throw new Error("the stopped server shows again in the dock");
@@ -297,7 +303,16 @@ try {
       await page.getByRole("button", { name: "retry now" }).click();
       await ready(page);
       await page.locator(".notice").waitFor({ state: "detached" });
-      await page.locator('[data-part="timeline"] [data-kind="user"]').first().waitFor({ timeout: 10_000 });
+      try {
+        // The replacement virtual timeline starts at the bottom, where an old user row need not be mounted.
+        for (let attempt = 0; fake.requests.filter(({ method, replied }) => method === "session_history" && replied !== undefined).length <= historyRequests && attempt < 500; attempt++) await Bun.sleep(10);
+        if (fake.requests.filter(({ method, replied }) => method === "session_history" && replied !== undefined).length <= historyRequests) throw new Error("server did not replay history");
+        await page.locator('.scroll:not([data-stale]) [data-part="timeline"] [data-id]').first().waitFor({ timeout: 10_000 });
+      } catch {
+        const state = await page.locator(".badge, .notice, .panel").allTextContents();
+        const recent = fake.requests.slice(-8).map(({ method, received, replied }) => `${method}:${replied === undefined ? "pending" : Math.round(replied - received) + "ms"}`);
+        throw new Error(`transcript did not rebuild; page=${JSON.stringify(state)} requests=${recent.join(",")}`);
+      }
       const ids = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('[data-part="timeline"] [data-id]')].map((item) => item.dataset.id));
       if (new Set(ids).size !== ids.length) throw new Error("duplicate rows after reconnect");
       if (await page.locator('[data-part="approval"][data-state="pending"]').count()) throw new Error("a dropped approval came back as pending");

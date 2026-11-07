@@ -306,6 +306,24 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     serialTail = next.catch(() => undefined);
     return next;
   };
+  const releaseController = (socket: ServerWebSocket<SocketData>) => {
+    if (controller !== socket) return;
+    controller = null;
+    composer.disconnect();
+    if (!decide || approvalAborted) return;
+    if (approvalReconnect && reconnectControllers.has(socket as object)) {
+      if (approvalExpiry) clearTimeout(approvalExpiry);
+      approvalExpiry = setTimeout(expireApproval, approvalReconnectGraceMs);
+      return;
+    }
+    approvalAborted = true;
+    const resolve = decide;
+    decide = null;
+    running = false;
+    histories[ACTIVE]!.push({ id: `drop-${Date.now()}`, role: "tool_result", content: [text("")], tool_result: result("live-2", "connection lost", { is_canceled: true }) });
+    if (currentHistoryMode === "new") histories[ACTIVE]!.push({ id: `approval-end-drop-${Date.now()}`, role: "system", event: "approval_end", request_id: "approval-1", tool_call: approvalCall, data: { decision: "abort", reason: "controller_disconnected" } });
+    resolve("abort");
+  };
 
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -322,22 +340,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
       open(socket) { sockets.add(socket); },
       close(socket) {
         sockets.delete(socket);
-        if (socket !== controller) return;
-        controller = null;
-        composer.disconnect();
-        if (!decide || approvalAborted) return;
-        if (approvalReconnect && reconnectControllers.has(socket as object)) {
-          if (approvalExpiry) clearTimeout(approvalExpiry);
-          approvalExpiry = setTimeout(expireApproval, approvalReconnectGraceMs);
-          return;
-        }
-        approvalAborted = true;
-        const resolve = decide;
-        decide = null;
-        running = false;
-        histories[ACTIVE]!.push({ id: `drop-${Date.now()}`, role: "tool_result", content: [text("")], tool_result: result("live-2", "connection lost", { is_canceled: true }) });
-        if (currentHistoryMode === "new") histories[ACTIVE]!.push({ id: `approval-end-drop-${Date.now()}`, role: "system", event: "approval_end", request_id: "approval-1", tool_call: approvalCall, data: { decision: "abort", reason: "controller_disconnected" } });
-        resolve("abort");
+        releaseController(socket);
       },
       message(socket, raw) {
         const received = performance.now();
@@ -354,10 +357,11 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         const send = (event: Json) => { for (const each of sockets) each.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: event })); };
         if (method === "hello") {
           if (params.role !== socket.data.role) { reply({ error: { code: -32602, message: `credential permits ${socket.data.role} role only` } }); socket.close(); return; }
-          if (mode === "busy" || sockets.size > 1) { socket.send(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "server busy" } })); socket.close(); return; }
+          if (mode === "busy" || (socket.data.role === "controller" && controller !== null)) { socket.send(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "server busy" } })); socket.close(); return; }
           if (mode === "incompatible") { reply({ error: { code: -32002, message: "version mismatch", data: { requested: "1.2", supported: ["1.0"] } } }); socket.close(); return; }
           if (mode === "slow") await wait(helloDelay);
-          controller = socket;
+          if (!sockets.has(socket)) return;
+          if (socket.data.role === "controller") controller = socket;
           const features = (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings)) ?? [];
           const reconnect = features.includes("approval_reconnect");
           if (reconnect) reconnectControllers.add(socket as object);
@@ -498,6 +502,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     async stop() {
       allowed = [];
       await rm(discovery, { force: true });
+      if (controller) releaseController(controller);
       this.drop();
       for (let attempt = 0; decide && attempt < 100; attempt++) await Bun.sleep(1);
     },
