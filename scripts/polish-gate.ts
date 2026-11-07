@@ -232,7 +232,7 @@ try {
         await both(view, "approval", width);
       });
       await check(`${width}: a streamed reply with a tool card`, async () => {
-        await view.locator('[data-part="approval"][data-state="pending"]').getByRole("button", { name: "approve" }).click();
+        await view.locator('[data-part="approval"][data-state="pending"]').getByRole("button", { name: "approve", exact: true }).click();
         await view.getByText("20 of 20").waitFor({ timeout: 15_000 });
         await view.locator('.status-line[data-state="ready"]').waitFor({ timeout: 10_000 });
         if (!(await view.locator('[data-part="timeline"] [data-part="tool"]').count())) throw new Error("no tool card");

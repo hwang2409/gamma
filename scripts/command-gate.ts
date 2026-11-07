@@ -42,6 +42,7 @@ try {
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(origin);
     await waitReady(page);
+    await page.waitForLoadState("networkidle");
 
     await check("fresh draft prepares slash before any send", async () => {
       const start = fake.requests.length;
@@ -52,6 +53,8 @@ try {
       if (methods.includes("send") || methods.includes("send_images")) throw new Error(`command reached delivery: ${methods.join(",")}`);
       if (await field(page).inputValue()) throw new Error("successful output command kept its draft");
     });
+    await page.waitForTimeout(500);
+    await waitReady(page);
 
     await check("attached slash keeps its attachment and explains it", async () => {
       const image = join(gammaHome, "one.png");
@@ -108,12 +111,14 @@ try {
     await check("opaque model input sends once without exposing its id", async () => {
       const start = fake.requests.length;
       await submit(page, "/review");
-      await page.getByText("$review", { exact: false }).waitFor({ timeout: 10_000 }).catch(async () => { throw new Error(`display text missing; requests: ${fake.requests.slice(start).map((request) => `${request.method}:${JSON.stringify(request.params)}`).join(",")}; body=${await page.locator("body").innerText()}`); });
+      for (let attempt = 0; attempt < 100 && !fake.requests.slice(start).some((request) => request.method === "send"); attempt++) await Bun.sleep(50);
       const calls = fake.requests.slice(start);
       const sends = calls.filter((request) => request.method === "send");
       if (calls.filter((request) => request.method === "slash_run").length !== 1 || sends.length !== 1) throw new Error(`expected one prepare and one send, got ${calls.map((call) => call.method)}`);
       if (sends[0]?.params.input_id !== "opaque-review-input" || "text" in (sends[0]?.params ?? {})) throw new Error("opaque send used the wrong shape");
+      if (fake.sent.at(-1)?.text !== "$review") throw new Error("opaque send did not keep its display text for the user row");
       if ((await page.locator("body").innerText()).includes("opaque-review-input")) throw new Error("opaque id reached visible text");
+      await page.getByRole("button", { name: "stop" }).waitFor({ timeout: 15_000 });
     });
 
     if (await page.getByRole("button", { name: "stop" }).count()) await page.getByRole("button", { name: "stop" }).click();
@@ -122,6 +127,8 @@ try {
       await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 }).catch(async () => { throw new Error(`composer did not become idle; text: ${await page.locator("body").innerText()}`); });
       await submit(page, "start a turn");
       await page.getByPlaceholder("steer the running turn").waitFor({ timeout: 10_000 }).catch(() => { throw new Error(`turn did not start; requests: ${fake.requests.slice(-8).map((request) => request.method).join(",")}`); });
+      await page.waitForTimeout(300);
+      await page.getByPlaceholder("steer the running turn").waitFor({ timeout: 10_000 });
       const before = requests("slash_run").length;
       await submit(page, "/status");
       await page.getByText("commands are unavailable while a turn is active", { exact: true }).waitFor({ timeout: 5_000 }).catch(async () => { throw new Error(`active command receipt missing; value=${JSON.stringify(await field(page).inputValue())}; requests=${fake.requests.slice(-8).map((request) => request.method).join(",")}; body=${await page.locator("body").innerText()}`); });
