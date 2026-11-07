@@ -137,6 +137,7 @@ const parseMap = (storage: RunStorage | undefined, key: string): Record<string, 
 /** React adapter over the workspace record data. Browser policy uses reduceWorkspace directly. */
 export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefined = globalThis.localStorage, draftStorage: RunStorage | undefined = globalThis.sessionStorage) {
   const records = new Map<string, RunRecord>();
+  const snapshots = new Map<string, RunRecord>();
   const aliases = new Map<string, string>();
   const listeners = new Set<() => void>();
   let active: string | null = null;
@@ -145,8 +146,8 @@ export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefi
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
   const emit = () => listeners.forEach((listener) => listener());
   const key = (id: string) => aliases.get(id) ?? id;
-  const value = (id: string): RunRecord => records.get(key(id)) ?? { ...blank(id as RunId), text: drafts[key(id)] ?? "" };
-  const write = (id: string, record: RunRecord) => { const target = key(id); records.delete(target); records.set(target, record); emit(); };
+  const value = (id: string): RunRecord => { const target = key(id); const current = records.get(target) ?? snapshots.get(target); if (current) return current; const created = { ...blank(target as RunId), text: drafts[target] ?? "" }; snapshots.set(target, created); return created; };
+  const write = (id: string, record: RunRecord) => { const target = key(id); snapshots.delete(target); records.delete(target); records.set(target, record); emit(); };
   const revoke = (images: readonly QueuedImage[]) => images.forEach((image) => URL.revokeObjectURL(image.url));
   const dirty = (record: RunRecord) => Boolean(record.text || record.attachments.length || record.deliveries.size || record.lifecycle.kind === "creating");
   const evict = () => { let clean = [...records].filter(([id, record]) => id !== active && !dirty(record)); while (clean.length > cleanLimit) { const [id, record] = clean.shift()!; revoke(record.attachments); records.delete(id); } };
@@ -157,7 +158,7 @@ export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefi
     canonical(id: string) { return key(id); },
     get(id: string) { return value(id); },
     subscribe(listener: () => void) { listeners.add(listener); return () => listeners.delete(listener); },
-    activate(id: string, initialModel: RunModel = { choice: "default" }) { active = key(id); if (!records.has(active)) records.set(active, { ...value(id), id: active as RunId, model: initialModel }); evict(); emit(); },
+    activate(id: string, initialModel: RunModel = { choice: "default" }) { active = key(id); if (!records.has(active)) { records.set(active, { ...value(id), id: active as RunId, model: initialModel }); snapshots.delete(active); } evict(); emit(); },
     edit(id: string, patch: { text?: string; attachments?: readonly QueuedImage[] }) { const current = value(id); const text = patch.text ?? current.text; write(id, { ...current, text, attachments: patch.attachments ?? current.attachments }); if (patch.text !== undefined) queueDraft(id, text); evict(); },
     removeAttachment(id: string, index: number) { const current = value(id); const image = current.attachments[index]; if (!image) return; URL.revokeObjectURL(image.url); write(id, { ...current, attachments: current.attachments.filter((_, item) => item !== index) }); },
     beginDelivery(id: string, delivery: PendingDelivery) { const current = value(id); const deliveries = new Map(current.deliveries); deliveries.set(delivery.id, { ...delivery, state: delivery.state ?? "requesting" }); write(id, { ...current, deliveries }); },
@@ -166,7 +167,7 @@ export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefi
     setModel(id: string, model: RunModel) { write(id, { ...value(id), model }); },
     setApprovalMode(id: string, approval_mode: "ask" | "allow") { const current = value(id); write(id, { ...current, settings: current.settings.kind === "ready" ? { ...current.settings, approval_mode } : { kind: "ready", approval_mode } }); },
     resolveDefault(id: string, currentModel: string, createdWithDefault: boolean) { const persisted = defaults[id]; if (persisted) return this.setModel(id, currentModel === persisted ? { choice: "default", resolvedDefault: persisted } : { choice: "explicit", model: currentModel, resolvedDefault: persisted }); if (createdWithDefault) { persistDefault(id, currentModel); return this.setModel(id, { choice: "default", resolvedDefault: currentModel }); } this.setModel(id, { choice: "explicit", model: currentModel }); },
-    dispose() { if (persistTimer) { clearTimeout(persistTimer); persistDrafts(); } records.forEach((record) => revoke(record.attachments)); records.clear(); aliases.clear(); listeners.clear(); },
+    dispose() { if (persistTimer) { clearTimeout(persistTimer); persistDrafts(); } records.forEach((record) => revoke(record.attachments)); records.clear(); snapshots.clear(); aliases.clear(); listeners.clear(); },
   };
 }
 export type RunStateStore = ReturnType<typeof createRunStateStore>;
