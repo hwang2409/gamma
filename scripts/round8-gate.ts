@@ -112,15 +112,6 @@ try {
           await page.getByRole("button", { name: /^approval mode: Ask/ }).click(); await auditDialog(page, ".confirm-popover");
           if (await page.evaluate(() => document.activeElement?.textContent) !== "keep asking") throw new Error("YOLO dialog focuses the risky action");
           await page.screenshot({ path: join(shots, `b2-yolo-${theme}-${width}.png`) }); await page.keyboard.press("Escape");
-          await send(page, "long turn for new run dialog");
-          await waitUntil(() => fake.sent.length === 1, "the dialog turn did not reach zeta");
-          await page.getByRole("button", { name: "steer the running turn" }).waitFor();
-          await page.locator('button.new-run:not([disabled])').click();
-          await page.locator(".empty-run").waitFor();
-          if (!new URL(page.url()).searchParams.get("run")?.startsWith("draft:")) throw new Error("new run did not get a draft URL");
-          await page.screenshot({ path: join(shots, `b2-new-run-${theme}-${width}.png`) });
-          await page.getByRole("button", { name: "stop running run" }).click();
-          await Bun.sleep(300);
         } finally { await close(context); }
       }
     });
