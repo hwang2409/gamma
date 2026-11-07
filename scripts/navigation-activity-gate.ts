@@ -29,9 +29,21 @@ async function check(name: string, run: () => Promise<void>) {
   try { await run(); passed++; console.log(`PASS ${name}`); }
   catch (error) { const message = error instanceof Error ? error.message : String(error); failures.push(`${name}: ${message}`); console.log(`FAIL ${name}: ${message}`); }
 }
+/**
+ * Sends `text` once the composer accepts it: a forced click on send while the run is still opening is dropped, so no
+ * turn starts. With `accepted`, also waits until the fake zeta took the send, so a later "stop" wait has a real turn.
+ */
+async function send(page: Page, text: string, { accepted = true } = {}) {
+  const before = fake.sent.length;
+  await page.locator('.dock textarea[aria-label="message"]').fill(text);
+  await page.getByRole("button", { name: "send message", exact: true }).click();
+  if (!accepted) return;
+  const took = () => fake.sent.slice(before).some((sent) => sent.method === "send" && sent.text === text);
+  for (let attempt = 0; attempt < 75 && !took(); attempt++) await Bun.sleep(200);
+  if (!took()) throw new Error(`fake zeta did not accept send "${text}"; it recorded ${JSON.stringify(fake.sent.slice(before))}`);
+}
 async function stopAfterSend(page: Page, text: string) {
-  const field = page.locator('.dock textarea[aria-label="message"]');
-  await field.fill(text); await page.locator('button[aria-label="send message"]').click({ force: true });
+  await send(page, text);
   const stop = page.getByRole("button", { name: "stop the running turn" });
   await stop.waitFor(); await stop.click();
   await page.getByRole("button", { name: "send message" }).waitFor();
@@ -45,7 +57,7 @@ async function queuedSteerSequence(browser: Awaited<ReturnType<typeof chromium.l
   const { context, page } = await fresh(browser, width);
   try {
     const field = page.locator('.dock textarea[aria-label="message"]');
-    await field.fill(`owner turn ${stopped ? "stop" : "natural"}`); await page.locator('button[aria-label="send message"]').click({ force: true });
+    await send(page, `owner turn ${stopped ? "stop" : "natural"}`);
     await page.getByRole("button", { name: "stop the running turn" }).waitFor({ timeout: 15_000 });
     await field.fill(`queued steer ${stopped ? "stop" : "natural"}`); await page.getByRole("button", { name: "steer the running turn" }).click();
     if (stopped) {
@@ -78,7 +90,7 @@ async function pendingCreateSequence(browser: Awaited<ReturnType<typeof chromium
     const temporary = page.url();
     if (!temporary.includes("run=draft%3A")) throw new Error(`new run did not get an immediate draft history entry: ${temporary}`);
     const field = page.locator('.dock textarea[aria-label="message"]');
-    await field.fill("pending first send C"); await page.locator('button[aria-label="send message"]').click({ force: true });
+    await send(page, "pending first send C", { accepted: false }); // navigates away while the create is pending
     await page.goBack(); await page.waitForURL(runA);
     if (await field.inputValue() === "pending first send C") throw new Error("pending C draft appeared under A");
     await Bun.sleep(3_500);
@@ -95,11 +107,10 @@ async function pendingCreateSequence(browser: Awaited<ReturnType<typeof chromium
 }
 
 async function uncachedNavigationSequence(browser: Awaited<ReturnType<typeof chromium.launch>>, width: number) {
+  fake.setOpenDelay(2_000); // the run is still opening when the composer appears, as on a slow CI runner
   const { context, page } = await fresh(browser, width, "/?run=s-reconnect");
   try {
-    const field = page.locator('.dock textarea[aria-label="message"]');
-    await field.fill("active run marker");
-    await page.locator('button[aria-label="send message"]').click({ force: true });
+    await send(page, "active run marker"); fake.setOpenDelay(0);
     await page.getByRole("button", { name: "stop the running turn" }).waitFor();
     await page.evaluate(() => {
       const url = new URL(location.href);
@@ -116,6 +127,7 @@ async function uncachedNavigationSequence(browser: Awaited<ReturnType<typeof chr
     const settings = [...fake.requests].reverse().find((request) => request.method === "session_settings" && request.params.session_id === "s-themes");
     if (settings && (!resume?.replied || settings.started < resume.replied)) throw new Error("target settings loaded before its resume completed");
   } finally {
+    fake.setOpenDelay(0);
     const stop = page.getByRole("button", { name: "stop the running turn" });
     await stop.waitFor({ timeout: 5_000 }).then(() => stop.click()).catch(() => {});
     await context.close(); fake.drop(); await Bun.sleep(500);
@@ -130,7 +142,7 @@ async function navigationSequence(browser: Awaited<ReturnType<typeof chromium.la
     const field = page.locator('.dock textarea[aria-label="message"]');
     await field.fill("draft kept in A");
     await page.getByRole("button", { name: "new run" }).click();
-    await field.fill("run B long turn"); await page.locator('button[aria-label="send message"]').click({ force: true });
+    await send(page, "run B long turn");
     await page.getByRole("button", { name: "stop the running turn" }).waitFor();
     const runB = page.url();
     const hint = page.locator('[data-part="composer-hint"]');
@@ -152,9 +164,8 @@ async function navigationSequence(browser: Awaited<ReturnType<typeof chromium.la
     if (await field.inputValue() !== "draft in B while running") throw new Error("forward did not restore run B draft");
     await page.getByRole("button", { name: "stop the running turn" }).waitFor();
     await page.getByRole("button", { name: "stop the running turn" }).click();
-    await page.waitForFunction(() => { const button = document.querySelector('button[aria-label="send message"]'); return button && button.getAttribute("aria-disabled") !== "true"; }, undefined, { timeout: 15_000 });
 
-    await field.fill("run B chained turn"); await page.locator('button[aria-label="send message"]').click({ force: true });
+    await send(page, "run B chained turn");
     await page.getByRole("button", { name: "stop the running turn" }).waitFor();
     await page.getByRole("button", { name: "new run" }).click();
     await page.getByText(/new run waits for the running run/i).waitFor();
