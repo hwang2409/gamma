@@ -56,6 +56,13 @@ function source(client: ZetaClient | null) {
   };
 }
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+async function waitFor(check: () => boolean, timeout = 5_000) {
+  const deadline = Date.now() + timeout;
+  while (!check()) {
+    if (Date.now() >= deadline) throw new Error(`timed out after ${timeout}ms`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
 
 function handlers(active: string | null, extra: Record<string, Handler> = {}): Record<string, Handler> {
   let current = active;
@@ -268,13 +275,15 @@ test("a failed replacement keeps the previous run usable", async () => {
 });
 
 test("a busy server is reported as busy and the selection stays", async () => {
-  const fake = await server(handlers(null, { resume: () => { throw { code: -32004, message: "a turn is already running" }; } }));
+  let resumeCalls = 0;
+  const fake = await server(handlers(null, { resume: () => { resumeCalls++; throw { code: -32004, message: "a turn is already running" }; } }));
   const view = createSessions(source(fake.client));
   await tick();
   view.select("a");
-  await tick();
+  await waitFor(() => present(view).openError !== null);
   expect(present(view).openError).toEqual({ id: "a", message: "a turn is already running", busy: true });
   expect(present(view).selected).toBe("a");
+  expect(resumeCalls).toBe(4);
 });
 
 test("a drop keeps the old transcript as stale; the reconnect rebuilds it on a fresh store without duplicates", async () => {
