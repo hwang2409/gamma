@@ -15,6 +15,7 @@ export type CompletionSnapshot = {
   entries: CompletionEntry[];
   truncated: boolean;
   activeIndex: number;
+  error: boolean;
 };
 
 export type CompletionKeyResult = {
@@ -23,26 +24,22 @@ export type CompletionKeyResult = {
   accepted?: { value: string; caret: number };
 };
 
-type Token = { start: number; end: number; queryStart: number; query: string };
+type Token = { start: number; queryStart: number; query: string };
+
+// Matches zeta src/zeta/tui/completion.py:19-20 against text before the caret.
+const PATH_TOKEN = /(?<!\S)@(?:"(?<quoted>[^"\n]*)|(?<unquoted>[^\s]*))$/;
+const CLOSED: CompletionSnapshot = { open: false, entries: [], truncated: false, activeIndex: 0, error: false };
 
 function tokenAt(value: string, caret: number): Token | undefined {
   if (caret < 0 || caret > value.length) return;
-  const lineStart = value.lastIndexOf("\n", caret - 1) + 1;
-  const prefix = value.slice(lineStart, caret);
-  const marker = prefix.lastIndexOf("@");
-  if (marker < 0 || (marker > 0 && !/\s/.test(prefix[marker - 1]))) return;
-  const start = lineStart + marker;
-  const quoted = value[start + 1] === '"';
-  const queryStart = start + (quoted ? 2 : 1);
-  if (!quoted && /\s/.test(value.slice(queryStart, caret))) return;
-  if (quoted) {
-    const close = value.indexOf('"', queryStart);
-    if (close >= 0 && close < caret) return;
-    return { start, end: close >= 0 ? close + 1 : value.length, queryStart, query: value.slice(queryStart, caret) };
-  }
-  const end = value.slice(start).search(/\s/);
-  const tokenEnd = end < 0 ? value.length : start + end;
-  return { start, end: tokenEnd, queryStart, query: value.slice(queryStart, caret) };
+  const match = PATH_TOKEN.exec(value.slice(0, caret));
+  if (!match || match.index === undefined) return;
+  const quoted = match.groups?.quoted;
+  return {
+    start: match.index,
+    queryStart: match.index + (quoted === undefined ? 1 : 2),
+    query: quoted ?? match.groups?.unquoted ?? "",
+  };
 }
 
 export function findCompletionToken(value: string, selectionStart: number, selectionEnd = selectionStart): Token | undefined {
@@ -55,27 +52,56 @@ export class CompletionModel {
   private value = "";
   private caret = 0;
   private token?: Token;
-  private state: CompletionSnapshot = { open: false, entries: [], truncated: false, activeIndex: 0 };
+  private state = CLOSED;
+  private readonly listeners = new Set<() => void>();
 
   constructor(
     private readonly request: (query: string) => Promise<CompletionResponse>,
     private readonly featureNegotiated: boolean,
   ) {}
 
+  readonly getSnapshot = (): CompletionSnapshot => this.state;
+  readonly subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  };
+
   get snapshot(): CompletionSnapshot { return this.state; }
+
+  private setState(state: CompletionSnapshot): void {
+    this.state = state;
+    for (const listener of this.listeners) listener();
+  }
 
   update(value: string, selectionStart: number, selectionEnd = selectionStart): void {
     this.value = value;
     this.caret = selectionStart;
     this.token = this.featureNegotiated ? findCompletionToken(value, selectionStart, selectionEnd) : undefined;
     const sequence = ++this.sequence;
-    this.state = { open: false, entries: [], truncated: false, activeIndex: 0 };
+    this.setState({ ...CLOSED });
     if (!this.token) return;
-    const query = this.token.query;
-    void this.request(query).then((response) => {
-      if (sequence !== this.sequence || this.token?.query !== query || this.token.start !== tokenAt(this.value, this.caret)?.start) return;
-      this.state = { open: response.entries.length > 0, entries: response.entries, truncated: response.truncated, activeIndex: 0 };
-    });
+    const { query, start } = this.token;
+    void this.request(query).then(
+      (response) => {
+        if (!this.isCurrent(sequence, query, start)) return;
+        this.setState({
+          open: response.entries.length > 0,
+          entries: response.entries,
+          truncated: response.truncated,
+          activeIndex: 0,
+          error: false,
+        });
+      },
+      () => {
+        if (!this.isCurrent(sequence, query, start)) return;
+        this.setState({ ...CLOSED, error: true });
+      },
+    );
+  }
+
+  private isCurrent(sequence: number, query: string, start: number): boolean {
+    const current = tokenAt(this.value, this.caret);
+    return sequence === this.sequence && this.token?.query === query && current?.start === start;
   }
 
   accept(): { value: string; caret: number } | undefined {
@@ -83,8 +109,7 @@ export class CompletionModel {
     const entry = this.state.entries[this.state.activeIndex];
     const token = tokenAt(this.value, this.caret);
     if (!entry || !token) return;
-    const replacementEnd = this.caret <= token.end ? this.caret : token.end;
-    const value = this.value.slice(0, token.queryStart) + entry.insert_text + this.value.slice(replacementEnd);
+    const value = this.value.slice(0, token.queryStart) + entry.insert_text + this.value.slice(this.caret);
     return { value, caret: token.queryStart + entry.insert_text.length };
   }
 
@@ -93,21 +118,21 @@ export class CompletionModel {
     if (key === "Escape") {
       if (!this.state.open) return { handled: false, submitted: false };
       this.sequence++;
-      this.state = { ...this.state, open: false };
+      this.setState({ ...this.state, open: false });
       return { handled: true, submitted: false };
     }
     if (key === "ArrowUp" || key === "ArrowDown") {
       if (!this.state.open) return { handled: false, submitted: false };
       const delta = key === "ArrowDown" ? 1 : -1;
       const count = this.state.entries.length;
-      this.state = { ...this.state, activeIndex: (this.state.activeIndex + delta + count) % count };
+      this.setState({ ...this.state, activeIndex: (this.state.activeIndex + delta + count) % count });
       return { handled: true, submitted: false };
     }
     if (key === "Tab" || (key === "Enter" && this.state.open)) {
       if (!this.state.open) return { handled: false, submitted: false };
       const accepted = this.accept();
       this.sequence++;
-      this.state = { ...this.state, open: false };
+      this.setState({ ...this.state, open: false });
       return { handled: true, submitted: false, accepted };
     }
     return { handled: false, submitted: key === "Enter" };
