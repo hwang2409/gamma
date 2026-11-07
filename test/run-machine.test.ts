@@ -42,7 +42,7 @@ class Reference {
       case "STOP_FAIL": if (this.stopOperations.get(event.runId) === event.operationId) this.stopOperations.delete(event.runId); break;
       case "SETTINGS_DESIRED": this.settings.set(event.runId, event.approval_mode ?? "unknown"); break;
       case "SETTINGS_OK": this.settings.set(event.runId, event.approval_mode ?? "unknown"); break;
-      case "DISCONNECT": this.attached = null; this.turn = null; break;
+      case "DISCONNECT": this.attached = null; this.turn = null; for (const items of this.deliveries.values()) for (const [id, state] of items) if (state === "requesting") items.set(id, "queued"); break;
       default: break;
     }
   }
@@ -111,4 +111,16 @@ test("mutation: reconnect reconciles each durable delivery", () => {
   const correct = reduceWorkspace(state, { type: "RECONNECT" });
   const mutant = { ...correct, effects: correct.effects.filter((effect) => effect.type !== "delivery-status") };
   expect(observe(correct.state, correct.effects)).not.toEqual(observe(mutant.state, mutant.effects));
+});
+
+test("store updates cannot invalidate an in-flight delivery acknowledgement", () => {
+  const runId = "s-pending" as SessionId;
+  const operationId = "o-pending" as OperationId;
+  let state: WorkspaceState = { entry: { id: "e" as EntryId, run: runId }, runs: new Map(), aliases: new Map(), attachment: { kind: "detached" } };
+  state = reduceWorkspace(state, { type: "ENSURE_RUN", runId, text: "send thiskeep typing" }).state;
+  state = reduceWorkspace(state, { type: "DELIVERY_BEGIN", runId, operationId, delivery: { id: "i", attemptId: "i", operationId, method: "send", text: "send this", images: [], state: "requesting" } }).state;
+  const reconciled = reduceWorkspace(state, { type: "DELIVERY_RECONCILE", runId });
+  expect(reconciled.effects).toEqual([]);
+  state = reduceWorkspace(reconciled.state, { type: "DELIVERY_ACK", runId, intentId: "i", operationId, attemptId: "i", queued: true }).state;
+  expect(state.runs.get(runId)?.text).toBe("keep typing");
 });
