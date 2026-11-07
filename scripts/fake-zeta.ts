@@ -304,14 +304,16 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         };
         const send = (event: Json) => { for (const each of sockets) each.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: event })); };
         if (method === "hello") {
+          console.log(`fake hello role=${socket.data.role} sockets=${sockets.size} mode=${mode}`);
           if (params.role !== socket.data.role) { reply({ error: { code: -32602, message: `credential permits ${socket.data.role} role only` } }); socket.close(); return; }
-          if (mode === "busy" || sockets.size > 1) { socket.send(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "server busy" } })); socket.close(); return; }
+          if (mode === "busy" || sockets.size > 1) { console.log("fake hello result=busy"); socket.send(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "server busy" } })); socket.close(); return; }
           if (mode === "incompatible") { reply({ error: { code: -32002, message: "version mismatch", data: { requested: "1.2", supported: ["1.0"] } } }); socket.close(); return; }
           if (mode === "slow") await wait(60_000);
           controller = socket;
           const features = (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (settingsEnabled && ["model_catalog", "session_settings", "set_settings", "send_images"].includes(name)) || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect)) ?? [];
           const reconnect = features.includes("approval_reconnect");
           if (reconnect) reconnectControllers.add(socket as object);
+          console.log("fake hello result=connected");
           reply({ result: { protocol_version: "1.2", server: "fake-zeta", capabilities: { features } } });
           if (decide && !approvalAborted) {
             if (!reconnect) expireApproval();
