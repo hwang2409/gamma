@@ -90,6 +90,7 @@ try {
       // Back to Ask for the states below.
       await footer.getByRole("button", { name: /^approval mode: YOLO/ }).click();
       await footer.getByRole("button", { name: /^approval mode: Ask/ }).waitFor();
+      for (let attempt = 0; attempt < 100 && fake.settings.approval_mode !== "ask"; attempt++) await Bun.sleep(20);
       if (fake.settings.approval_mode !== "ask") throw new Error("Ask did not reach zeta");
     });
     await check("new run clears the current run and its YOLO mark", async () => {
