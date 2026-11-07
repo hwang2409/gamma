@@ -112,9 +112,9 @@ async function uncachedNavigationSequence(browser: Awaited<ReturnType<typeof chr
       throw new Error("uncached target showed the active run transcript");
     if (await page.getByRole("button", { name: "stop the running turn" }).count())
       throw new Error("uncached target exposed the active run stop control");
-    const resume = [...fake.requests].reverse().find((request) => request.method === "resume");
-    const settings = [...fake.requests].reverse().find((request) => request.method === "session_settings");
-    if (settings && (!resume?.replied || settings.started < resume.replied)) throw new Error("settings loaded before resume completed");
+    const resume = [...fake.requests].reverse().find((request) => request.method === "resume" && request.params.session_id === "s-themes");
+    const settings = [...fake.requests].reverse().find((request) => request.method === "session_settings" && request.params.session_id === "s-themes");
+    if (settings && (!resume?.replied || settings.started < resume.replied)) throw new Error("target settings loaded before its resume completed");
   } finally {
     const stop = page.getByRole("button", { name: "stop the running turn" });
     await stop.waitFor({ timeout: 5_000 }).then(() => stop.click()).catch(() => {});

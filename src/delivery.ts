@@ -81,12 +81,12 @@ type RunId = import("./run-state").RunId;
 type DeliveryRecord = { delivery: ReturnType<typeof createDelivery>; store?: DeliveryStore; unsubscribe?: () => void };
 
 /** The small effect seam: reducer effects enter; owner- and operation-tagged results return through RunStateStore.dispatch. */
-function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: DeliveryRunStore, record: (runId: string) => DeliveryRecord, finish: (operationId: OperationId, error?: unknown) => void) {
+function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: DeliveryRunStore, record: (runId: string) => DeliveryRecord, finish: (operationId: OperationId, error?: unknown) => void, abortSession?: (runId: string) => Promise<unknown>) {
   const unavailable = () => new Error("not connected to zeta serve");
   const handleAbort = async (effect: Extract<WorkspaceEffect, { type: "abort" }>) => {
     const target = client();
     if (!target) { const error = unavailable(); runs.dispatch({ type: "STOP_FAIL", runId: effect.runId, operationId: effect.operationId }); return finish(effect.operationId, error); }
-    try { await record(effect.runId).delivery.stop(target); runs.dispatch({ type: "STOP_OK", runId: effect.runId, operationId: effect.operationId }); finish(effect.operationId); }
+    try { await (abortSession ? abortSession(effect.runId) : record(effect.runId).delivery.stop(target)); runs.dispatch({ type: "STOP_OK", runId: effect.runId, operationId: effect.operationId }); finish(effect.operationId); }
     catch (error) { runs.dispatch({ type: "STOP_FAIL", runId: effect.runId, operationId: effect.operationId }); finish(effect.operationId, error); }
   };
   const handleStatus = async (effect: Extract<WorkspaceEffect, { type: "delivery-status" }>) => {
@@ -145,7 +145,7 @@ function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: Del
 }
 
 /** Coordinates UI bindings and reducer commands; all zeta calls are in the effect executor above. */
-export function createDeliveryManager(client: () => ZetaClient | null, runs: DeliveryRunStore) {
+export function createDeliveryManager(client: () => ZetaClient | null, runs: DeliveryRunStore, executeSession: (effects: readonly WorkspaceEffect[]) => void = () => {}, abortSession?: (runId: string) => Promise<unknown>) {
   const records = new Map<string, DeliveryRecord>();
   const pending = new Map<string, { resolve(value?: unknown): void; reject(error: unknown): void }>();
   let activeRun: string | null = null;
@@ -158,9 +158,9 @@ export function createDeliveryManager(client: () => ZetaClient | null, runs: Del
     const waiter = pending.get(operationId); if (!waiter) return;
     pending.delete(operationId); error === undefined ? waiter.resolve() : waiter.reject(error);
   };
-  const executor = createDeliveryEffectExecutor(client, runs, record, finish);
+  const executor = createDeliveryEffectExecutor(client, runs, record, finish, abortSession);
   const operation = (start: (operationId: OperationId) => void) => { const operationId = crypto.randomUUID() as OperationId; const result = new Promise<void>((resolve, reject) => pending.set(operationId, { resolve, reject })); start(operationId); return result; };
-  runs.setEffectExecutor(executor.execute);
+  runs.setEffectExecutor((effects) => { executor.execute(effects); executeSession(effects); });
   return {
     bind(runId: string, store: DeliveryStore | undefined) { const item = record(runId); if (item.store === store) return; item.unsubscribe?.(); item.store = store; item.unsubscribe = store?.subscribe(() => setTimeout(() => runs.reconcileDeliveries(runId), 0)); runs.reconcileDeliveries(runId); },
     reconcile(runId: string) { runs.reconcileDeliveries(runId); },
@@ -172,7 +172,6 @@ export function createDeliveryManager(client: () => ZetaClient | null, runs: Del
       return operation((operationId) => runs.writeSettings(runId, operationId));
     },
     observeActive(runId: string | null, connected: boolean) { const previous = activeRun; activeRun = runId; if (!runId && previous && connected) runs.reconcileDeliveries(previous); },
-    promote(from: string, to: string) { const item = records.get(from); if (!item || from === to) return; records.delete(from); records.set(to, item); },
     submit(runId: string, text: string, steer: boolean, deliveryId = `web-${crypto.randomUUID()}`) {
       const operationId = crypto.randomUUID() as OperationId;
       const result = new Promise((resolve, reject) => pending.set(operationId, { resolve, reject }));

@@ -1,6 +1,8 @@
 import { fromZetaEvent, fromZetaHistory, type SessionLease, type ZetaClient } from "@fulcrum/zeta";
 import type { RunEvent } from "@fulcrum/core";
 import type { hostBindings, Registration } from "./host-client";
+import type { QueuedImage } from "./image-queue";
+import { activeRun } from "./run-state";
 type HostBindings = typeof hostBindings;
 
 /** The `SessionMetadata` fields this app reads from `list_sessions` (zeta docs/serve-protocol.md). */
@@ -222,198 +224,194 @@ export type RunState = {
 };
 
 type Source = { readonly client: ZetaClient | null; subscribe(listener: () => void): () => void };
+type RunStateStore = import("./run-state").RunStateStore;
+type WorkspaceEffect = import("./run-state").WorkspaceEffect;
+type OperationId = import("./run-state").OperationId;
+type SessionId = import("./run-state").SessionId;
+type DraftRunId = import("./run-state").DraftRunId;
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+const turn = (status: ServerStatus) => status.pending_approvals?.length ? "approval" as const : status.state === "idle" ? "idle" as const : status.state;
+const RETRY_DELAYS = [250, 500, 1_000] as const;
 
-/** Owns cached session leases while exposing only the exact URL-selected run. */
-export function createRun(connection: Source, { selected = null, onSelect, bindings }: { selected?: string | null; onSelect?: (id: string | null) => void; bindings?: HostBindings } = {}) {
-  let state: RunState = { selected, open: null, opening: selected ? { id: selected, messages: 0 } : null, openError: null, session: null, active: null, attached: null };
-  const cachedRuns = new Map<string, OpenRun>();
-  const cachedSessions = new Map<string, SessionMeta>();
-  const listeners = new Set<() => void>();
-  const set = (patch: Partial<RunState>) => { state = { ...state, ...patch }; listeners.forEach((listener) => listener()); };
+/** Executes tagged session effects. Run selection, leases, attachment, and active-turn truth remain in RunStateStore. */
+export function createSessionManager(connection: Source, runs: RunStateStore, bindings?: HostBindings) {
   let client: ZetaClient | null = null;
-  let activeSubscription = () => {};
-  let openGeneration = 0;
+  let unsubscribe = () => {};
+  let started = false;
   let openAbort: AbortController | null = null;
-  let attachmentHolds = 0;
-  let deferredSelection: string | null | undefined;
-  let createdPending: string | null = null;
+  const leaseSubscriptions = new Map<string, () => void>();
+  const leases = new Map<string, OpenRun>();
+  const knownStatus = new Map<string, ServerStatus>();
+  const pending = new Map<string, { resolve(value: unknown): void; reject(error: unknown): void }>();
   const live = (target: ZetaClient) => client === target;
   const register = (target: ZetaClient, id?: string) => bindings && target.features.includes("session_host_commands") ? bindings.register(id) : undefined;
-  const watchActiveTurn = (id: string, run: OpenRun) => {
-    activeSubscription();
-    const update = () => set({ active: run.lease.store.getState().agent === "running" ? id : null });
-    activeSubscription = run.lease.store.subscribe(update);
-    update();
+  const finish = (operationId: OperationId | undefined, value?: unknown, error?: unknown) => {
+    if (!operationId) return;
+    const waiter = pending.get(operationId); if (!waiter) return;
+    pending.delete(operationId); error === undefined ? waiter.resolve(value) : waiter.reject(error);
   };
-  const publishSelected = (id: string) => set({
-    selected: id,
-    open: cachedRuns.get(id) ?? null,
-    opening: cachedRuns.has(id) ? null : { id, messages: 0 },
-    openError: null,
-    session: cachedSessions.get(id) ?? null,
-  });
-  const updateCached = (id: string, run: OpenRun) => {
-    cachedRuns.set(id, run);
-    if (state.selected === id) set({ open: run, opening: null });
+  const current = (runId: string, operationId: OperationId) => runs.isCurrentOperation(runId, operationId);
+  const watch = (runId: SessionId, open: OpenRun) => {
+    leases.set(runId, open);
+    leaseSubscriptions.get(runId)?.();
+    let running = open.lease.store.getState().agent === "running";
+    const update = () => {
+      const next = open.lease.store.getState().agent === "running";
+      if (next === running) return;
+      running = next;
+      runs.dispatch(next ? { type: "TURN_START", runId } : { type: "TURN_END", runId });
+    };
+    leaseSubscriptions.set(runId, open.lease.store.subscribe(update));
+    if (running) runs.dispatch({ type: "TURN_START", runId });
   };
-  const open = async (id: string, knownStatus?: ServerStatus, present = true) => {
+  const retryBusy = async (runId: string, operationId: OperationId, attempt: number, signal?: AbortSignal) => {
+    if (!current(runId, operationId)) throw Object.assign(new Error("stale operation"), { name: "AbortError" });
+    if (activeRun(runs.getCatalog())) return false;
+    const status = client ? await getStatus(client, signal).catch(() => null) : null;
+    if (status?.session && status.state !== "idle" && status.session.session_id !== runId) return false;
+    await wait(RETRY_DELAYS[attempt]!, signal);
+    return current(runId, operationId);
+  };
+  const handleStatus = async (effect: Extract<WorkspaceEffect, { type: "status" }>) => {
     const target = client;
-    if (state.active && state.active !== id) {
-      publishSelected(id);
-      set({ opening: cachedRuns.has(id) ? null : { id, messages: 0 }, openError: { id, message: `${state.active} has the active turn`, busy: true } });
-      return;
-    }
-    const mine = ++openGeneration;
-    openAbort?.abort();
-    const abort = new AbortController();
-    openAbort = abort;
-    if (present) publishSelected(id);
-    const cached = cachedRuns.get(id);
-    if (!target || (cached && state.attached === id && !cached.stale)) return;
-    try {
-      const registration = await register(target, id);
-      let status = knownStatus;
-      if (cached && !status) {
-        const resumed = await target.request("resume", { session_id: id, ...(registration ? { host_commands: [registration.command] } : {}) }, { timeoutMs: 30_000, signal: abort.signal }) as { session?: SessionMeta };
-        status = await getStatus(target, abort.signal);
-        if (!status.session) status = { ...status, session: resumed.session ?? null };
-      }
-      if (mine !== openGeneration || !live(target)) return;
-      let history = { messages: 0, complete: false };
-      const opened = await openSession(target, id, (messages, complete) => {
-        history = { messages, complete };
-        if (mine === openGeneration && state.selected === id) set({ opening: { id, messages } });
-      }, abort.signal, status, registration);
-      if (mine !== openGeneration || !live(target)) { opened.lease.release(); return; }
-      const run = { id, lease: opened.lease, stale: false, history, syncing: opened.syncing };
-      const old = cachedRuns.get(id);
-      if (old && old.lease !== run.lease) old.lease.release();
-      if (opened.session) cachedSessions.set(id, opened.session);
-      updateCached(id, run);
-      set({ attached: id, ...(state.selected === id ? { session: opened.session ?? cachedSessions.get(id) ?? null, openError: null } : {}) });
-      watchActiveTurn(id, run);
-      void opened.complete.then((result) => {
-        const nextSelection = state.active === id ? state.selected : null;
-        if (state.active === id) set({ active: null });
-        if (result.lease) {
-          const current = cachedRuns.get(id);
-          if (mine !== openGeneration || !live(target)) return result.lease.release();
-          current?.lease.release();
-          const completed = { ...run, lease: result.lease, history: { ...history, complete: true }, syncing: result.syncing };
-          updateCached(id, completed);
-          if (state.attached === id) watchActiveTurn(id, completed);
-        } else if (cachedRuns.get(id) === run) updateCached(id, { ...run, history: { ...history, complete: true }, syncing: result.syncing });
-        if (nextSelection && nextSelection !== id) void open(nextSelection);
-      }).catch((error) => {
-        if (mine === openGeneration && live(target) && state.selected === id && (error as { name?: string }).name !== "AbortError")
-          set({ openError: { id, message: message(error), busy: isBusyError(error) } });
-      });
-    } catch (error) {
-      if (mine !== openGeneration || !live(target) || (error as { name?: string }).name === "AbortError") return;
-      set({ open: cachedRuns.get(id) ?? null, opening: null, openError: { id, message: message(error), busy: isBusyError(error) } });
-    }
-  };
-  const disconnect = () => {
-    openGeneration++;
-    openAbort?.abort();
-    const selected = state.selected && cachedRuns.get(state.selected);
-    if (selected && client?.features.includes("approval_reconnect")) {
-      for (const { id: itemId } of selected.lease.store.getOutline()) {
-        const item = selected.lease.store.getItem(itemId);
-        if (item?.type === "approval" && !item.ended && item.request.type === "approval_request")
-          selected.lease.store.dispatch({ ...item.request, state: "reconnecting", status: "reconnecting…", disabled_reason: "decisions are disabled while disconnected" });
-      }
-    }
-    activeSubscription();
-    activeSubscription = () => {};
-    for (const [id, run] of cachedRuns) cachedRuns.set(id, { ...run, stale: true });
-    set({ open: state.selected ? cachedRuns.get(state.selected) ?? null : null, active: null, attached: null });
-  };
-  const connect = async (target: ZetaClient) => {
+    if (!target) return;
     try {
       const status = await getStatus(target);
       if (!live(target)) return;
-      const owner = status.state === "idle" ? null : status.session?.session_id ?? null;
-      set({ attached: status.session?.session_id ?? null, active: owner });
-      if (state.selected) await open(state.selected, status);
-    } catch (error) {
-      if (live(target) && state.selected) set({ opening: null, openError: { id: state.selected, message: message(error), busy: isBusyError(error) } });
+      knownStatus.clear();
+      if (status.session) knownStatus.set(status.session.session_id, status);
+      runs.dispatch({ type: "STATUS", ...(status.session ? { sessionId: status.session.session_id as SessionId, session: status.session } : {}), turn: turn(status), operationId: effect.operationId });
+      finish(effect.operationId, status);
+    } catch (error) { finish(effect.operationId, undefined, error); }
+  };
+  const handleOpen = async (effect: Extract<WorkspaceEffect, { type: "open-session" }>) => {
+    const target = client;
+    if (!target || !current(effect.runId, effect.operationId)) return;
+    openAbort?.abort();
+    const abort = new AbortController();
+    openAbort = abort;
+    const previous = runs.get(effect.runId).open;
+    if (previous) {
+      leaseSubscriptions.get(effect.runId)?.();
+      leaseSubscriptions.delete(effect.runId);
+      leases.delete(effect.runId);
+      previous.lease.release();
     }
+    for (let attempt = 0; attempt < RETRY_DELAYS.length; attempt++) {
+      try {
+        let history = { messages: 0, complete: false };
+        const registration = await register(target, effect.runId);
+        const initialStatus = knownStatus.get(effect.runId);
+        knownStatus.clear();
+        const opened = await openSession(target, effect.runId, (messages, complete) => {
+          history = { messages, complete };
+          runs.dispatch({ type: "OPEN_PROGRESS", runId: effect.runId, operationId: effect.operationId, messages });
+        }, abort.signal, initialStatus, registration);
+        if (!live(target) || !current(effect.runId, effect.operationId)) { opened.lease.release(); return; }
+        const open: OpenRun = { id: effect.runId, lease: opened.lease, stale: false, history, syncing: true };
+        runs.dispatch({ type: "RESUME_OK", runId: effect.runId, operationId: effect.operationId });
+        runs.dispatch({ type: "OPEN_OK", runId: effect.runId, operationId: effect.operationId, open, ...(opened.session ? { session: opened.session } : {}) });
+        watch(effect.runId, open);
+        void opened.complete.then((result) => {
+          if (!current(effect.runId, effect.operationId)) { result.lease?.release(); return; }
+          const active = runs.get(effect.runId).open ?? open;
+          const complete: OpenRun = { ...active, ...(result.lease ? { lease: result.lease } : {}), history: { ...history, complete: true }, syncing: result.syncing };
+          if (result.lease && active.lease !== result.lease) active.lease.release();
+          runs.dispatch({ type: "OPEN_COMPLETE", runId: effect.runId, operationId: effect.operationId, open: complete });
+          watch(effect.runId, complete);
+        }).catch((error) => {
+          if (current(effect.runId, effect.operationId) && (error as { name?: string }).name !== "AbortError") runs.dispatch({ type: "OPEN_FAIL", runId: effect.runId, operationId: effect.operationId, error: message(error), busy: isBusyError(error) });
+        });
+        return;
+      } catch (error) {
+        if (!live(target) || !current(effect.runId, effect.operationId) || (error as { name?: string }).name === "AbortError") return;
+        if (isBusyError(error) && await retryBusy(effect.runId, effect.operationId, attempt, abort.signal) && attempt < RETRY_DELAYS.length - 1) continue;
+        runs.dispatch({ type: "OPEN_FAIL", runId: effect.runId, operationId: effect.operationId, error: message(error), busy: isBusyError(error) });
+        return;
+      }
+    }
+  };
+  const handleCreate = async (effect: Extract<WorkspaceEffect, { type: "new-session" }>) => {
+    const target = client;
+    if (!target) { const error = new Error("not connected to zeta serve"); runs.dispatch({ type: "NEW_SESSION_FAIL", runId: effect.runId, operationId: effect.operationId, error: error.message }); return finish(effect.operationId, undefined, error); }
+    for (let attempt = 0; attempt < RETRY_DELAYS.length; attempt++) {
+      try {
+        const binding = await register(target);
+        const { approval_mode, ...sessionChoice } = effect.choice ?? {};
+        const params = { ...sessionChoice, ...(target.features.includes("new_session_settings") && approval_mode ? { approval_mode } : {}), ...(binding ? { host_commands: [binding.command] } : {}) };
+        const { session } = await target.request("new_session", params, { timeoutMs: 30_000 }) as { session: SessionMeta };
+        if (binding) await bindings!.bind(binding.registration_id, session.session_id);
+        if (!live(target) || !current(effect.runId, effect.operationId)) return;
+        runs.dispatch({ type: "NEW_SESSION_OK", runId: effect.runId, sessionId: session.session_id as SessionId, operationId: effect.operationId, session });
+        finish(effect.operationId, session.session_id);
+        return;
+      } catch (error) {
+        if (!live(target) || !current(effect.runId, effect.operationId)) return;
+        if (isBusyError(error) && await retryBusy(effect.runId, effect.operationId, attempt) && attempt < RETRY_DELAYS.length - 1) continue;
+        runs.dispatch({ type: "NEW_SESSION_FAIL", runId: effect.runId, operationId: effect.operationId, error: message(error), busy: isBusyError(error) });
+        finish(effect.operationId, undefined, error);
+        return;
+      }
+    }
+  };
+  const handleImages = async (effect: Extract<WorkspaceEffect, { type: "send-images" }>) => {
+    const delivery = runs.get(effect.runId).deliveries.get(effect.intentId);
+    if (!client || !delivery) { const error = new Error("session is not attached"); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false, failed: true }); finish(effect.operationId, undefined, error); return; }
+    try {
+      await client.request("send_images", { text: delivery.text, images: delivery.images.map(({ name, mime_type, data }) => ({ name, mime_type, data })), delivery_id: effect.intentId }, { timeoutMs: 30_000 });
+      runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false }); finish(effect.operationId, true);
+    } catch (error) { runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false, failed: true }); finish(effect.operationId, undefined, error); }
+  };
+  const executeOne = (effect: WorkspaceEffect) => {
+    if (effect.type === "status") return void handleStatus(effect);
+    if (effect.type === "send-images") return void handleImages(effect);
+    if (effect.type === "open-session") return void handleOpen(effect);
+    if (effect.type === "new-session") return void handleCreate(effect);
+    if (effect.type === "release-lease") { const open = leases.get(effect.runId); leaseSubscriptions.get(effect.runId)?.(); leaseSubscriptions.delete(effect.runId); leases.delete(effect.runId); open?.lease.release(); }
   };
   const onConnection = () => {
     if (connection.client === client) return;
-    if (client) disconnect();
+    if (client) {
+      openAbort?.abort(); leaseSubscriptions.forEach((stop) => stop()); leaseSubscriptions.clear();
+      if (client.features.includes("approval_reconnect")) for (const record of runs.getCatalog().runs.values()) if (record.open) for (const { id } of record.open.lease.store.getOutline()) {
+        const item = record.open.lease.store.getItem(id);
+        if (item?.type === "approval" && !item.ended && item.request.type === "approval_request") record.open.lease.store.dispatch({ ...item.request, state: "reconnecting", status: "reconnecting…", disabled_reason: "decisions are disabled while disconnected" });
+      }
+      runs.dispatch({ type: "DISCONNECT" });
+    }
     client = connection.client;
-    if (client) void connect(client);
+    if (client) runs.dispatch({ type: "RECONNECT" });
   };
-  const unsubscribe = connection.subscribe(onConnection);
-  onConnection();
-
   return {
-    get state() { return state; },
-    subscribe(listener: () => void) { listeners.add(listener); return () => listeners.delete(listener); },
-    select(id: string) {
-      if (id === state.selected && (state.opening || (state.open && !state.open.stale))) return;
-      onSelect?.(id);
-      if (attachmentHolds) { deferredSelection = id; publishSelected(id); return; }
-      void open(id);
+    execute(effects: readonly WorkspaceEffect[]) { for (const effect of effects) executeOne(effect); },
+    start() { if (started) return; started = true; unsubscribe = connection.subscribe(onConnection); onConnection(); },
+    create(runId: string, choice: { model?: string; provider?: string; approval_mode?: "ask" | "allow" } = {}) {
+      const operationId = crypto.randomUUID() as OperationId;
+      const result = new Promise<string>((resolve, reject) => pending.set(operationId, { resolve: (value) => resolve(String(value)), reject }));
+      runs.startSession(runId, choice, operationId);
+      return result;
     },
-    holdAttachment() {
-      attachmentHolds++;
-      let held = true;
-      return () => {
-        if (!held) return;
-        held = false;
-        if (--attachmentHolds) return;
-        const target = deferredSelection === undefined ? createdPending : deferredSelection;
-        deferredSelection = undefined; createdPending = null;
-        if (target) void open(target);
-      };
+    refreshStatus() {
+      const operationId = crypto.randomUUID() as OperationId;
+      const result = new Promise<ServerStatus>((resolve, reject) => pending.set(operationId, { resolve: (value) => resolve(value as ServerStatus), reject }));
+      void handleStatus({ type: "status", operationId });
+      return result;
     },
-    dismissOpenError() { set({ openError: null }); },
-    async refreshStatus() {
-      if (!client) return;
-      const status = await getStatus(client);
-      const owner = status.state === "idle" ? null : status.session?.session_id ?? null;
-      set({ active: owner, attached: status.session?.session_id ?? state.attached });
-      if (!owner && state.selected && !state.selected.startsWith("draft:")) await open(state.selected, status);
+    dismissOpenError(runId: string) { runs.dispatch({ type: "OPEN_DISMISS", runId: runId as SessionId }); },
+    retryOpen(runId: string) { runs.requestOpen(runId); },
+    abort(runId: string) {
+      const attachment = runs.getCatalog().attachment;
+      if (!client || attachment.kind !== "attached" || attachment.sessionId !== runId) throw Object.assign(new Error("session is not attached"), { code: -32003 });
+      return client.request("abort", {}, { timeoutMs: 10_000 });
     },
-    sendImages(sessionId: string, deliveryId: string, text: string, images: readonly { name: string; mime_type: string; data: string }[]) {
-      if (!client || state.attached !== sessionId) throw Object.assign(new Error("session is not attached"), { code: -32003 });
-      return client.request("send_images", { session_id: sessionId, delivery_id: deliveryId, text, images }, { timeoutMs: 30_000 });
+    sendImages(sessionId: string, deliveryId: string, text: string, images: readonly QueuedImage[]) {
+      const operationId = crypto.randomUUID() as OperationId;
+      return new Promise<void>((resolve, reject) => {
+        pending.set(operationId, { resolve: () => resolve(), reject });
+        runs.dispatch({ type: "DELIVERY_BEGIN", runId: sessionId as SessionId, operationId, delivery: { id: deliveryId, attemptId: deliveryId, operationId, method: "send_images", text, images, state: "requesting" } });
+      });
     },
-    async create(choice: { model?: string; provider?: string; approval_mode?: "ask" | "allow" } = {}) {
-      const target = client;
-      if (!target) throw new Error("not connected to zeta serve");
-      const binding = await register(target);
-      const { approval_mode, ...sessionChoice } = choice;
-      const params = { ...sessionChoice, ...(target.features.includes("new_session_settings") && approval_mode ? { approval_mode } : {}), ...(binding ? { host_commands: [binding.command] } : {}) };
-      const { session } = (await target.request("new_session", params, { timeoutMs: 30_000 })) as { session: SessionMeta };
-      if (binding) await bindings!.bind(binding.registration_id, session.session_id);
-      if (!live(target)) throw new Error("the connection dropped while the run started");
-      cachedSessions.set(session.session_id, session);
-      createdPending = session.session_id;
-      set({ attached: session.session_id, ...(deferredSelection === undefined ? { selected: session.session_id, opening: { id: session.session_id, messages: 0 }, open: null, session } : {}) });
-      onSelect?.(session.session_id);
-      await open(session.session_id, undefined, deferredSelection === undefined);
-      if (!attachmentHolds) createdPending = null;
-      return session.session_id;
-    },
-    reset() {
-      if (!state.active) { openGeneration++; openAbort?.abort(); }
-      if (attachmentHolds) deferredSelection = null;
-      onSelect?.(null);
-      set({ selected: null, open: null, opening: null, openError: null, session: null });
-    },
-    dispose() {
-      unsubscribe();
-      openGeneration++;
-      openAbort?.abort();
-      cachedRuns.forEach((run) => run.lease.release());
-      cachedRuns.clear();
-      activeSubscription();
-    },
+    dispose() { unsubscribe(); openAbort?.abort(); leaseSubscriptions.forEach((stop) => stop()); leaseSubscriptions.clear(); pending.clear(); },
   };
 }
-export type RunControl = ReturnType<typeof createRun>;
+export type SessionManager = ReturnType<typeof createSessionManager>;

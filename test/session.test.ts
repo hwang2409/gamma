@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { createClient, type Transport, type ZetaClient } from "@fulcrum/zeta";
-import { createRun, sessionTitle, type RunControl, type SessionMeta } from "../src/session";
+import { createSessionManager, sessionTitle, type RunState, type SessionMeta } from "../src/session";
+import { createRunStateStore, workspaceRunState, type DraftRunId, type EntryId, type RunId } from "../src/run-state";
 
 type Handler = (params: Record<string, unknown>) => unknown;
 
@@ -32,7 +33,31 @@ async function server(handlers: Record<string, Handler>, features: string[] = []
   return { client, calls, event, drop: () => close(1006) };
 }
 
-const present = (view: RunControl) => view.state;
+function harness(connection: ReturnType<typeof source>, options: { selected?: string; onSelect?(id: string | null): void; bindings?: Parameters<typeof createSessionManager>[2] } = {}) {
+  const first = options.selected ?? `draft:${crypto.randomUUID()}`;
+  const store = createRunStateStore(8, undefined, undefined, { id: "entry" as EntryId, run: first as RunId });
+  store.activate(first, first.startsWith("draft:") ? { choice: "default" } : { choice: "explicit", model: "" });
+  const manager = createSessionManager(connection, store, options.bindings);
+  store.setEffectExecutor(manager.execute);
+  manager.start();
+  const select = (id: string) => { store.dispatch({ type: "NAVIGATED", entryId: crypto.randomUUID() as EntryId, runId: id as RunId }); store.activate(id, { choice: "explicit", model: "" }); options.onSelect?.(id); };
+  return {
+    get state(): RunState { return workspaceRunState(store.getCatalog()); },
+    select,
+    reset() { const id = `draft:${crypto.randomUUID()}` as DraftRunId; store.dispatch({ type: "NEW_RUN", entryId: crypto.randomUUID() as EntryId, runId: id }); store.activate(id, { choice: "default" }); options.onSelect?.(null); },
+    async create(choice: { model?: string; provider?: string; approval_mode?: "ask" | "allow" } = {}) {
+      const previous = store.getEntry().run;
+      let draft = previous;
+      if (!draft.startsWith("draft:")) { draft = `draft:${crypto.randomUUID()}`; store.dispatch({ type: "NEW_RUN", entryId: crypto.randomUUID() as EntryId, runId: draft as DraftRunId }); store.activate(draft, { choice: "default" }); }
+      try { const id = await manager.create(draft, choice); options.onSelect?.(id); return id; }
+      catch (error) { if (previous !== draft) store.dispatch({ type: "NAVIGATED", entryId: crypto.randomUUID() as EntryId, runId: previous as RunId }); throw error; }
+    },
+    dispose() { store.dispose(); manager.dispose(); },
+  };
+}
+
+type TestRun = ReturnType<typeof harness>;
+const present = (view: TestRun) => view.state;
 const meta = (id: string, updated: string, extra: Partial<SessionMeta> = {}): SessionMeta => ({ session_id: id, created_at: updated, updated_at: updated, ...extra });
 const sessions = [meta("a", "2026-11-01T10:00:00Z", { name: "alpha" }), meta("b", "2026-11-02T10:00:00Z", { first_message_preview: "fix the build" }), meta("c", "2026-11-03T10:00:00Z", { parent_session_id: "b" })];
 const history: Record<string, unknown[]> = {
@@ -70,7 +95,7 @@ function handlers(active: string | null, extra: Record<string, Handler> = {}): R
     ...extra,
   };
 }
-const kinds = (state: ReturnType<typeof createRun>["state"]) => {
+const kinds = (state: ReturnType<typeof harness>["state"]) => {
   const store = state.open!.lease.store;
   return store.getOutline().map(({ kind }) => kind);
 };
@@ -82,7 +107,7 @@ test("titles: the name, else the first prompt, else none", () => {
 
 test("on connect with no run selected it stays blank and never opens the server's own session", async () => {
   const fake = await server(handlers("b"));
-  const view = createRun(source(fake.client));
+  const view = harness(source(fake.client));
   await tick();
   expect(present(view).open).toBeNull();
   expect(present(view).selected).toBeNull();
@@ -93,7 +118,7 @@ test("a failed replacement keeps the requested selection and never presents the 
   const resumed: string[] = [];
   const selected: string[] = [];
   const fake = await server(handlers("b", { resume: (params) => { resumed.push(params.session_id as string); if (params.session_id === "a") { return { session: meta("a", "x") }; } return { session: meta("b", "x") }; }, session_history: (params) => { if (params.session_id === "a") throw { code: -32602, message: "session log is invalid at line 12" }; return { messages: [], next_offset: null }; } }));
-  const view = createRun(source(fake.client), { selected: "b", onSelect: (id) => selected.push(id) });
+  const view = harness(source(fake.client), { selected: "b", onSelect: (id) => selected.push(id) });
   await tick();
   view.select("a");
   await tick();
@@ -106,7 +131,7 @@ test("a failed replacement keeps the requested selection and never presents the 
 
 test("on connect it opens the server's own session without resume, with every history page and its approval", async () => {
   const fake = await server(handlers("b"));
-  const view = createRun(source(fake.client), { selected: "b" });
+  const view = harness(source(fake.client), { selected: "b" });
   await tick();
   expect(present(view).selected).toBe("b");
   expect(view.state.session?.session_id).toBe("b");
@@ -123,7 +148,7 @@ test("the first history page makes the session usable while later pages load", a
   const fake = await server(handlers("b", { session_history: (params) => params.offset === 0
     ? { messages: [{ id: "first", role: "user", content: [{ type: "text", text: "first page" }], tool_result: null }], next_offset: 1 }
     : later }));
-  const view = createRun(source(fake.client), { selected: "b" });
+  const view = harness(source(fake.client), { selected: "b" });
   await tick();
   expect(present(view).open).toMatchObject({ id: "b", history: { messages: 1, complete: false } });
   expect(kinds(view.state)).toEqual(["user", "approval"]);
@@ -142,7 +167,7 @@ test("progressive history does not revive a completed approval before its ending
       ? { messages: [{ id: "start", role: "system", event: "approval_request", request_id: "old", tool_call: { id: "old-tool", name: "bash", arguments: {} }, delegated: false }], next_offset: 1 }
       : later,
   }));
-  const view = createRun(source(fake.client), { selected: "b" });
+  const view = harness(source(fake.client), { selected: "b" });
   await tick();
   expect(present(view).open?.lease.store.getItem("approval:old")).toBeUndefined();
   release();
@@ -159,7 +184,7 @@ test("a failed later page keeps its first-page approval and exposes the error", 
       throw { code: -32000, message: "older history failed" };
     },
   }));
-  const view = createRun(source(fake.client), { selected: "b" });
+  const view = harness(source(fake.client), { selected: "b" });
   await tick();
   expect(present(view).open?.lease.store.getItem("approval:held")).toMatchObject({ type: "approval" });
   expect(present(view).openError?.message).toBe("older history failed");
@@ -168,7 +193,7 @@ test("a failed later page keeps its first-page approval and exposes the error", 
 test("selecting another session resumes it, releases the old one, and reports progress", async () => {
   const fake = await server(handlers("b"));
   const selected: string[] = [];
-  const view = createRun(source(fake.client), { selected: "b", onSelect: (id) => selected.push(id) });
+  const view = harness(source(fake.client), { selected: "b", onSelect: (id) => selected.push(id) });
   await tick();
   view.select("a");
   expect(present(view).opening).toEqual({ id: "a", messages: 0 });
@@ -191,7 +216,7 @@ test("switching sessions cancels background history without replacing the new ru
       return { messages: [{ id: "a", role: "user", content: [{ type: "text", text: "new run" }], tool_result: null }], next_offset: null };
     },
   }));
-  const view = createRun(source(fake.client), { selected: "b" });
+  const view = harness(source(fake.client), { selected: "b" });
   await tick();
   expect(present(view).open?.id).toBe("b");
   view.select("a");
@@ -205,7 +230,7 @@ test("switching sessions cancels background history without replacing the new ru
 
 test("the newest selection wins when opens overlap", async () => {
   const fake = await server(handlers(null));
-  const view = createRun(source(fake.client));
+  const view = harness(source(fake.client));
   await tick();
   view.select("a");
   view.select("b");
@@ -216,7 +241,7 @@ test("the newest selection wins when opens overlap", async () => {
 
 test("a failed replacement shows only the requested run error", async () => {
   const fake = await server(handlers("b", { resume: (params) => { if (params.session_id === "a") throw { code: -32602, message: "session log is invalid at line 12" }; return {}; } }));
-  const view = createRun(source(fake.client), { selected: "b" });
+  const view = harness(source(fake.client), { selected: "b" });
   await tick();
   view.select("a");
   await tick();
@@ -229,7 +254,7 @@ test("a busy resume displays the URL-selected cached run and forward restores th
   let current = "a";
   let blockA = false;
   const fake = await server(handlers("a", {
-    status: () => ({ session: meta(current, "x"), state: "idle", pending_approvals: [] }),
+    status: () => ({ session: meta(current, "x"), state: blockA ? "running" : "idle", pending_approvals: [] }),
     resume: (params) => {
       const id = params.session_id as string;
       if (blockA && id === "a") throw { code: -32004, message: "a turn is already running" };
@@ -237,7 +262,7 @@ test("a busy resume displays the URL-selected cached run and forward restores th
       return { session: meta(id, "x") };
     },
   }));
-  const view = createRun(source(fake.client), { selected: "a" });
+  const view = harness(source(fake.client), { selected: "a" });
   await tick();
   view.select("b"); await tick();
   blockA = true;
@@ -250,20 +275,20 @@ test("a busy resume displays the URL-selected cached run and forward restores th
   expect(view.state.session?.session_id).toBe("b");
 });
 
-test("a busy server is reported as busy and the selection stays", async () => {
-  const fake = await server(handlers(null, { resume: () => { throw { code: -32004, message: "a turn is already running" }; } }));
-  const view = createRun(source(fake.client));
+test("an active owner is reported as busy and the selection stays", async () => {
+  const fake = await server(handlers("b", { status: () => ({ session: meta("b", "x"), state: "running", pending_approvals: [] }), resume: () => { throw { code: -32004, message: "a turn is already running" }; } }));
+  const view = harness(source(fake.client));
   await tick();
   view.select("a");
   await tick();
-  expect(present(view).openError).toEqual({ id: "a", message: "a turn is already running", busy: true });
+  expect(present(view).openError).toMatchObject({ id: "a", busy: true });
   expect(present(view).selected).toBe("a");
 });
 
 test("a drop keeps the old transcript as stale; the reconnect rebuilds it on a fresh store without duplicates", async () => {
   const first = await server(handlers("b"));
   const connection = source(first.client);
-  const view = createRun(connection, { selected: "b" });
+  const view = harness(connection, { selected: "b" });
   await tick();
   const before = present(view).open!.lease.store;
   connection.set(null);
@@ -283,7 +308,7 @@ test("a negotiated drop keeps the same approval row in reconnecting state across
   const features = ["approval_reconnect"];
   const first = await server(handlers("b"), features);
   const connection = source(first.client);
-  const view = createRun(connection, { selected: "b" });
+  const view = harness(connection, { selected: "b" });
   await tick();
   const row = present(view).open!.lease.store.getItem("approval:r1");
 
@@ -307,7 +332,7 @@ test("a negotiated drop keeps the same approval row in reconnecting state across
 test("an old server drop keeps the legacy pending shape", async () => {
   const first = await server(handlers("b"), []);
   const connection = source(first.client);
-  const view = createRun(connection, { selected: "b" });
+  const view = harness(connection, { selected: "b" });
   await tick();
   connection.set(null);
   const approval = present(view).open!.lease.store.getItem("approval:r1");
@@ -317,7 +342,7 @@ test("an old server drop keeps the legacy pending shape", async () => {
 test("a fresh idle snapshot removes a formerly pending approval", async () => {
   const first = await server(handlers("b"));
   const connection = source(first.client);
-  const view = createRun(connection, { selected: "b" });
+  const view = harness(connection, { selected: "b" });
   await tick();
   connection.set(null);
   expect(present(view).open!.lease.store.getItem("approval:r1")).toMatchObject({ type: "approval" });
@@ -330,7 +355,7 @@ test("a fresh idle snapshot removes a formerly pending approval", async () => {
 test("advertised approval history trusts the fresh snapshot", async () => {
   const first = await server(handlers("c"), ["approval_history"]);
   const connection = source(first.client);
-  const view = createRun(connection, { selected: "c" });
+  const view = harness(connection, { selected: "c" });
   await tick();
   connection.set(null);
   const second = await server(handlers("c", { status: () => ({ session: meta("c", "x"), state: "idle", pending_approvals: [] }) }), ["approval_history"]);
@@ -355,7 +380,7 @@ test("a running open stays snapshot-only until idle, then reloads one complete m
     },
   }));
   emit = fake.event;
-  const view = createRun(source(fake.client), { selected: "b" });
+  const view = harness(source(fake.client), { selected: "b" });
   await tick();
   expect(present(view).open?.syncing).toBe(true);
   await new Promise((resolve) => setTimeout(resolve, 550));
@@ -375,7 +400,7 @@ test("snapshot-only mode discovers an approval that starts after history loads",
     }),
   }));
   const connection = source(fake.client);
-  const view = createRun(connection, { selected: "b" });
+  const view = harness(connection, { selected: "b" });
   await new Promise((resolve) => setTimeout(resolve, 550));
   expect(present(view).open!.lease.store.getItem("approval:late")).toMatchObject({ type: "approval", request: { request_id: "late" } });
   connection.set(null);
@@ -383,7 +408,7 @@ test("snapshot-only mode discovers an approval that starts after history loads",
 
 test("live events after the open land in the open store", async () => {
   const fake = await server(handlers("b"));
-  const view = createRun(source(fake.client), { selected: "b" });
+  const view = harness(source(fake.client), { selected: "b" });
   await tick();
   fake.event({ event: "assistant_delta", session_id: "b", delta: "streaming", kind: "assistant" });
   expect(kinds(view.state)).toEqual(["user", "approval", "message", "message"]);
@@ -399,7 +424,7 @@ test("create starts a session with new_session and opens it without resume", asy
     session_history: () => ({ messages: [], next_offset: null }),
   }));
   const selected: string[] = [];
-  const view = createRun(source(fake.client), { onSelect: (id) => selected.push(id) });
+  const view = harness(source(fake.client), { onSelect: (id) => selected.push(id) });
   await tick();
   await view.create();
   await tick();
@@ -413,7 +438,7 @@ test("create starts a session with new_session and opens it without resume", asy
 
 test("a failed create keeps the current session and says why", async () => {
   const fake = await server(handlers("b", { new_session: () => { throw { code: -32004, message: "a turn is already running" }; } }));
-  const view = createRun(source(fake.client), { selected: "b" });
+  const view = harness(source(fake.client), { selected: "b" });
   await tick();
   await expect(view.create()).rejects.toMatchObject({ message: "a turn is already running" });
   expect(present(view).open?.id).toBe("b");
@@ -431,7 +456,7 @@ test("host commands are rebound on attach, reconnect, resume, and new session", 
   };
   const first = await server({ ...handlers("b"), new_session: () => ({ session: meta("new", "z") }) }, ["session_host_commands"]);
   const connection = source(first.client);
-  const view = createRun(connection, { selected: "b", bindings });
+  const view = harness(connection, { selected: "b", bindings });
   await tick();
   expect(first.calls.find(([method]) => method === "resume")?.[1]).toMatchObject({ session_id: "b", host_commands: [{ name: "gamma", environment: { GAMMA_API_TOKEN: "token-1" } }] });
 
@@ -451,7 +476,7 @@ test("host commands are rebound on attach, reconnect, resume, and new session", 
 test("reset releases the run and goes blank; the next create passes the chosen model to new_session", async () => {
   const fake = await server(handlers("b", { new_session: () => ({ session: meta("new", "z") }) }));
   const selected: Array<string | null> = [];
-  const view = createRun(source(fake.client), { selected: "b", onSelect: (id) => selected.push(id) });
+  const view = harness(source(fake.client), { selected: "b", onSelect: (id) => selected.push(id) });
   await tick();
   expect(present(view).open?.id).toBe("b");
   view.reset();
@@ -459,6 +484,7 @@ test("reset releases the run and goes blank; the next create passes the chosen m
   expect(view.state.session).toBeNull();
   expect(selected).toEqual([null]);
   expect(await view.create({ model: "claude-opus-4-6", provider: "claude" })).toBe("new");
+  await tick();
   expect(fake.calls.find(([method]) => method === "new_session")?.[1]).toEqual({ model: "claude-opus-4-6", provider: "claude" });
   expect(present(view).open?.id).toBe("new");
 });

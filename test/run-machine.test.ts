@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { reduceWorkspace, selectedRun, type DraftRunId, type EntryId, type OperationId, type SessionId, type WorkspaceEvent, type WorkspaceState } from "../src/run-state";
+import { createRunStateStore, reduceWorkspace, selectedRun, type DraftRunId, type EntryId, type OperationId, type SessionId, type WorkspaceEffect, type WorkspaceEvent, type WorkspaceState } from "../src/run-state";
 
 const draft = (id: number) => `draft:${id}` as DraftRunId;
 const session = (id: number) => `s-${id}` as SessionId;
@@ -24,16 +24,16 @@ class Reference {
     switch (event.type) {
       case "NEW_RUN": this.entry = event.entryId; this.selected = event.runId; this.lifecycle.set(event.runId, { kind: "draft" }); break;
       case "NAVIGATED": this.entry = event.entryId; this.selected = this.canonical(event.runId); if (!this.lifecycle.has(this.selected)) this.lifecycle.set(this.selected, { kind: this.selected.startsWith("draft:") ? "draft" : "opening" }); break;
-      case "FIRST_SEND": if ((this.lifecycle.get(event.runId)?.kind ?? "draft") === "draft") this.lifecycle.set(event.runId, { kind: "creating", operation: event.operationId }); break;
-      case "NEW_SESSION_OK": if (this.lifecycle.get(event.runId)?.operation === event.operationId) { const old = this.lifecycle.get(event.runId)!; this.lifecycle.delete(event.runId); this.lifecycle.set(event.sessionId, { ...old, kind: "opening" }); const moved = this.settings.get(event.runId); this.settings.delete(event.runId); if (moved) this.settings.set(event.sessionId, moved); else this.settings.delete(event.sessionId); this.aliases.set(event.runId, event.sessionId); if (this.selected === event.runId) this.selected = event.sessionId; } break;
+      case "FIRST_SEND": if (["draft", "failed"].includes(this.lifecycle.get(event.runId)?.kind ?? "draft")) this.lifecycle.set(event.runId, { kind: "creating", operation: event.operationId }); break;
+      case "NEW_SESSION_OK": if (this.lifecycle.get(event.runId)?.operation === event.operationId) { const old = this.lifecycle.get(event.runId)!; this.lifecycle.delete(event.runId); this.lifecycle.set(event.sessionId, { ...old, kind: "opening" }); const moved = this.settings.get(event.runId); this.settings.delete(event.runId); if (moved) this.settings.set(event.sessionId, moved); else this.settings.delete(event.sessionId); this.aliases.set(event.runId, event.sessionId); if (this.selected === event.runId) this.selected = event.sessionId; this.attached = event.sessionId; this.turn = "idle"; } break;
       case "NEW_SESSION_FAIL": if (this.lifecycle.get(event.runId)?.operation === event.operationId) this.lifecycle.set(event.runId, { kind: "failed" }); break;
       case "STATUS": this.attached = event.sessionId ?? null; this.turn = event.sessionId ? event.turn : null; break;
-      case "RESUME_OK": if (!this.attached || this.turn === "idle" || this.attached === event.runId) { this.attached = event.runId; this.turn = "idle"; this.lifecycle.set(event.runId, { kind: "opening", operation: event.operationId }); const value = this.settings.get(event.runId) ?? {}; this.settings.set(event.runId, { ...value, pending: event.operationId, error: undefined }); } break;
+      case "RESUME_OK": if (![...this.lifecycle.values()].some((value) => value.kind === "creating") && (!this.attached || this.turn === "idle" || this.attached === event.runId)) { this.attached = event.runId; this.turn = "idle"; this.lifecycle.set(event.runId, { kind: "opening", operation: event.operationId }); const value = this.settings.get(event.runId) ?? {}; this.settings.set(event.runId, { ...value, pending: event.operationId, error: undefined }); } break;
       case "RESUME_BUSY": this.lifecycle.set(event.runId, { kind: "opening", operation: event.operationId }); break;
       case "RESUME_FAIL": if (this.lifecycle.get(event.runId)?.operation === event.operationId) this.lifecycle.set(event.runId, { kind: "failed" }); break;
       case "FIRST_PAGE": if (!event.operationId || !this.lifecycle.get(event.runId)?.operation || this.lifecycle.get(event.runId)?.operation === event.operationId) this.lifecycle.set(event.runId, { kind: "open" }); break;
       case "TURN_START": if (this.attached === event.runId) this.turn = event.turn ?? "running"; break;
-      case "TURN_END": if (this.attached === event.runId) this.turn = "idle"; break;
+      case "TURN_END": if (this.attached === event.runId) { this.turn = "idle"; if (this.selected === event.runId && !this.selected.startsWith("draft:")) { this.attached = null; this.turn = null; } } break;
       case "DELIVERY_BEGIN": { const items = this.deliveries.get(event.runId) ?? new Map(); items.set(event.delivery.id, "requesting"); this.deliveryMethods.set(event.delivery.id, event.delivery.method); this.deliveryOperations.set(event.delivery.id, event.operationId); this.deliveries.set(event.runId, items); break; }
       case "DELIVERY_ACK": { if (this.deliveryOperations.get(event.intentId) !== event.operationId) break; const items = this.deliveries.get(event.runId); if (event.queued && !event.failed) items?.set(event.intentId, "queued"); else items?.delete(event.intentId); break; }
       case "DELIVERY_STATUS": { if (this.deliveryOperations.get(event.intentId) !== event.operationId) break; const items = this.deliveries.get(event.runId); if (event.status === "delivered") items?.delete(event.intentId); else if (items?.get(event.intentId) !== "dropped") { items?.set(event.intentId, "retrying"); this.deliveryOperations.set(event.intentId, "generated"); } break; }
@@ -71,7 +71,7 @@ test("workspace reducer matches an independent model across navigation, activity
         if (state.attachment.kind === "attached") expect(state.attachment.turn).toBe(reference.turn);
         for (const effect of result.effects) {
           if (effect.type === "history-replace-current") expect(effect.entryId).toBe(state.entry.id);
-          if (effect.type === "resume" || effect.type === "new-session") expect(state.attachment.kind !== "attached" || state.attachment.turn === "idle").toBeTrue();
+          if (effect.type === "open-session" || effect.type === "new-session") expect(state.attachment.kind !== "attached" || state.attachment.turn === "idle" || state.attachment.sessionId === effect.runId).toBeTrue();
           if (effect.type === "load-settings" || effect.type === "set-settings") { expect(state.runs.get(effect.runId)?.settings.pending?.operationId).toBe(effect.operationId); expect(effect.runId).toBe(state.runs.get(effect.runId)?.id); }
         }
         for (const [runId, expected] of reference.settings) {
@@ -120,6 +120,26 @@ test("mutation: reconnect reconciles each durable delivery", () => {
   const correct = reduceWorkspace(state, { type: "RECONNECT" });
   const mutant = { ...correct, effects: correct.effects.filter((effect) => effect.type !== "delivery-status") };
   expect(observe(correct.state, correct.effects)).not.toEqual(observe(mutant.state, mutant.effects));
+});
+
+test("cache eviction and disposal release owned session leases", () => {
+  const released: WorkspaceEffect[] = [];
+  const runId = session(1);
+  const store = createRunStateStore(0, undefined, undefined, { id: entry(1), run: runId });
+  store.setEffectExecutor((effects) => released.push(...effects));
+  store.activate(runId, { choice: "explicit", model: "" });
+  const operationId = store.requestOpen(runId);
+  store.dispatch({ type: "OPEN_OK", runId, operationId, open: { id: runId, lease: { release() {} } as never, stale: false, history: { messages: 0, complete: true }, syncing: false } });
+  store.activate(session(2), { choice: "explicit", model: "" });
+  expect(released).toContainEqual({ type: "release-lease", runId });
+
+  const second = createRunStateStore(0, undefined, undefined, { id: entry(2), run: runId });
+  second.setEffectExecutor((effects) => released.push(...effects));
+  second.activate(runId, { choice: "explicit", model: "" });
+  const secondOperation = second.requestOpen(runId);
+  second.dispatch({ type: "OPEN_OK", runId, operationId: secondOperation, open: { id: runId, lease: { release() {} } as never, stale: false, history: { messages: 0, complete: true }, syncing: false } });
+  second.dispose();
+  expect(released.filter((effect) => effect.type === "release-lease" && effect.runId === runId)).toHaveLength(2);
 });
 
 test("store updates cannot invalidate an in-flight delivery acknowledgement", () => {

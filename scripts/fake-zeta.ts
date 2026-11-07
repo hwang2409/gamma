@@ -266,6 +266,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   const settingsBySession = new Map(sessions.map((session) => [String(session.session_id), { model: String(session.model), approval_mode: session.approval_mode as Settings["approval_mode"] }]));
   const activeSettings = () => settingsBySession.get(active ?? "") ?? defaultSettings;
   const failures = new Map<string, string[]>();
+  const transientBusy = new Map<string, number>();
   const imageSends: Json[] = [];
   const decisions: Json[] = [];
   const requests: Array<{ method: string; params: Json; running: boolean; received: number; started: number; replied?: number }> = [];
@@ -373,6 +374,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         }
         if (method === "new_session") {
           // zeta's reply (server.py `new_session`): the full metadata of the new session, which becomes the server's own.
+          const busy = transientBusy.get(method) ?? 0;
+          if (busy > 0) { transientBusy.set(method, busy - 1); return reply({ error: { code: -32004, message: "a turn is already running" } }); }
           if (running || rejectCreate) return reply({ error: { code: -32004, message: "a turn is already running" } });
           const validModels = ["claude-sonnet-5", "claude-opus-4-6", "gpt-5.1-codex"];
           // real zeta requires a concrete model whenever new_session_settings carries approval_mode
@@ -402,6 +405,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         }
         if (method === "resume") {
           if (mode === "broken-session") return reply({ error: { code: -32602, message: "session log is invalid at line 12" } });
+          const busy = transientBusy.get(method) ?? 0;
+          if (busy > 0) { transientBusy.set(method, busy - 1); return reply({ error: { code: -32004, message: "a turn is already running" } }); }
           if (running && params.session_id !== active) return reply({ error: { code: -32004, message: "a turn is already running" } });
           active = String(params.session_id);
           delayedOpen = false;
@@ -479,6 +484,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     settingsFor(sessionId: string) { return settingsBySession.get(sessionId); },
     setSettings(sessionId: string, settings: Settings) { settingsBySession.set(sessionId, settings); },
     failNext(method: string, message: string) { failures.set(method, [...(failures.get(method) ?? []), message]); },
+    busyNext(method: "resume" | "new_session", count = 1) { transientBusy.set(method, count); },
     get running() { return running; },
     /** Every accepted send and steer, in order. */
     sent: composer.sent,
