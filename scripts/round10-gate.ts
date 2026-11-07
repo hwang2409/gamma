@@ -115,7 +115,7 @@ try {
         await field.fill("keep this turn running"); await page.getByRole("button", { name: "send message" }).click(); await page.getByRole("button", { name: "stop the running turn" }).waitFor();
         await page.evaluate(() => history.back()); await page.waitForURL(targetUrl); await Bun.sleep(300);
         if (await page.getByText(/could not reopen this run/i).count()) throw new Error("back showed the full reopen banner");
-        await page.getByText(/read-only while another run has the active zeta turn/i).waitFor();
+        await page.getByText(/this run waits while .* has the active zeta turn/i).waitFor();
         await page.screenshot({ path: join(shots, "back-running-read-only-1440.png") });
         // The store sequence test proves the hidden target draft remains intact while this read-only view is shown.
       } finally { await close(context); }
