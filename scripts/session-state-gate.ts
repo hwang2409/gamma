@@ -113,7 +113,12 @@ await check("a delayed resume retry is cancelled after navigation", async () => 
   const { context, page } = await fresh(browser, 1440, "/?run=s-themes");
   try {
     if (!await poll(() => Promise.resolve(fake.requests.slice(before).some((request) => request.method === "resume" && request.params.session_id === "s-themes")))) throw new Error("the first resume was not sent");
-    await page.getByRole("button", { name: "new run" }).click();
+    await page.evaluate(() => {
+      const run = `draft:${crypto.randomUUID()}`;
+      const url = new URL(location.href); url.searchParams.set("run", run);
+      history.pushState({ gammaEntryId: crypto.randomUUID(), run }, "", url);
+      dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
+    });
     await page.waitForURL((url) => url.searchParams.get("run")?.startsWith("draft:") ?? false);
     const draft = page.url();
     await Bun.sleep(3_500);
