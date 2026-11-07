@@ -277,7 +277,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
   .new-run { margin-left: auto; }
   .topbar .run-title { order: 2; flex: 1 1 0; }
   .topbar-yolo { order: 2; }
-  .settings-popover { right: 0; width: min(320px, calc(100vw - 24px)); }
+  .settings-popover { position: fixed; top: 56px; right: 12px; left: 12px; width: auto; }
   .dock .composer-tools { flex-wrap: wrap; justify-content: flex-start; }
   .dock .composer-tools > .model-picker { flex-basis: 100%; }
   .dock .model-picker > button { width: 100%; max-width: 100%; }
