@@ -71,12 +71,13 @@ export function createDelivery(newId: () => string = () => `web-${crypto.randomU
 type DeliveryStore = {
   hasMessageDelivery(id: string): boolean;
   dispatch(event: RunEvent): void;
+  subscribe(listener: () => void): () => void;
 };
 type DeliveryRunStore = import("./run-state").RunStateStore;
 type WorkspaceEffect = import("./run-state").WorkspaceEffect;
 type OperationId = import("./run-state").OperationId;
 type RunId = import("./run-state").RunId;
-type DeliveryRecord = { delivery: ReturnType<typeof createDelivery>; store?: DeliveryStore };
+type DeliveryRecord = { delivery: ReturnType<typeof createDelivery>; store?: DeliveryStore; unsubscribe?: () => void };
 
 /** The small effect seam: reducer effects enter; owner- and operation-tagged results return through RunStateStore.dispatch. */
 function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: DeliveryRunStore, record: (runId: string) => DeliveryRecord, finish: (operationId: OperationId, error?: unknown) => void) {
@@ -106,7 +107,7 @@ function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: Del
       const sent = delivery.state === "retrying"
         ? await record(effect.runId).delivery.retry(target, delivery.text, delivery.id, attemptId)
         : await record(effect.runId).delivery.submit(target, delivery.text, delivery.method === "steer", attemptId);
-      runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId, queued: sent.used === "steer" });
+      runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId, queued: target.features.includes("delivery_id") });
       finish(effect.operationId);
     } catch (error) {
       if (delivery.state !== "retrying") runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId, failed: true });
@@ -133,7 +134,7 @@ export function createDeliveryManager(client: () => ZetaClient | null, runs: Del
   const executor = createDeliveryEffectExecutor(client, runs, record, finish);
   runs.setEffectExecutor(executor.execute);
   return {
-    bind(runId: string, store: DeliveryStore | undefined) { record(runId).store = store; runs.reconcileDeliveries(runId); },
+    bind(runId: string, store: DeliveryStore | undefined) { const item = record(runId); if (item.store === store) return; item.unsubscribe?.(); item.store = store; item.unsubscribe = store?.subscribe(() => setTimeout(() => runs.reconcileDeliveries(runId), 0)); runs.reconcileDeliveries(runId); },
     reconcile(runId: string) { runs.reconcileDeliveries(runId); },
     observeActive(runId: string | null, connected: boolean) { const previous = activeRun; activeRun = runId; if (!runId && previous && connected) runs.reconcileDeliveries(previous); },
     promote(from: string, to: string) { const item = records.get(from); if (!item || from === to) return; records.delete(from); records.set(to, item); },
@@ -145,7 +146,7 @@ export function createDeliveryManager(client: () => ZetaClient | null, runs: Del
     },
     stop(runId: string) { const operationId = crypto.randomUUID() as OperationId; const result = new Promise((resolve, reject) => pending.set(operationId, { resolve, reject })); runs.stop(runId, operationId); return result; },
     resend(runId: string, intentId: string) { runs.dispatch({ type: "DELIVERY_RESEND", runId: runId as RunId, intentId }); },
-    dispose() { records.clear(); pending.clear(); runs.setEffectExecutor(() => {}); },
+    dispose() { records.forEach((item) => item.unsubscribe?.()); records.clear(); pending.clear(); runs.setEffectExecutor(() => {}); },
   };
 }
 export type DeliveryManager = ReturnType<typeof createDeliveryManager>;
