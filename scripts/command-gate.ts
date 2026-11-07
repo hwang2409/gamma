@@ -85,14 +85,17 @@ try {
     await check("shared registry frames keep runnable and unavailable commands distinct", async () => {
       if (defaultSlashCatalog.length !== 15 || completeSlashCatalog.length !== 39 || completeSlashCatalog.filter((entry) => entry.unavailable === "requires_tui").length !== 24) throw new Error("fake slash catalogs drifted from Zeta 2ff56774");
       if (defaultSlashCatalog.some((entry) => ["approve", "always", "deny", "restart", "permissions"].includes(entry.name))) throw new Error("default catalog exposed TUI-only commands");
-      await submit(page, "/mcp");
-      await page.getByText("mcp: 0 mounted, 0 failed", { exact: false }).waitFor();
-      await submit(page, "/mcp status");
-      await page.getByText("mcp: 0 mounted, 0 failed", { exact: false }).waitFor();
-      await submit(page, "/legacy-output");
-      await page.getByText("legacy output", { exact: true }).waitFor();
-      await submit(page, "/approve");
-      await page.getByText("/approve is not available in gamma yet", { exact: true }).waitFor();
+      // Each receipt is dismissed before the next command, so an earlier receipt cannot satisfy the next wait.
+      const receipt = async (command: string, text: string) => {
+        await submit(page, command);
+        await page.locator(".command-receipt-text", { hasText: text }).waitFor({ timeout: 10_000 }).catch(async () => { throw new Error(`${command} showed no receipt "${text}"; value=${JSON.stringify(await field(page).inputValue())}`); });
+        await page.getByRole("button", { name: "dismiss command result" }).click();
+        await page.locator(".command-receipt").waitFor({ state: "detached" });
+      };
+      await receipt("/mcp", "mcp: 0 mounted, 0 failed");
+      await receipt("/mcp status", "mcp: 0 mounted, 0 failed");
+      await receipt("/legacy-output", "legacy output");
+      await receipt("/approve", "/approve is not available in gamma yet");
       await submit(page, "/help");
       const help = page.locator(".command-receipt-text");
       await help.getByText("built-in commands:", { exact: false }).waitFor();
