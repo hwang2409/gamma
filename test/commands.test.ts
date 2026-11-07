@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createCommandController, mapUnavailableSlashResult, type CommandCapabilities, type CommandRequest } from "../src/commands";
+import { createCommandController, findCommandCompletionToken, mapUnavailableSlashResult, type CommandCapabilities, type CommandRequest } from "../src/commands";
 
 type Frame = { method: string; params: Record<string, unknown> };
 
@@ -29,6 +29,18 @@ const slashList = {
   ],
   notices: [],
 };
+
+describe("completion tokens", () => {
+  test("slash is first-token only and dollar follows Zeta whitespace and backtick rules", () => {
+    expect(findCommandCompletionToken("/sta")).toEqual({ trigger: "/", prefix: "sta", start: 0 });
+    expect(findCommandCompletionToken("say /sta")).toBeUndefined();
+    expect(findCommandCompletionToken("say $rev")).toEqual({ trigger: "$", prefix: "rev", start: 4 });
+    expect(findCommandCompletionToken("`$rev")).toBeUndefined();
+    expect(findCommandCompletionToken("```ts\n$rev")).toBeUndefined();
+    expect(findCommandCompletionToken("! run $rev")).toEqual({ trigger: "$", prefix: "rev", start: 6 });
+    expect(findCommandCompletionToken("say($rev")).toBeUndefined();
+  });
+});
 
 describe("slash results", () => {
   const cases = [

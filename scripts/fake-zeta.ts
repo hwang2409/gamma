@@ -179,7 +179,7 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
     if (!active) return { error: { code: -32003, message: "no active session" } };
     if (method === "send" && running.get()) return { error: { code: -32004, message: "a turn is already running" } };
     if (method === "steer" && !running.get()) return { error: { code: -32005, message: "no turn is running for steering" } };
-    const value = String(params.text ?? "");
+    const value = params.input_id === "opaque-review-input" ? "$review" : String(params.text ?? "");
     sent.push({ method, text: value, delivery_id: delivery });
     const userMessage = { event: "user_message", session_id: active, text: value, mode: method, attachments: images.map((image) => ({ name: image.name, mime_type: image.mime_type, size: Math.floor(String(image.data).length * 3 / 4) })), ...(delivery ? { delivery_id: delivery } : {}) };
     const emitEcho = () => send(userMessage);
@@ -379,10 +379,10 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           if (mode === "slow") await wait(helloDelay);
           if (!sockets.has(socket)) return;
           if (socket.data.role === "controller") controller = socket;
-          const features = (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings)) ?? [];
+          const features = (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || name === "model_input_ids" || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings)) ?? [];
           const reconnect = features.includes("approval_reconnect");
           if (reconnect) reconnectControllers.add(socket as object);
-          reply({ result: { protocol_version: "1.2", server: "fake-zeta", capabilities: { features, requests: settingsEnabled ? ["model_catalog", "session_settings", "set_settings", "send_images", ...(advertiseNewSessionSettings ? ["new_session_settings"] : [])] : [] } } });
+          reply({ result: { protocol_version: "1.2", server: "fake-zeta", capabilities: { features, requests: ["slash_list", "slash_run", ...(settingsEnabled ? ["model_catalog", "session_settings", "set_settings", "send_images", ...(advertiseNewSessionSettings ? ["new_session_settings"] : [])] : [])] } } });
           if (decide && !approvalAborted) {
             if (!reconnect) expireApproval();
             else {
@@ -465,6 +465,17 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           if (!settingsEnabled) return reply({ error: { code: -32601, message: "method not found" } });
           if (method !== "model_catalog" && (typeof params.session_id !== "string" || !params.session_id)) return reply({ error: { code: -32602, message: "session_id must be a nonempty string" } });
           if (method !== "model_catalog" && params.session_id !== active) return reply({ error: { code: -32003, message: "session is not active" } });
+        }
+        if (method === "slash_list") return reply({ result: { commands: [
+          { name: "status", description: "show session status", kind: "builtin", source: "builtin", client_only: false, unavailable: null },
+          { name: "review", description: "review this change", kind: "skill", source: "project", client_only: false, unavailable: null },
+          { name: "release", description: "prepare a release", kind: "skill", source: "home", client_only: false, unavailable: null },
+        ], notices: [] } });
+        if (method === "slash_run") {
+          const command = String(params.text ?? "").trim();
+          if (command === "/status") return reply({ result: { kind: "output", text: "fake status\nready" } });
+          if (command === "/review") return reply({ result: { kind: "model_input", input_id: "opaque-review-input", display_text: "$review" } });
+          return reply({ result: { kind: "unknown", name: command.slice(1).split(/\s/, 1)[0] } });
         }
         if (method === "model_catalog") return reply({ result: { models: ["claude-sonnet-5", "claude-opus-4-6", "gpt-5.1-codex"], providers: { "claude-sonnet-5": "claude", "claude-opus-4-6": "claude", "gpt-5.1-codex": "codex" } } });
         const failure = failures.get(method)?.shift();

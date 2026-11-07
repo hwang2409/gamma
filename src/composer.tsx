@@ -1,14 +1,16 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type ClipboardEvent, type Dispatch, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject, type SetStateAction } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ClipboardEvent, type Dispatch, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject, type SetStateAction } from "react";
 import { addImage, readImage, type QueuedImage } from "./image-queue";
 import { hasPendingDelivery, type RunStateStore } from "./run-state";
 import { escape, normalKey, startVim, type Draft, type Step, type Vim } from "./vim";
+import { CompletionModel, type CompletionSnapshot } from "./completions";
+import type { CommandController, ComposerAction } from "./commands";
 
 // gamma's composer. It keeps @fulcrum/react's composer parts (data-part names, so the shipped styles apply) and adds what
 // that component has no seam for yet: attachments, vim keys, and footer controls. Fulcrum follow-up: give Composer slots
 // for these, then this file shrinks to the vim keymap.
 
 export type ComposerState = "idle" | "steerable" | "read-only";
-export type Submit = (text: string, images: readonly QueuedImage[], intent: { steer: boolean; deliveryId: string }) => Promise<unknown>;
+export type Submit = (action: ComposerAction, images: readonly QueuedImage[], intent: { steer: boolean; deliveryId: string; sourceText: string }) => Promise<unknown>;
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error)) || "unknown error";
 const attempt = (action: () => unknown) => new Promise<unknown>((resolve) => resolve(action()));
@@ -49,14 +51,27 @@ function hint({ vim, mode, steer, images }: { vim: boolean; mode: Vim["mode"]; s
   return `${send} · i type · u undo${steer ? " · ^c stop" : ""}`;
 }
 
+function Suggestions({ id, snapshot, onAccept }: { id: string; snapshot: CompletionSnapshot; onAccept(index: number): void }) {
+  if (!snapshot.open) return null;
+  return <div id={id} className="command-listbox" role="listbox" aria-label="command suggestions">{snapshot.rows.map((row, index) => <button
+    type="button"
+    role="option"
+    id={`${id}-${index}`}
+    aria-selected={index === snapshot.activeIndex}
+    className="command-option"
+    key={`${row.trigger}${row.name}`}
+    onPointerDown={(event) => { event.preventDefault(); onAccept(index); }}
+  ><span className="command-name">{row.trigger}{row.name}</span><span className="command-description">{row.description}</span>{row.sourceBadge ? <span className="command-source">{row.sourceBadge}</span> : null}</button>)}</div>;
+}
+
 type ComposerBodyProps = {
-  field: { id: string; state: ComposerState; vimOn: boolean; vim: Vim; text: string; input: RefObject<HTMLTextAreaElement | null>; onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void; onChange(value: string): void };
+  field: { id: string; state: ComposerState; vimOn: boolean; vim: Vim; text: string; input: RefObject<HTMLTextAreaElement | null>; completion: CompletionSnapshot; listboxId: string; onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void; onChange(value: string, start: number, end: number): void; onSelect(value: string, start: number, end: number): void; onAccept(index: number): void };
   attachments: { images: readonly QueuedImage[]; error: string; dragging: boolean; files: RefObject<HTMLInputElement | null>; onPaste(event: ClipboardEvent): void; onImageOpen?(block: { url: string; mediaType: string; alt: string }): void; onRemove(index: number): void; onFiles(files: Iterable<File>): Promise<void>; setDragging: Dispatch<SetStateAction<boolean>> };
   submission: { steer: boolean; sending: boolean; stopping: boolean; error?: string; message: string; canSubmit: boolean; onSubmit(event: FormEvent): void; onStop?: () => void; onStopRef?: (button: HTMLButtonElement | null) => void | (() => void) };
   footer?: ReactNode;
 };
 
-function ComposerBody({ field: { id, state, vimOn, vim, text, input, onKeyDown, onChange }, attachments: { images, error: attachError, dragging, files, onPaste, onImageOpen, onRemove, onFiles, setDragging }, submission: { steer, sending, stopping, error, message, canSubmit, onSubmit, onStop, onStopRef }, footer }: ComposerBodyProps) {
+function ComposerBody({ field: { id, state, vimOn, vim, text, input, completion, listboxId, onKeyDown, onChange, onSelect, onAccept }, attachments: { images, error: attachError, dragging, files, onPaste, onImageOpen, onRemove, onFiles, setDragging }, submission: { steer, sending, stopping, error, message, canSubmit, onSubmit, onStop, onStopRef }, footer }: ComposerBodyProps) {
   return (
     <form data-part="composer" data-state={state} data-error={error ? "submit" : undefined} data-pending={sending ? "submit" : stopping ? "stop" : undefined} data-drop={dragging ? "active" : undefined} data-vim={vimOn ? vim.mode : undefined} aria-label="message" aria-busy={sending || stopping || undefined} onSubmit={onSubmit} onPaste={onPaste}
       onDragEnter={(event) => { if (hasFiles(event)) { event.preventDefault(); setDragging(true); } }}
@@ -66,7 +81,8 @@ function ComposerBody({ field: { id, state, vimOn, vim, text, input, onKeyDown, 
       {dragging ? <div className="drop-hint" aria-hidden="true">drop images to attach</div> : null}
       <AttachmentsStrip images={images} onOpen={onImageOpen} onRemove={onRemove} />
       {attachError ? <p className="attach-error" role="alert">{attachError}</p> : null}
-      <div data-part="composer-field" data-value={text}><textarea ref={input} rows={1} value={text} placeholder={steer ? "steer the running turn" : "message zeta"} aria-label="message" aria-describedby={`${id}-hint ${id}-message`} onChange={(event) => onChange(event.target.value)} onKeyDown={onKeyDown} /></div>
+      <Suggestions id={listboxId} snapshot={completion} onAccept={onAccept} />
+      <div data-part="composer-field" data-value={text}><textarea ref={input} rows={1} value={text} placeholder={steer ? "steer the running turn" : "message zeta"} aria-label="message" aria-describedby={`${id}-hint ${id}-message`} role="combobox" aria-autocomplete="list" aria-expanded={completion.open} aria-controls={listboxId} aria-activedescendant={completion.open ? `${listboxId}-${completion.activeIndex}` : undefined} onChange={(event) => onChange(event.target.value, event.target.selectionStart, event.target.selectionEnd)} onSelect={(event) => onSelect(event.currentTarget.value, event.currentTarget.selectionStart, event.currentTarget.selectionEnd)} onKeyDown={onKeyDown} /></div>
       <div data-part="composer-bar">
         {vimOn ? <span className="vim-mode" data-mode={vim.mode} aria-live="polite">{vim.mode === "insert" ? "INSERT" : "NORMAL"}</span> : null}
         <p data-part="composer-status" data-tone={error ? "danger" : message ? "busy" : undefined} title={error}><span data-part="composer-hint" id={`${id}-hint`} hidden={Boolean(message)}>{hint({ vim: vimOn, mode: vim.mode, steer, images: images.length > 0 })}</span><span data-part="composer-message" id={`${id}-message`} role="status">{message}</span></p>
@@ -144,27 +160,37 @@ function useAttachments(input: RefObject<HTMLTextAreaElement | null>, images: re
   return { files, images, current: imagesRef, attachError, dragging, setDragging, addFiles, remove, onPaste };
 }
 
-function useSubmission(state: ComposerState, blocked: boolean, onSubmit: Submit, onStop: (() => Promise<unknown>) | undefined, draft: ReturnType<typeof useComposerDraft>, attachments: ReturnType<typeof useAttachments>, store: RunStateStore, runId: string, pending: boolean) {
+function useSubmission(state: ComposerState, blocked: boolean, commands: CommandController, onSubmit: Submit, onStop: (() => Promise<unknown>) | undefined, draft: ReturnType<typeof useComposerDraft>, attachments: ReturnType<typeof useAttachments>, store: RunStateStore, runId: string, pending: boolean) {
   const [stopping, setStopping] = useState(false);
+  const [preparing, setPreparing] = useState(false);
   const [error, setError] = useState<string>();
   const inFlight = useRef({ submit: false, stop: false });
   const runIdRef = useRef(runId);
   runIdRef.current = runId;
   const steer = state === "steerable";
-  const sending = pending;
+  const sending = pending || preparing;
   const canSubmit = !blocked && (draft.text.trim() !== "" || attachments.images.length > 0) && !sending && !(steer && attachments.images.length > 0);
   const submit = () => {
     if (inFlight.current.submit || !canSubmit || state === "read-only") return;
     inFlight.current.submit = true;
+    setPreparing(true);
+    setError(undefined);
     const sent = draft.text;
     const sentImages = attachments.current.current;
     const deliveryId = `web-${crypto.randomUUID()}`;
-    if (sentImages.length) store.beginDelivery(runId, { id: deliveryId, attemptId: deliveryId, method: "send_images", text: sent, images: sentImages });
-    setError(undefined);
-    attempt(() => onSubmit(sent, sentImages, { steer, deliveryId })).then(
-      () => { if (sentImages.length) store.settleDelivery(runIdRef.current, deliveryId, "accepted"); },
-      (failure: unknown) => { if (sentImages.length) store.settleDelivery(runIdRef.current, deliveryId, "rejected"); setError(`could not ${steer ? "steer" : "send"}: ${errorText(failure)}`); },
-    ).finally(() => { inFlight.current.submit = false; });
+    const slashWhileRunning = steer && !sent.startsWith("//") && sent.trimStart().startsWith("/");
+    const prepared = slashWhileRunning
+      ? Promise.resolve<ComposerAction>({ kind: "receipt", text: "commands are unavailable while a turn is active", tone: "error", retain: true })
+      : commands.prepareComposerInput(sent);
+    prepared.then((action) => {
+      const imageDelivery = action.kind === "send" && sentImages.length > 0;
+      if (imageDelivery) store.beginDelivery(runId, { id: deliveryId, attemptId: deliveryId, method: "send_images", text: sent, images: sentImages });
+      return attempt(() => onSubmit(action, sentImages, { steer, deliveryId, sourceText: sent })).then(
+        () => { if (imageDelivery) store.settleDelivery(runIdRef.current, deliveryId, "accepted"); },
+        (failure: unknown) => { if (imageDelivery) store.settleDelivery(runIdRef.current, deliveryId, "rejected"); throw failure; },
+      );
+    }).catch((failure: unknown) => setError(`could not ${steer ? "steer" : "send"}: ${errorText(failure)}`))
+      .finally(() => { inFlight.current.submit = false; setPreparing(false); });
   };
   const stop = () => {
     if (inFlight.current.stop || !onStop) return;
@@ -177,11 +203,12 @@ function useSubmission(state: ComposerState, blocked: boolean, onSubmit: Submit,
   return { steer, canSubmit, sending, stopping, error, submit, stop };
 }
 
-export function GammaComposer({ state, reason, blockedReason, vim: vimOn, onSubmit, onStop, footer, autoFocus, onImageOpen, store, runId }: {
+export function GammaComposer({ state, reason, blockedReason, vim: vimOn, commands, onSubmit, onStop, footer, autoFocus, onImageOpen, store, runId }: {
   state: ComposerState;
   reason?: string;
   blockedReason?: string;
   vim: boolean;
+  commands: CommandController;
   onSubmit: Submit;
   onStop?(): Promise<unknown>;
   /** Controls for the footer row, before attach, stop, and send. */
@@ -199,13 +226,26 @@ export function GammaComposer({ state, reason, blockedReason, vim: vimOn, onSubm
   const draft = useComposerDraft(vimOn, record.text, saveText);
   const attachments = useAttachments(draft.input, record.attachments, saveImages, removeImage);
   const pending = hasPendingDelivery(record);
-  const submission = useSubmission(state, Boolean(blockedReason), onSubmit, onStop, draft, attachments, store, runId, pending);
+  const completions = useMemo(() => new CompletionModel(commands), [commands]);
+  const completion = useSyncExternalStore(completions.subscribe, completions.getSnapshot);
+  const submission = useSubmission(state, Boolean(blockedReason), commands, onSubmit, onStop, draft, attachments, store, runId, pending);
   useEffect(() => { if (autoFocus && (!document.activeElement || document.activeElement === document.body)) draft.input.current?.focus({ preventScroll: true }); }, [autoFocus]);
+  useEffect(() => { void commands.refreshCatalog().catch(() => {}); }, [commands]);
   const stopRef = useCallback((button: HTMLButtonElement | null) => {
     if (!button) return;
     return () => { if (document.activeElement === button) draft.input.current?.focus({ preventScroll: true }); };
   }, []);
-  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => composerKeyDown(event, { steer: submission.steer, normal: draft.normal, vimOn, text: draft.text, vim: draft.vim, draft: draft.current, apply: draft.apply, submit: submission.submit, stop: submission.stop });
+  const applyCompletion = (accepted: { value: string; caret: number } | undefined) => {
+    if (!accepted) return;
+    draft.input.current?.focus({ preventScroll: true });
+    draft.setText(accepted.value);
+    requestAnimationFrame(() => { draft.input.current?.focus({ preventScroll: true }); draft.input.current?.setSelectionRange(accepted.caret, accepted.caret); });
+  };
+  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    const choice = completions.key(event.key, event.nativeEvent.isComposing || event.keyCode === 229);
+    if (choice.handled) { event.preventDefault(); applyCompletion(choice.accepted); return; }
+    composerKeyDown(event, { steer: submission.steer, normal: draft.normal, vimOn, text: draft.text, vim: draft.vim, draft: draft.current, apply: draft.apply, submit: submission.submit, stop: submission.stop });
+  };
   const onFormSubmit = (event: FormEvent) => { event.preventDefault(); draft.input.current?.focus({ preventScroll: true }); submission.submit(); };
 
   if (state === "read-only" && !draft.text && !reason) return null;
@@ -216,7 +256,7 @@ export function GammaComposer({ state, reason, blockedReason, vim: vimOn, onSubm
 
   const message = submission.error ?? (submission.stopping ? "stopping" : submission.sending ? (submission.steer ? "steering" : "sending") : blockedReason ?? "");
   return <ComposerBody
-    field={{ id, state, vimOn, vim: draft.vim, text: draft.text, input: draft.input, onKeyDown, onChange: draft.setText }}
+    field={{ id, state, vimOn, vim: draft.vim, text: draft.text, input: draft.input, completion, listboxId: `${id}-commands`, onKeyDown, onChange: (value, start, end) => { draft.setText(value); completions.update(value, start, end); }, onSelect: (value, start, end) => completions.update(value, start, end), onAccept: (index) => applyCompletion(completions.choose(index)) }}
     attachments={{ images: attachments.images, error: attachments.attachError, dragging: attachments.dragging, files: attachments.files, onPaste: attachments.onPaste, onImageOpen, onRemove: attachments.remove, onFiles: attachments.addFiles, setDragging: attachments.setDragging }}
     submission={{ steer: submission.steer, sending: submission.sending, stopping: submission.stopping, error: submission.error, message, canSubmit: submission.canSubmit, onSubmit: onFormSubmit, onStop: onStop ? submission.stop : undefined, onStopRef: stopRef }}
     footer={footer}
