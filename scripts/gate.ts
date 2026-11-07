@@ -142,9 +142,8 @@ try {
         await page.getByRole("heading", { name: title }).waitFor({ timeout: 5000 });
         if (command) {
           const shown = await page.locator(".panel .command code").textContent();
-          // The port of the server the page found; zeta's default 8765 when it never found one.
-          const port = name === "not-running" ? 8765 : fake.port;
-          if (shown !== `zeta serve --ws ${port} --ws-origin ${origin}`) throw new Error(`command is "${shown}"`);
+          // The isolated fake port is required even while stopped; the gate must never suggest or probe zeta's live default.
+          if (shown !== `zeta serve --ws ${fake.port} --ws-origin ${origin}`) throw new Error(`command is "${shown}"`);
           await page.locator('.panel .command code [class*="tok-"]').first().waitFor({ timeout: 3000 }).catch(() => { throw new Error("the command is not highlighted"); });
         }
         if (name !== "incompatible") await page.getByRole("button", { name: "retry now" }).waitFor();
