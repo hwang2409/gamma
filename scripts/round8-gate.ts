@@ -101,7 +101,7 @@ try {
         const strip = await page.locator(".attachments").boundingBox(); if (!strip || strip.height > 90) throw new Error(`attachment strip is ${strip?.height}px tall`);
         await page.screenshot({ path: join(shots, "minor-attachments-390.png") });
         await page.goto(`${origin}/?run=s-reconnect&theme=github-light`); await page.locator("button.new-run").waitFor(); await page.locator("button.new-run").click();
-        if (new URL(page.url()).searchParams.has("run")) throw new Error("new run did not clear the run URL");
+        if (!new URL(page.url()).searchParams.get("run")?.startsWith("draft:")) throw new Error("new run did not get a draft URL");
         await page.goBack(); if (new URL(page.url()).searchParams.get("run") !== "s-reconnect") throw new Error("Back did not restore the previous run URL");
       } finally { await close(context); }
     });
@@ -114,11 +114,11 @@ try {
           await page.screenshot({ path: join(shots, `b2-yolo-${theme}-${width}.png`) }); await page.keyboard.press("Escape");
           await send(page, "long turn for new run dialog");
           await waitUntil(() => fake.sent.length === 1, "the dialog turn did not reach zeta");
-          await page.locator('button.new-run:not([disabled])').click(); await auditDialog(page, ".confirm-dialog");
-          if (await page.evaluate(() => document.activeElement?.textContent) !== "cancel") throw new Error("new-run dialog focuses the destructive action");
+          await page.locator('button.new-run:not([disabled])').click();
+          await page.locator(".empty-run").waitFor();
+          if (!new URL(page.url()).searchParams.get("run")?.startsWith("draft:")) throw new Error("new run did not get a draft URL");
           await page.screenshot({ path: join(shots, `b2-new-run-${theme}-${width}.png`) });
-          await page.getByRole("button", { name: "cancel" }).click();
-          await page.getByRole("button", { name: "stop the running turn" }).click();
+          await page.getByRole("button", { name: "stop running run" }).click();
           await Bun.sleep(300);
         } finally { await close(context); }
       }
