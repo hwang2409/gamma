@@ -281,6 +281,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   const activeSettings = () => settingsBySession.get(active ?? "") ?? defaultSettings;
   const failures = new Map<string, string[]>();
   const transientBusy = new Map<string, number>();
+  const busyRetryStatusDelay = new Map<string, number>();
   const imageSends: Json[] = [];
   const decisions: Json[] = [];
   const requests: Array<{ method: string; params: Json; running: boolean; received: number; started: number; replied?: number }> = [];
@@ -313,6 +314,17 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     const call = delayCalls.get(method) ?? 0;
     delayCalls.set(method, call + 1);
     return configured[Math.min(call, configured.length - 1)] ?? 0;
+  };
+  const takeTransientBusy = (method: string) => {
+    const busy = transientBusy.get(method) ?? 0;
+    if (busy <= 0) return false;
+    transientBusy.set(method, busy - 1);
+    const statusDelay = busyRetryStatusDelay.get(method);
+    if (statusDelay !== undefined) {
+      busyRetryStatusDelay.delete(method);
+      nextDelays.set("status", [...(nextDelays.get("status") ?? []), statusDelay]);
+    }
+    return true;
   };
   const schedule = <T,>(task: () => Promise<T>) => {
     if (!serialDelays) return task();
@@ -392,8 +404,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         }
         if (method === "new_session") {
           // zeta's reply (server.py `new_session`): the full metadata of the new session, which becomes the server's own.
-          const busy = transientBusy.get(method) ?? 0;
-          if (busy > 0) { transientBusy.set(method, busy - 1); return reply({ error: { code: -32004, message: "a turn is already running" } }); }
+          if (takeTransientBusy(method)) return reply({ error: { code: -32004, message: "a turn is already running" } });
           if (running || rejectCreate) return reply({ error: { code: -32004, message: "a turn is already running" } });
           const validModels = ["claude-sonnet-5", "claude-opus-4-6", "gpt-5.1-codex"];
           // real zeta requires a concrete model whenever new_session_settings carries approval_mode
@@ -423,8 +434,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         }
         if (method === "resume") {
           if (mode === "broken-session") return reply({ error: { code: -32602, message: "session log is invalid at line 12" } });
-          const busy = transientBusy.get(method) ?? 0;
-          if (busy > 0) { transientBusy.set(method, busy - 1); return reply({ error: { code: -32004, message: "a turn is already running" } }); }
+          if (takeTransientBusy(method)) return reply({ error: { code: -32004, message: "a turn is already running" } });
           if (running && params.session_id !== active) return reply({ error: { code: -32004, message: "a turn is already running" } });
           active = String(params.session_id);
           delayedOpen = false;
@@ -502,7 +512,10 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     settingsFor(sessionId: string) { return settingsBySession.get(sessionId); },
     setSettings(sessionId: string, settings: Settings) { settingsBySession.set(sessionId, settings); },
     failNext(method: string, message: string) { failures.set(method, [...(failures.get(method) ?? []), message]); },
-    busyNext(method: "resume" | "new_session", count = 1) { transientBusy.set(method, count); },
+    busyNext(method: "resume" | "new_session", count = 1, retryStatusDelay?: number) {
+      transientBusy.set(method, count);
+      if (retryStatusDelay !== undefined) busyRetryStatusDelay.set(method, retryStatusDelay);
+    },
     get running() { return running; },
     /** Every accepted send and steer, in order. */
     sent: composer.sent,

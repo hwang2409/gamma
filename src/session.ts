@@ -325,7 +325,9 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
         return;
       } catch (error) {
         if (!live(target) || !current(effect.runId, effect.operationId) || (error as { name?: string }).name === "AbortError") return;
-        if (isBusyError(error) && await retryBusy(effect.runId, effect.operationId, attempt, abort.signal) && attempt < RETRY_DELAYS.length - 1) continue;
+        const retry = isBusyError(error) && await retryBusy(effect.runId, effect.operationId, attempt, abort.signal);
+        if (!live(target) || !current(effect.runId, effect.operationId) || abort.signal.aborted) return;
+        if (retry && attempt < RETRY_DELAYS.length - 1) continue;
         runs.dispatch({ type: "OPEN_FAIL", runId: effect.runId, operationId: effect.operationId, error: message(error), busy: isBusyError(error) });
         return;
       }

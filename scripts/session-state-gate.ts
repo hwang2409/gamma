@@ -19,7 +19,10 @@ for (let attempt = 0; attempt < 100; attempt++) {
   await Bun.sleep(100);
 }
 
-async function ready(page: Page) { await page.locator('.dock textarea[aria-label^="message"]').waitFor({ timeout: 15_000 }); }
+async function ready(page: Page) {
+  try { await page.locator('.dock textarea[aria-label^="message"]').waitFor({ timeout: 15_000 }); }
+  catch (error) { throw new Error(`${error instanceof Error ? error.message : String(error)}\npage: ${await page.locator("main").innerText()}`); }
+}
 async function fresh(browser: Browser, width: number, path = "/") {
   const context = await browser.newContext({ viewport: { width, height: width === 390 ? 844 : 900 } });
   await context.addInitScript(() => {
@@ -104,15 +107,19 @@ await check("one transient busy new session retries and starts", async () => {
   } finally { const stop = page.getByRole("button", { name: "stop the running turn" }); await stop.click().catch(() => {}); await context.close(); await browser.close(); }
 });
 
-// The delayed-retry, known-owner, rapid-selection, approval-navigation, and three-busy-resume cases below are regression guards; they already pass on 6216ad7.
+// The known-owner, rapid-selection, approval-navigation, and three-busy-resume cases below are regression guards; they already pass on 6216ad7.
 await check("a delayed resume retry is cancelled after navigation", async () => {
-  const before = fake.requests.length;
-  fake.busyNext("resume", 1);
-  fake.delayNext("resume", 3_000);
+  fake.setLive(false);
   const browser = await chromium.launch({ headless: true });
-  const { context, page } = await fresh(browser, 1440, "/?run=s-themes");
+  const { context, page } = await fresh(browser, 1440, "/?run=s-docs");
+  const before = fake.requests.length;
+  fake.busyNext("resume", 1, 3_000);
+  fake.delayNext("resume", 500);
   try {
+    await page.goto(`${origin}/?run=s-themes`);
     if (!await poll(() => Promise.resolve(fake.requests.slice(before).some((request) => request.method === "resume" && request.params.session_id === "s-themes")))) throw new Error("the first resume was not sent");
+    const statusesAfterResume = fake.requests.filter((request) => request.method === "status").length;
+    if (!await poll(() => Promise.resolve(fake.requests.filter((request) => request.method === "status").length > statusesAfterResume))) throw new Error("the retry status check was not sent");
     await page.evaluate(() => {
       const run = `draft:${crypto.randomUUID()}`;
       const url = new URL(location.href); url.searchParams.set("run", run);
