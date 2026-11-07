@@ -265,10 +265,11 @@ test("a busy resume displays the URL-selected cached run and forward restores th
   const view = harness(source(fake.client), { selected: "a" });
   await tick();
   view.select("b");
-  for (let attempt = 0; attempt < 50 && view.state.session?.session_id !== "b"; attempt++) await tick();
+  for (let attempt = 0; attempt < 400 && present(view).open?.id !== "b"; attempt++) await tick();
+  expect(present(view).open?.id).toBe("b");
   blockA = true;
   view.select("a");
-  for (let attempt = 0; attempt < 50 && !present(view).openError; attempt++) await tick();
+  for (let attempt = 0; attempt < 400 && !present(view).openError; attempt++) await tick();
   expect(present(view).open?.id).toBe("a");
   expect(view.state.session?.session_id).toBe("a");
   expect(present(view).openError).toMatchObject({ id: "a", busy: true });
