@@ -257,7 +257,7 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
     cachedRuns.set(id, run);
     if (state.selected === id) set({ open: run, opening: null });
   };
-  const open = async (id: string, knownStatus?: ServerStatus) => {
+  const open = async (id: string, knownStatus?: ServerStatus, present = true) => {
     const target = client;
     if (state.active && state.active !== id) {
       publishSelected(id);
@@ -268,7 +268,7 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
     openAbort?.abort();
     const abort = new AbortController();
     openAbort = abort;
-    publishSelected(id);
+    if (present) publishSelected(id);
     const cached = cachedRuns.get(id);
     if (!target || (cached && state.attached === id && !cached.stale)) return;
     try {
@@ -409,7 +409,8 @@ export function createRun(connection: Source, { selected = null, onSelect, bindi
       createdPending = session.session_id;
       set({ attached: session.session_id, ...(deferredSelection === undefined ? { selected: session.session_id, opening: { id: session.session_id, messages: 0 }, open: null, session } : {}) });
       onSelect?.(session.session_id);
-      if (!attachmentHolds) { createdPending = null; await open(session.session_id); }
+      await open(session.session_id, undefined, deferredSelection === undefined);
+      if (!attachmentHolds) createdPending = null;
       return session.session_id;
     },
     reset() {
