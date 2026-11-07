@@ -104,6 +104,7 @@ try {
     await check("compact-notice-keeps-copy-visible", async () => {
       const { context, page } = await fresh(browser, "/?run=s-reconnect");
       try {
+        await page.getByRole("log", { name: "run activity" }).waitFor();
         await fake.stop();
         const notice = page.locator(".notice"); await notice.waitFor({ timeout: 10_000 });
         const copy = notice.getByRole("button", { name: /copy/ }); const box = await copy.boundingBox();
