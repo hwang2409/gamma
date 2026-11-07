@@ -193,7 +193,7 @@ export function GammaComposer({ state, reason, vim: vimOn, onSubmit, onStop, foo
   const removeImage = useCallback((index: number) => store.removeAttachment(runId, index), [store, runId]);
   const draft = useComposerDraft(vimOn, record.text, saveText);
   const attachments = useAttachments(draft.input, record.attachments, saveImages, removeImage);
-  const pending = [...record.deliveries.values()].some((delivery) => delivery.status === "pending");
+  const pending = record.deliveries.size > 0;
   const submission = useSubmission(state, onSubmit, onStop, draft, attachments, store, runId, pending);
   useEffect(() => { if (autoFocus && (!document.activeElement || document.activeElement === document.body)) draft.input.current?.focus({ preventScroll: true }); }, [autoFocus]);
   const stopRef = useCallback((button: HTMLButtonElement | null) => {

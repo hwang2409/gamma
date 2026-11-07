@@ -2,11 +2,9 @@ import type { QueuedImage } from "./image-queue";
 
 export type RunId = string;
 export type DeliveryMethod = "send" | "steer" | "send_images";
-export type DeliveryStatus = "pending" | "accepted" | "rejected";
 export type PendingDelivery = {
   id: string;
   method: DeliveryMethod;
-  status: DeliveryStatus;
   text: string;
   images: readonly QueuedImage[];
 };
@@ -45,7 +43,7 @@ export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefi
   const value = (id: RunId) => records.get(key(id)) ?? EMPTY;
   const write = (id: RunId, record: RunRecord) => { const target = key(id); records.delete(target); records.set(target, record); emit(); };
   const revoke = (images: readonly QueuedImage[]) => images.forEach((image) => URL.revokeObjectURL(image.url));
-  const dirty = (record: RunRecord) => Boolean(record.text || record.attachments.length || [...record.deliveries.values()].some((delivery) => delivery.status === "pending"));
+  const dirty = (record: RunRecord) => Boolean(record.text || record.attachments.length || record.deliveries.size);
   const evict = () => {
     let clean = [...records].filter(([id, record]) => id !== active && !dirty(record));
     while (clean.length > cleanLimit) {
@@ -76,18 +74,18 @@ export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefi
       URL.revokeObjectURL(image.url);
       write(id, { ...current, attachments: current.attachments.filter((_, item) => item !== index) });
     },
-    beginDelivery(id: RunId, delivery: Omit<PendingDelivery, "status">) {
+    beginDelivery(id: RunId, delivery: PendingDelivery) {
       const current = value(id);
       const deliveries = new Map(current.deliveries);
-      deliveries.set(delivery.id, { ...delivery, status: "pending" });
+      deliveries.set(delivery.id, delivery);
       write(id, { ...current, deliveries });
     },
     settleDelivery(id: RunId, deliveryId: string, status: "accepted" | "rejected") {
       const current = value(id);
       const delivery = current.deliveries.get(deliveryId);
-      if (!delivery || delivery.status !== "pending") return;
+      if (!delivery) return;
       const deliveries = new Map(current.deliveries);
-      deliveries.set(deliveryId, { ...delivery, status });
+      deliveries.delete(deliveryId);
       if (status === "rejected") { write(id, { ...current, deliveries }); return; }
       const text = current.text.startsWith(delivery.text) ? current.text.slice(delivery.text.length) : current.text;
       const attachments = current.attachments.filter((image) => !delivery.images.includes(image));
@@ -115,7 +113,6 @@ export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefi
       }
       this.setModel(id, { choice: "explicit", model: currentModel });
     },
-    evict,
     dispose() { records.forEach((record) => revoke(record.attachments)); records.clear(); aliases.clear(); listeners.clear(); },
   };
 }
