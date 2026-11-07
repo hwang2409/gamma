@@ -541,6 +541,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     setHistoryMode(next: HistoryMode) { currentHistoryMode = next; },
     setLive(next: boolean) {
       if (next && !liveEnabled) {
+        active = ACTIVE;
         turnStarted = false;
         histories[ACTIVE] = histories[ACTIVE]!.filter((row) => row.event !== "approval_request" && row.event !== "approval_end");
       }

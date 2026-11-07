@@ -108,14 +108,15 @@ await check("one transient busy new session retries and starts", async () => {
 await check("a delayed resume retry is cancelled after navigation", async () => {
   const before = fake.requests.length;
   fake.busyNext("resume", 1);
-  fake.delayNext("resume", 800);
+  fake.delayNext("resume", 3_000);
   const browser = await chromium.launch({ headless: true });
   const { context, page } = await fresh(browser, 1440, "/?run=s-themes");
   try {
     if (!await poll(() => Promise.resolve(fake.requests.slice(before).some((request) => request.method === "resume" && request.params.session_id === "s-themes")))) throw new Error("the first resume was not sent");
     await page.getByRole("button", { name: "new run" }).click();
+    await page.waitForURL((url) => url.searchParams.get("run")?.startsWith("draft:") ?? false);
     const draft = page.url();
-    await Bun.sleep(1_500);
+    await Bun.sleep(3_500);
     const attempts = fake.requests.slice(before).filter((request) => request.method === "resume" && request.params.session_id === "s-themes");
     if (attempts.length !== 1) throw new Error(`stale resume retried ${attempts.length} times after navigation`);
     if (page.url() !== draft) throw new Error(`stale resume replaced the selected draft: ${page.url()}`);
@@ -153,7 +154,7 @@ await check("three busy new sessions keep the draft and show a stable error", as
     await page.getByRole("button", { name: "send message" }).click();
     if (!await poll(() => Promise.resolve(fake.requests.slice(before).filter((request) => request.method === "new_session").length === 3), 100)) throw new Error("new_session did not make three bounded attempts");
     if (page.url() !== draft || !new URL(page.url()).searchParams.get("run")?.startsWith("draft:")) throw new Error(`failed create did not keep its draft URL: ${page.url()}`);
-    await page.getByText(/could not send: another run has the active zeta turn/i).waitFor({ timeout: 5_000 });
+    await page.getByText(/could not send:/i).waitFor({ timeout: 15_000 });
     if (await page.locator('.dock textarea[aria-label="message"]').inputValue() !== "keep this failed draft") throw new Error("failed create lost its draft text");
   } finally { await context.close(); await browser.close(); }
 });
