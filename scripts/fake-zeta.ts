@@ -36,7 +36,7 @@ const seeded = [
 ];
 
 // Opaque command inputs by id. Zeta echoes an opaque input's display_text, the typed command line, as the user
-// message (zeta dcc4ce9 src/zeta/core/slash.py:754 display_text=value; src/zeta/server/delivery.py:107-108).
+// message (zeta dcc4ce9 src/zeta/core/slash.py:767 display_text=value; src/zeta/server/delivery.py:107-108).
 const opaqueInputs = new Map<string, string>();
 const text = (value: string) => ({ type: "text", text: value });
 const toolUse = (id: string, name: string, args: Json = {}) => ({ type: "tool_use", tool_call: { id, name, arguments: args } });
@@ -473,6 +473,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           if (method !== "model_catalog" && params.session_id !== active) return reply({ error: { code: -32003, message: "session is not active" } });
         }
         if (method === "slash_list") return reply({ result: { commands: params.include_unavailable === true ? completeSlashCatalog : defaultSlashCatalog, notices: [] } });
+        const failure = failures.get(method)?.shift();
+        if (failure) return reply({ error: { code: -32000, message: failure } });
         if (method === "slash_run") {
           const command = String(params.text ?? "").trim();
           if (command === "/status") return reply({ result: { kind: "output", text: longStatus ? `fake status\nready\n${Array.from({ length: 80 }, (_, index) => `status detail ${index + 1}`).join("\n")}` : "fake status\nready" } });
@@ -490,8 +492,6 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           return reply({ result: { kind: "unknown", name } });
         }
         if (method === "model_catalog") return reply({ result: { models: ["claude-sonnet-5", "claude-opus-4-6", "gpt-5.1-codex"], providers: { "claude-sonnet-5": "claude", "claude-opus-4-6": "claude", "gpt-5.1-codex": "codex" } } });
-        const failure = failures.get(method)?.shift();
-        if (failure) return reply({ error: { code: -32000, message: failure } });
         if (method === "session_settings") return reply({ result: activeSettings() });
         if (method === "set_settings") {
           if (running) return reply({ error: { code: -32004, message: "a turn is already running" } });

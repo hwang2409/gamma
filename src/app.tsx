@@ -25,10 +25,13 @@ const RichMarkdown = (props: MarkdownProps) => <Markdown {...props} highlight={h
 
 // Renderers stay module-level so appends never re-render every row; approvals reach the live client through context.
 type Decide = (requestId: string) => Promise<unknown>;
-const Decisions = createContext<{ approve?: Decide; always?: Decide; deny?: Decide; disabledReason?: string } | null>(null);
+const Decisions = createContext<{ approve?: Decide; always?: Decide; deny?: Decide; disabledReason?: string; alwaysAllowed?: ReadonlySet<string>; markAlways?(toolId: string): void } | null>(null);
 function ZetaApproval({ id }: { id: string }) {
   const decide = useContext(Decisions);
-  return <Approval id={id} onApprove={decide?.approve} onApproveAlways={decide?.always} approveAlwaysLabel="always allow for this session" onDeny={decide?.deny} disabledReason={decide?.disabledReason} />;
+  const toolId = useItemSelector(id, (item) => item?.type === "approval" && item.request.type === "approval_request" ? item.request.tool_call.id : "");
+  const approveAlways = decide?.always;
+  const always = approveAlways && ((requestId: string) => approveAlways(requestId).then((result) => { decide?.markAlways?.(toolId); return result; }));
+  return <Approval id={id} onApprove={decide?.approve} onApproveAlways={always} approveAlwaysLabel="always allow" onDeny={decide?.deny} disabledReason={decide?.disabledReason} />;
 }
 // The intents of steers a stop dropped: zeta never gave them to the agent, so their rows must not look delivered.
 const DeliveryStates = createContext<ReadonlyMap<string, import("./run-state").PendingDelivery>>(new Map());
@@ -73,7 +76,9 @@ function ArtifactList({ anchor }: { anchor: string | null }) {
 }
 function ToolWithArtifacts({ id }: { id: string }) {
   const toolId = useItemSelector(id, (item) => item?.type === "tool" ? item.tool_call.id : null);
-  return <><ToolCall id={id} />{toolId ? <ArtifactList anchor={toolId} /> : null}</>;
+  const decisions = useContext(Decisions);
+  const alwaysAllowed = Boolean(toolId && decisions?.alwaysAllowed?.has(toolId));
+  return <><div className={alwaysAllowed ? "gamma-tool always-allowed" : "gamma-tool"}><ToolCall id={id} />{alwaysAllowed ? <span className="approval-session-decision">always allowed for this session</span> : null}</div>{toolId ? <ArtifactList anchor={toolId} /> : null}</>;
 }
 const ApprovalModeContext = createContext(false);
 function YoloIndicator({ className = "" }: { className?: string }) {
@@ -85,14 +90,15 @@ function ZetaMessage({ id }: { id: string }) {
   return <Message id={id} markdown={RichMarkdown} onOpen={onOpen ?? undefined} />;
 }
 // A failed turn's one action: send its prompt again, offered on the error row while it is the last row.
-const RetryTurn = createContext<(() => void) | null>(null);
+type RetryAction = { run(): void; label: "retry" | "edit and retry" };
+const RetryTurn = createContext<RetryAction | null>(null);
 function ErrorRow({ id }: { id: string }) {
   const retry = useContext(RetryTurn);
   const last = useRun(useCallback((state: { outline: readonly { id: string }[] }) => state.outline.at(-1)?.id === id, [id]));
   return (
     <div className="turn-error">
       <Fallback id={id} />
-      {retry && last ? <button type="button" className="ghost turn-retry" onClick={retry}>edit and retry</button> : null}
+      {retry && last ? <button type="button" className="ghost turn-retry" onClick={retry.run}>{retry.label}</button> : null}
     </div>
   );
 }
@@ -148,8 +154,11 @@ export function App() {
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
   const runs = useMemo(() => createSessionManager(connection, runState, hostBindings), [connection, runState]);
-  const deliveries = useMemo(() => createDeliveryManager(() => connectionRef.current.client, runState, runs.execute, runs.abort), [runState, runs]);
   const receipts = useMemo(createReceiptStore, []);
+  const deliveries = useMemo(() => createDeliveryManager(() => connectionRef.current.client, runState, runs.execute, runs.abort, (runId, text) => {
+    const id = runState.canonical(runId);
+    receipts.set(id, { text: runState.get(id).attachments.length ? `${text}\nattachments are still attached and were not sent.` : text, tone: "error" });
+  }), [receipts, runState, runs]);
   useEffect(() => {
     const activate = (id: string) => {
       const nextModel = nextRunModel().model;
@@ -179,7 +188,7 @@ export function App() {
   const landedNotice = workspace.notice ?? null;
   const shownSettings = selectedRecord.settings.error ? selectedRecord.settings.loaded : selectedRecord.settings.pending ? selectedRecord.settings.desired : selectedRecord.settings.loaded ?? selectedRecord.settings.desired;
   const yolo = shownSettings?.approval_mode === "allow";
-  const [retryTurn, setRetryTurn] = useState<(() => void) | null>(null);
+  const [retryTurn, setRetryTurn] = useState<RetryAction | null>(null);
   const [followRequest, setFollowRequest] = useState(0);
   const [viewer, setViewer] = useState<any>(null);
   const viewerOpener = useRef<HTMLElement | null>(null);
@@ -326,9 +335,9 @@ function focusComposer() {
 function CommandReceiptLine({ store, runId }: { store: ReceiptStore; runId: string }) {
   const receipt = useSyncExternalStore(store.subscribe, () => store.get(runId));
   const text = useRef<HTMLSpanElement>(null);
-  useEffect(() => { if (receipt) text.current?.scrollTo(0, 0); }, [receipt?.text]);
+  useEffect(() => { if (receipt) text.current?.scrollTo(0, 0); }, [receipt]);
   if (!receipt) return null;
-  return <div className="command-receipt" data-tone={receipt.tone} role={receipt.tone === "error" ? undefined : "status"}>{receipt.tone === "error" ? <span className="command-receipt-label">error</span> : null}<span ref={text} className="command-receipt-text" role={receipt.tone === "error" ? "alert" : undefined}>{receipt.text}</span><button type="button" className="ghost" aria-label="dismiss command result" onClick={() => { store.dismiss(runId); focusComposer(); }}>dismiss</button></div>;
+  return <div className="command-receipt" data-tone={receipt.tone}>{receipt.tone === "error" ? <span className="command-receipt-label">error</span> : null}<span ref={text} className="command-receipt-text" role={receipt.tone === "error" ? "alert" : "status"}>{receipt.text}</span><button type="button" className="ghost" aria-label="dismiss command result" onClick={() => { store.dismiss(runId); focusComposer(); }}>dismiss</button></div>;
 }
 
 async function submitRun({ text, images, steer, deliveryId, connection, runs, deliveries, choice, yolo, runId, onCreated }: { text: string; images: readonly import("./image-queue").QueuedImage[]; steer: boolean; deliveryId: string; connection: Connection; runs: SessionManager; deliveries: DeliveryManager; choice: { model?: string; provider?: string }; yolo: boolean; runId: string; onCreated(from: string, sessionId: string): void }) {
@@ -357,9 +366,9 @@ function dockPhase(state: ConnectionState, present: RunState, open: OpenRun | nu
   return { kind: "ready" };
 }
 
-function DockComposer({ readOnly, blockedReason, running, vim, commands, onSubmit, onStop, onImageOpen, client, deliveries, sessionId, runState, runId, createdWithDefault }: { readOnly: string | null; blockedReason: string | null; running: boolean; vim: boolean; commands: ReturnType<typeof createUnavailableCommandController>; onSubmit: Submit; onStop(): Promise<unknown>; onImageOpen(block: any): void; client: ZetaClient | null; deliveries: DeliveryManager; sessionId: string | null; runState: RunStateStore; runId: string; createdWithDefault: boolean }) {
-  if (readOnly !== null) return <GammaComposer state="read-only" reason={readOnly} vim={vim} commands={commands} onSubmit={onSubmit} onImageOpen={onImageOpen} store={runState} runId={runId} />;
-  return <GammaComposer state={running ? "steerable" : "idle"} blockedReason={blockedReason ?? undefined} vim={vim} commands={commands} autoFocus onSubmit={onSubmit} onStop={running ? onStop : undefined} onImageOpen={onImageOpen} store={runState} runId={runId} footer={<RunSettings available={Boolean(client)} deliveries={deliveries} sessionId={sessionId} createdWithDefault={createdWithDefault} running={running} store={runState} runId={runId} />} />;
+function DockComposer({ readOnly, blockedReason, running, vim, commands, onSubmit, onPreparationFailure, onStop, onImageOpen, client, deliveries, sessionId, runState, runId, createdWithDefault }: { readOnly: string | null; blockedReason: string | null; running: boolean; vim: boolean; commands: ReturnType<typeof createUnavailableCommandController>; onSubmit: Submit; onPreparationFailure(error: unknown, images: readonly import("./image-queue").QueuedImage[]): void; onStop(): Promise<unknown>; onImageOpen(block: any): void; client: ZetaClient | null; deliveries: DeliveryManager; sessionId: string | null; runState: RunStateStore; runId: string; createdWithDefault: boolean }) {
+  if (readOnly !== null) return <GammaComposer state="read-only" reason={readOnly} vim={vim} commands={commands} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onImageOpen={onImageOpen} store={runState} runId={runId} />;
+  return <GammaComposer state={running ? "steerable" : "idle"} blockedReason={blockedReason ?? undefined} vim={vim} commands={commands} autoFocus onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onStop={running ? onStop : undefined} onImageOpen={onImageOpen} store={runState} runId={runId} footer={<RunSettings available={Boolean(client)} deliveries={deliveries} sessionId={sessionId} createdWithDefault={createdWithDefault} running={running} store={runState} runId={runId} />} />;
 }
 
 
@@ -372,13 +381,13 @@ function runChoice(model: ReturnType<RunStateStore["get"]>["model"], local: { mo
   return preferred ? { model: preferred, ...(local.model === preferred && local.provider ? { provider: local.provider } : {}) } : {};
 }
 
-function useDockRetry(agent: ReturnType<typeof useAgentPhase>, client: ZetaClient | null, deliveries: DeliveryManager, runState: RunStateStore, runId: string, lastPrompt: string | null, onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>) {
+function useDockRetry(agent: ReturnType<typeof useAgentPhase>, client: ZetaClient | null, deliveries: DeliveryManager, runState: RunStateStore, runId: string, lastPrompt: string | null, onRetryTurn: Dispatch<SetStateAction<RetryAction | null>>) {
   const failed = agent.kind === "failed" && client && lastPrompt ? lastPrompt : null;
   useEffect(() => {
-    const retry = failed && (isSlashCommandText(failed)
-      ? () => { runState.restoreDraft(runId, runState.get(runId).lastDeliveryMethod === "send" ? `/${failed}` : failed); focusComposer(); }
-      : () => void deliveries.submit(runId, failed, false).catch(() => {}));
-    onRetryTurn(retry ? () => retry : null);
+    const retry: RetryAction | null = failed && isSlashCommandText(failed)
+      ? { run: () => { runState.restoreDraft(runId, runState.get(runId).lastDeliveryMethod === "send" ? `/${failed}` : failed); focusComposer(); }, label: "edit and retry" }
+      : failed ? { run: () => void deliveries.submit(runId, failed, false).catch(() => {}), label: "retry" } : null;
+    onRetryTurn(retry);
     return () => onRetryTurn(null);
   }, [failed, deliveries, runState, runId, onRetryTurn]);
 }
@@ -395,7 +404,7 @@ function dockBlockedReason(state: ConnectionState, present: RunState, open: Open
 }
 
 function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, runState, runId, onCreated, onAccepted, deliveries, receipts }: {
-  state: ConnectionState; view: RunState; connection: Connection; runs: SessionManager; vim: boolean; onRetryTurn: Dispatch<SetStateAction<(() => void) | null>>; onImageOpen(block: any): void; runState: RunStateStore; runId: string; onCreated(from: string, sessionId: string): void; onAccepted(): void; deliveries: DeliveryManager; receipts: ReceiptStore;
+  state: ConnectionState; view: RunState; connection: Connection; runs: SessionManager; vim: boolean; onRetryTurn: Dispatch<SetStateAction<RetryAction | null>>; onImageOpen(block: any): void; runState: RunStateStore; runId: string; onCreated(from: string, sessionId: string): void; onAccepted(): void; deliveries: DeliveryManager; receipts: ReceiptStore;
 }) {
   const present = view;
   const open = present.open;
@@ -412,7 +421,7 @@ function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, ru
   const sessionId = blank || starting || view.attached !== open?.id ? null : open.id;
   const commands = useMemo(() => client && sessionId
     ? createCommandController(sessionId, (method, params) => client.request(method, params), { features: new Set(client.features), requests: commandRequests(client) })
-    : createUnavailableCommandController(), [client, sessionId]);
+    : createUnavailableCommandController(client ? "commands need an open run; send a message first or open a run" : undefined), [client, sessionId]);
 
   const onSubmit: Submit = useCallback(async (action, images, { steer, deliveryId, sourceText }) => {
     const setReceipt = (text: string, tone: "quiet" | "error") => receipts.set(runState.canonical(runId), { text: images.length ? `${text}\nattachments are still attached and were not sent.` : text, tone });
@@ -462,7 +471,11 @@ function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, ru
   const phase = dockPhase(state, present, open, agent, starting);
   const readOnly = blank ? null : dockReadOnlyReason(open?.id ?? null, view.active);
   const blockedReason = starting ? null : pendingDelivery ? "sending waits while the previous message is pending or retrying" : view.active && blank ? `sending waits for the active run ${view.active}` : dockBlockedReason(state, present, open, running);
-  return <div className="dock"><>{problem ? null : <StatusLine phase={phase} />}</><CommandReceiptLine store={receipts} runId={runId} /><DockComposer commands={commands} deliveries={deliveries} readOnly={readOnly} blockedReason={blockedReason} running={running} vim={vim} onSubmit={onSubmit} onStop={onStop} onImageOpen={onImageOpen} client={client} sessionId={sessionId} createdWithDefault={record.model.choice === "default"} runState={runState} runId={runId} /></div>;
+  const onPreparationFailure = useCallback((error: unknown, images: readonly import("./image-queue").QueuedImage[]) => {
+    const text = error instanceof Error ? error.message : String(error);
+    receipts.set(runState.canonical(runId), { text: images.length ? `${text}\nattachments are still attached and were not sent.` : text, tone: "error" });
+  }, [receipts, runId, runState]);
+  return <div className="dock"><>{problem ? null : <StatusLine phase={phase} />}</><CommandReceiptLine store={receipts} runId={runId} /><DockComposer commands={commands} deliveries={deliveries} readOnly={readOnly} blockedReason={blockedReason} running={running} vim={vim} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onStop={onStop} onImageOpen={onImageOpen} client={client} sessionId={sessionId} createdWithDefault={record.model.choice === "default"} runState={runState} runId={runId} /></div>;
 }
 
 /** The last prompt the user sent, so a failed turn can be retried with it. */
@@ -501,6 +514,7 @@ function Run({ client, open, readOnly, followRequest }: { client: ZetaClient | n
   const viewerOpener = useRef<HTMLElement | null>(null);
   const openViewer = useCallback((block: any) => { viewerOpener.current = document.activeElement as HTMLElement | null; setViewer(block); }, []);
   const closeViewer = useCallback(() => { setViewer(null); requestAnimationFrame(() => viewerOpener.current?.focus()); }, []);
+  const [alwaysAllowed, setAlwaysAllowed] = useState<ReadonlySet<string>>(() => new Set());
   const decisions = useMemo(() => {
     if (!client || open.stale || readOnly) return { disabledReason: readOnly ? "opening the run — decisions are paused" : "reconnecting — decisions are disabled until the server confirms this run" };
     const decide = (method: "approve" | "deny", always = false): Decide => async (request_id) => {
@@ -514,8 +528,8 @@ function Run({ client, open, readOnly, followRequest }: { client: ZetaClient | n
         throw error;
       }
     };
-    return { approve: decide("approve"), always: decide("approve", true), deny: decide("deny") };
-  }, [client, open.stale, readOnly]);
+    return { approve: decide("approve"), always: decide("approve", true), deny: decide("deny"), alwaysAllowed, markAlways: (toolId: string) => setAlwaysAllowed((current) => new Set(current).add(toolId)) };
+  }, [alwaysAllowed, client, open.stale, readOnly]);
   return (
     <Decisions.Provider value={decisions}>
       <ImageViewer.Provider value={openViewer}>
