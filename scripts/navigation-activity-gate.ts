@@ -65,7 +65,7 @@ async function queuedSteerSequence(browser: Awaited<ReturnType<typeof chromium.l
     if (!fake.sent.some((sent) => sent.method === "send" && sent.text === `queued steer ${stopped ? "stop" : "natural"}`)) throw new Error(stopped ? "manual resend did not send the stopped steer" : "natural turn end did not resend the dropped steer");
   } finally {
     const stop = page.getByRole("button", { name: "stop the running turn" });
-    if (await stop.count()) await stop.click().catch(() => {});
+    await stop.waitFor({ timeout: 5_000 }).then(() => stop.click()).catch(() => {});
     await context.close(); fake.drop(); await Bun.sleep(500);
   }
 }
@@ -89,7 +89,7 @@ async function pendingCreateSequence(browser: Awaited<ReturnType<typeof chromium
     await page.goBack(); await page.waitForURL(runA);
   } finally {
     const stop = page.getByRole("button", { name: "stop the running turn" });
-    if (await stop.count()) await stop.click().catch(() => {});
+    await stop.waitFor({ timeout: 5_000 }).then(() => stop.click()).catch(() => {});
     await context.close(); fake.drop(); await Bun.sleep(500);
   }
 }
@@ -117,7 +117,7 @@ async function uncachedNavigationSequence(browser: Awaited<ReturnType<typeof chr
     if (settings && (!resume?.replied || settings.started < resume.replied)) throw new Error("settings loaded before resume completed");
   } finally {
     const stop = page.getByRole("button", { name: "stop the running turn" });
-    if (await stop.count()) await stop.click().catch(() => {});
+    await stop.waitFor({ timeout: 5_000 }).then(() => stop.click()).catch(() => {});
     await context.close(); fake.drop(); await Bun.sleep(500);
   }
 }
@@ -177,7 +177,7 @@ async function navigationSequence(browser: Awaited<ReturnType<typeof chromium.la
     if (await reloaded.inputValue() !== "draft while B runs") throw new Error("text-only draft did not survive reload");
   } finally {
     const stop = page.getByRole("button", { name: "stop the running turn" });
-    if (await stop.count()) await stop.click().catch(() => {});
+    await stop.waitFor({ timeout: 5_000 }).then(() => stop.click()).catch(() => {});
     await context.close(); fake.drop(); await Bun.sleep(500);
   }
 }
