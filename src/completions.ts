@@ -99,9 +99,12 @@ export class CompletionModel {
     void this.request({ session_id: this.sessionId, text_before_cursor: textBeforeCursor }).then(
       (response) => {
         if (!this.isCurrent(sequence, query, start)) return;
+        const entries = response.entries.filter(
+          (entry) => Number.isInteger(entry.start_position) && entry.start_position <= 0,
+        );
         this.setState({
-          open: response.entries.length > 0,
-          entries: response.entries,
+          open: entries.length > 0,
+          entries,
           truncated: response.truncated,
           activeIndex: 0,
           error: false,

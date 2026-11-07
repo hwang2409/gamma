@@ -79,6 +79,12 @@ test("applies code-point start_position with astral characters before and inside
   });
 });
 
+test("rejects a positive start_position as a malformed row", async () => {
+  const model = await modelWith("open @a", 7, entry("bad", 1));
+  expect(model.snapshot.open).toBe(false);
+  expect(model.accept()).toBeUndefined();
+});
+
 test("uses server text for slash, absolute, and home variants", async () => {
   for (const [input, caret, completion, expected, expectedCaret] of [
     ["@do", 3, entry("docs/", -2, "docs/", "directory"), "@docs/", 6],
