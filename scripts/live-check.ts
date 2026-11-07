@@ -86,7 +86,7 @@ try {
       if (frame.params?.event === "usage") usage = frame.params;
     }));
     await page.goto(`${origin}/?theme=tokyo-night`);
-    const field = page.getByRole("textbox", { name: "message" });
+    const field = page.getByRole("combobox", { name: "message" });
     const finished = async (count: number) => {
       // The reply streams, then the run is ready again with no error row.
       await page.locator('[data-part="timeline"] [data-kind="message"]').nth(count - 1).waitFor({ timeout: 120_000 });

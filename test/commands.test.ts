@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createCommandController, mapUnavailableSlashResult, type CommandCapabilities, type CommandRequest } from "../src/commands";
+import { createCommandController, findCommandCompletionToken, mapUnavailableSlashResult, type CommandCapabilities, type CommandRequest } from "../src/commands";
 
 type Frame = { method: string; params: Record<string, unknown> };
 
@@ -30,6 +30,18 @@ const slashList = {
   notices: [],
 };
 
+describe("completion tokens", () => {
+  test("slash is first-token only and dollar follows Zeta whitespace and backtick rules", () => {
+    expect(findCommandCompletionToken("/sta")).toEqual({ trigger: "/", prefix: "sta", start: 0 });
+    expect(findCommandCompletionToken("say /sta")).toBeUndefined();
+    expect(findCommandCompletionToken("say $rev")).toEqual({ trigger: "$", prefix: "rev", start: 4 });
+    expect(findCommandCompletionToken("`$rev")).toBeUndefined();
+    expect(findCommandCompletionToken("```ts\n$rev")).toBeUndefined();
+    expect(findCommandCompletionToken("! run $rev")).toEqual({ trigger: "$", prefix: "rev", start: 6 });
+    expect(findCommandCompletionToken("say($rev")).toBeUndefined();
+  });
+});
+
 describe("slash results", () => {
   const cases = [
     ["output", { kind: "output", text: "model: luna" }, { kind: "receipt", text: "model: luna", tone: "quiet" }],
@@ -56,6 +68,7 @@ describe("slash results", () => {
       kind: "receipt",
       text: "not available in this server version",
       tone: "error",
+      retain: true,
     });
   });
 
@@ -74,6 +87,7 @@ describe("slash results", () => {
       kind: "receipt",
       text: "invalid response from server",
       tone: "error",
+      retain: true,
     });
   });
 });
@@ -110,78 +124,16 @@ test("double slash escapes to one literal slash without calling slash_run", asyn
   expect(frames).toEqual([]);
 });
 
-describe("inline dollar skills", () => {
-  const inputPrepareCapabilities: CommandCapabilities = {
-    features: new Set(["model_input_ids", "input_prepare"]),
-    requests: new Set(["slash_list", "slash_run", "input_prepare"]),
-  };
-
-  test("without input_prepare, dollar text stays plain text", async () => {
-    const { controller, frames } = fake({});
-    expect(await controller.prepareComposerInput("please use $review now")).toEqual({ kind: "send", text: "please use $review now" });
-    expect(frames).toEqual([]);
-  });
-
-  test("does not request hidden input without model_input_ids", async () => {
-    const downgraded: CommandCapabilities = {
-      // Zeta docs/serve-protocol.md:1411-1414: without model_input_ids, model_input includes resolved text.
-      features: new Set(["input_prepare"]),
-      requests: new Set(["slash_list", "slash_run", "input_prepare"]),
-    };
-    const { controller, frames } = fake({
-      slash_run: { kind: "model_input", text: "hidden slash expansion" },
-      input_prepare: { kind: "model_input", text: "hidden skill expansion" },
-    }, downgraded);
-
-    const slash = await controller.prepareComposerInput("/review secret");
-    expect(frames).toEqual([]);
-    expect(slash).toEqual({
-      kind: "receipt",
-      text: "not available in this server version",
-      tone: "error",
-    });
-    expect(await controller.prepareComposerInput("please use $review now")).toEqual({
-      kind: "send",
-      text: "please use $review now",
-    });
-    expect(frames).toEqual([]);
-  });
-
-  // Provisional fixtures from design-serve-capability-registry.md section 4 "z1"; zeta z1 has not shipped.
-  const cases = [
-    [{ kind: "direct" }, { kind: "send", text: "please use $review now" }],
-    [{ kind: "model_input", input_id: "skill-1", display_text: "please use $review now" }, { kind: "send-input", inputId: "skill-1", displayText: "please use $review now" }],
-    [{ kind: "error", text: "skill load failed" }, { kind: "receipt", text: "skill load failed", tone: "error" }],
-  ] as const;
-
-  for (const [result, expected] of cases) test(result.kind, async () => {
-    const { controller, frames } = fake({ input_prepare: result }, inputPrepareCapabilities);
-    expect(await controller.prepareComposerInput("please use $review now")).toEqual(expected);
-    expect(frames).toEqual([{ method: "input_prepare", params: { session_id: "session-1", text: "please use $review now" } }]);
-  });
-
-  test.each([
-    ["null", null],
-    ["missing kind", {}],
-    ["unknown kind", { kind: "future" }],
-    ["model_input without required fields", { kind: "model_input" }],
-    ["model_input without input_id", { kind: "model_input", display_text: "please use $review now" }],
-    ["model_input text without input_id", { kind: "model_input", display_text: "please use $review now", text: "expanded" }],
-    ["error without text", { kind: "error" }],
-  ])("%s input_prepare frames become error receipts", async (_name, result) => {
-    const { controller } = fake({ input_prepare: result }, inputPrepareCapabilities);
-    expect(await controller.prepareComposerInput("please use $review now")).toEqual({
-      kind: "receipt",
-      text: "invalid response from server",
-      tone: "error",
-    });
-  });
+test("inline dollar skills stay direct text until g3z ships input_prepare", async () => {
+  const { controller, frames } = fake({});
+  expect(await controller.prepareComposerInput("please use $review now")).toEqual({ kind: "send", text: "please use $review now" });
+  expect(frames).toEqual([]);
 });
 
 test("an old server hides completion and blocks slash text", async () => {
   const { controller, frames } = fake({}, { features: new Set(), requests: new Set() });
   expect(await controller.completions("/st")).toEqual([]);
-  expect(await controller.prepareComposerInput("/status")).toEqual({ kind: "receipt", text: "not available in this server version", tone: "error" });
+  expect(await controller.prepareComposerInput("/status")).toEqual({ kind: "receipt", text: "not available in this server version", tone: "error", retain: true });
   expect(frames).toEqual([]);
 });
 
@@ -224,6 +176,16 @@ test("slash autocomplete only applies at the start of the composer", async () =>
   expect(await controller.completions("explain /st")).toEqual([]);
   expect(await controller.completions("first line\n/st")).toEqual([]);
   expect(await controller.completions(" /st")).toEqual([]);
+});
+
+test("dollar completion follows zeta code-span and token boundaries", async () => {
+  const { controller } = fake({ slash_list: slashList });
+  for (const value of ["prose $re", "`code` $re", "```code``` $re", "!run $re"]) {
+    expect(await controller.completions(value)).toHaveLength(2);
+  }
+  for (const value of ["`$re", "```\n$re", "a$re"]) {
+    expect(await controller.completions(value)).toEqual([]);
+  }
 });
 
 test("refreshCatalog replaces the cached server catalog", async () => {
