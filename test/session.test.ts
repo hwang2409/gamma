@@ -283,7 +283,7 @@ test("an active owner is reported as busy and the selection stays", async () => 
   const view = harness(source(fake.client));
   await tick();
   view.select("a");
-  await tick();
+  for (let attempt = 0; attempt < 400 && !present(view).openError; attempt++) await tick();
   expect(present(view).openError).toMatchObject({ id: "a", busy: true });
   expect(present(view).selected).toBe("a");
 });

@@ -107,7 +107,7 @@ await check("one transient busy new session retries and starts", async () => {
   } finally { const stop = page.getByRole("button", { name: "stop the running turn" }); await stop.click().catch(() => {}); await context.close(); await browser.close(); }
 });
 
-// The known-owner, rapid-selection, approval-navigation, and three-busy-resume cases below are regression guards; they already pass on 6216ad7.
+// The known-owner, delayed-retry, rapid-selection, approval-navigation, and four-busy-resume cases below are regression guards; they already pass on 6216ad7 with the same Fulcrum.
 await check("a delayed resume retry is cancelled after navigation", async () => {
   fake.setLive(false);
   const browser = await chromium.launch({ headless: true });
@@ -152,16 +152,16 @@ await check("a known different owner shows busy without a resume retry", async (
   } finally { await page.getByRole("button", { name: "stop the running turn" }).click().catch(() => {}); await context.close(); await browser.close(); }
 });
 
-await check("three busy new sessions keep the draft and show a stable error", async () => {
+await check("four busy new sessions keep the draft and show a stable error", async () => {
   const before = fake.requests.length;
-  fake.busyNext("new_session", 3);
+  fake.busyNext("new_session", 4);
   const browser = await chromium.launch({ headless: true });
   const { context, page } = await fresh(browser, 1440);
   try {
     const draft = page.url();
     await page.locator('.dock textarea[aria-label="message"]').fill("keep this failed draft");
     await page.getByRole("button", { name: "send message" }).click();
-    if (!await poll(() => Promise.resolve(fake.requests.slice(before).filter((request) => request.method === "new_session").length === 3), 100)) throw new Error("new_session did not make three bounded attempts");
+    if (!await poll(() => Promise.resolve(fake.requests.slice(before).filter((request) => request.method === "new_session").length === 4), 100)) throw new Error("new_session did not make exactly four bounded attempts");
     if (page.url() !== draft || !new URL(page.url()).searchParams.get("run")?.startsWith("draft:")) throw new Error(`failed create did not keep its draft URL: ${page.url()}`);
     await page.getByText(/could not send:/i).waitFor({ timeout: 15_000 });
     if (await page.locator('.dock textarea[aria-label="message"]').inputValue() !== "keep this failed draft") throw new Error("failed create lost its draft text");
@@ -205,11 +205,16 @@ await check("approval survives new-run back-forward before its decision", async 
   } finally { await context.close(); await browser.close(); fake.setLive(false); fake.setLive(true); }
 });
 
-await check("three busy resumes show the busy panel", async () => {
-  fake.busyNext("resume", 3);
+await check("four busy resumes show the busy panel", async () => {
+  const before = fake.requests.length;
+  fake.busyNext("resume", 4);
   const browser = await chromium.launch({ headless: true });
   const { context, page } = await fresh(browser, 1440, "/?run=s-docs");
-  try { await page.getByRole("heading", { name: "another run is active" }).waitFor({ timeout: 15_000 }); }
+  try {
+    await page.getByRole("heading", { name: "another run is active" }).waitFor({ timeout: 15_000 });
+    const attempts = fake.requests.slice(before).filter((request) => request.method === "resume" && request.params.session_id === "s-docs");
+    if (attempts.length !== 4) throw new Error(`always-busy resume made ${attempts.length} attempts instead of 4`);
+  }
   finally { await context.close(); await browser.close(); }
 });
 

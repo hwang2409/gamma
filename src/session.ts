@@ -2,7 +2,6 @@ import { fromZetaEvent, fromZetaHistory, type SessionLease, type ZetaClient } fr
 import type { RunEvent } from "@fulcrum/core";
 import type { hostBindings, Registration } from "./host-client";
 import type { QueuedImage } from "./image-queue";
-import { activeRun } from "./run-state";
 type HostBindings = typeof hostBindings;
 
 /** The `SessionMetadata` fields this app reads from `list_sessions` (zeta docs/serve-protocol.md). */
@@ -231,7 +230,6 @@ type SessionId = import("./run-state").SessionId;
 type DraftRunId = import("./run-state").DraftRunId;
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const turn = (status: ServerStatus) => status.pending_approvals?.length ? "approval" as const : status.state === "idle" ? "idle" as const : status.state;
-const RETRY_DELAYS = [250, 500, 1_000] as const;
 
 /** Executes tagged session effects. Run selection, leases, attachment, and active-turn truth remain in RunStateStore. */
 export function createSessionManager(connection: Source, runs: RunStateStore, bindings?: HostBindings) {
@@ -239,6 +237,7 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
   let unsubscribe = () => {};
   let started = false;
   let openAbort: AbortController | null = null;
+  let openOperation: { runId: SessionId; operationId: OperationId } | null = null;
   const leaseSubscriptions = new Map<string, () => void>();
   const leases = new Map<string, OpenRun>();
   const knownStatus = new Map<string, ServerStatus>();
@@ -264,14 +263,6 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
     leaseSubscriptions.set(runId, open.lease.store.subscribe(update));
     if (running) runs.dispatch({ type: "TURN_START", runId });
   };
-  const retryBusy = async (runId: string, operationId: OperationId, attempt: number, signal?: AbortSignal) => {
-    if (!current(runId, operationId)) throw Object.assign(new Error("stale operation"), { name: "AbortError" });
-    if (activeRun(runs.getCatalog())) return false;
-    const status = client ? await getStatus(client, signal).catch(() => null) : null;
-    if (status?.session && status.state !== "idle" && status.session.session_id !== runId) return false;
-    await wait(RETRY_DELAYS[attempt]!, signal);
-    return current(runId, operationId);
-  };
   const handleStatus = async (effect: Extract<WorkspaceEffect, { type: "status" }>) => {
     const target = client;
     if (!target) return;
@@ -290,6 +281,7 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
     openAbort?.abort();
     const abort = new AbortController();
     openAbort = abort;
+    openOperation = { runId: effect.runId, operationId: effect.operationId };
     const previous = runs.get(effect.runId).open;
     if (previous) {
       leaseSubscriptions.get(effect.runId)?.();
@@ -297,63 +289,51 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
       leases.delete(effect.runId);
       previous.lease.release();
     }
-    for (let attempt = 0; attempt < RETRY_DELAYS.length; attempt++) {
-      try {
-        let history = { messages: 0, complete: false };
-        const registration = await register(target, effect.runId);
-        const initialStatus = knownStatus.get(effect.runId);
-        knownStatus.clear();
-        const opened = await openSession(target, effect.runId, (messages, complete) => {
-          history = { messages, complete };
-          runs.dispatch({ type: "OPEN_PROGRESS", runId: effect.runId, operationId: effect.operationId, messages });
-        }, abort.signal, initialStatus, registration);
-        if (!live(target) || !current(effect.runId, effect.operationId)) { opened.lease.release(); return; }
-        const open: OpenRun = { id: effect.runId, lease: opened.lease, stale: false, history, syncing: true };
-        runs.dispatch({ type: "RESUME_OK", runId: effect.runId, operationId: effect.operationId });
-        runs.dispatch({ type: "OPEN_OK", runId: effect.runId, operationId: effect.operationId, open, ...(opened.session ? { session: opened.session } : {}) });
-        watch(effect.runId, open);
-        void opened.complete.then((result) => {
-          if (!current(effect.runId, effect.operationId)) { result.lease?.release(); return; }
-          const active = runs.get(effect.runId).open ?? open;
-          const complete: OpenRun = { ...active, ...(result.lease ? { lease: result.lease } : {}), history: { ...history, complete: true }, syncing: result.syncing };
-          if (result.lease && active.lease !== result.lease) active.lease.release();
-          runs.dispatch({ type: "OPEN_COMPLETE", runId: effect.runId, operationId: effect.operationId, open: complete });
-          watch(effect.runId, complete);
-        }).catch((error) => {
-          if (current(effect.runId, effect.operationId) && (error as { name?: string }).name !== "AbortError") runs.dispatch({ type: "OPEN_FAIL", runId: effect.runId, operationId: effect.operationId, error: message(error), busy: isBusyError(error) });
-        });
-        return;
-      } catch (error) {
-        if (!live(target) || !current(effect.runId, effect.operationId) || (error as { name?: string }).name === "AbortError") return;
-        const retry = isBusyError(error) && await retryBusy(effect.runId, effect.operationId, attempt, abort.signal);
-        if (!live(target) || !current(effect.runId, effect.operationId) || abort.signal.aborted) return;
-        if (retry && attempt < RETRY_DELAYS.length - 1) continue;
-        runs.dispatch({ type: "OPEN_FAIL", runId: effect.runId, operationId: effect.operationId, error: message(error), busy: isBusyError(error) });
-        return;
-      }
+    try {
+      let history = { messages: 0, complete: false };
+      const registration = await register(target, effect.runId);
+      const initialStatus = knownStatus.get(effect.runId);
+      knownStatus.clear();
+      const opened = await openSession(target, effect.runId, (messages, complete) => {
+        history = { messages, complete };
+        runs.dispatch({ type: "OPEN_PROGRESS", runId: effect.runId, operationId: effect.operationId, messages });
+      }, abort.signal, initialStatus, registration);
+      if (!live(target) || !current(effect.runId, effect.operationId)) { opened.lease.release(); return; }
+      const open: OpenRun = { id: effect.runId, lease: opened.lease, stale: false, history, syncing: true };
+      runs.dispatch({ type: "RESUME_OK", runId: effect.runId, operationId: effect.operationId });
+      runs.dispatch({ type: "OPEN_OK", runId: effect.runId, operationId: effect.operationId, open, ...(opened.session ? { session: opened.session } : {}) });
+      watch(effect.runId, open);
+      void opened.complete.then((result) => {
+        if (!current(effect.runId, effect.operationId)) { result.lease?.release(); return; }
+        const active = runs.get(effect.runId).open ?? open;
+        const complete: OpenRun = { ...active, ...(result.lease ? { lease: result.lease } : {}), history: { ...history, complete: true }, syncing: result.syncing };
+        if (result.lease && active.lease !== result.lease) active.lease.release();
+        runs.dispatch({ type: "OPEN_COMPLETE", runId: effect.runId, operationId: effect.operationId, open: complete });
+        watch(effect.runId, complete);
+      }).catch((error) => {
+        if (current(effect.runId, effect.operationId) && (error as { name?: string }).name !== "AbortError") runs.dispatch({ type: "OPEN_FAIL", runId: effect.runId, operationId: effect.operationId, error: message(error), busy: isBusyError(error) });
+      });
+    } catch (error) {
+      if (!live(target) || !current(effect.runId, effect.operationId) || (error as { name?: string }).name === "AbortError") return;
+      runs.dispatch({ type: "OPEN_FAIL", runId: effect.runId, operationId: effect.operationId, error: message(error), busy: isBusyError(error) });
     }
   };
   const handleCreate = async (effect: Extract<WorkspaceEffect, { type: "new-session" }>) => {
     const target = client;
     if (!target) { const error = new Error("not connected to zeta serve"); runs.dispatch({ type: "NEW_SESSION_FAIL", runId: effect.runId, operationId: effect.operationId, error: error.message }); return finish(effect.operationId, undefined, error); }
-    for (let attempt = 0; attempt < RETRY_DELAYS.length; attempt++) {
-      try {
-        const binding = await register(target);
-        const { approval_mode, ...sessionChoice } = effect.choice ?? {};
-        const params = { ...sessionChoice, ...(target.features.includes("new_session_settings") && approval_mode ? { approval_mode } : {}), ...(binding ? { host_commands: [binding.command] } : {}) };
-        const { session } = await target.request("new_session", params, { timeoutMs: 30_000 }) as { session: SessionMeta };
-        if (binding) await bindings!.bind(binding.registration_id, session.session_id);
-        if (!live(target) || !current(effect.runId, effect.operationId)) return;
-        runs.dispatch({ type: "NEW_SESSION_OK", runId: effect.runId, sessionId: session.session_id as SessionId, operationId: effect.operationId, session });
-        finish(effect.operationId, session.session_id);
-        return;
-      } catch (error) {
-        if (!live(target) || !current(effect.runId, effect.operationId)) return;
-        if (isBusyError(error) && await retryBusy(effect.runId, effect.operationId, attempt) && attempt < RETRY_DELAYS.length - 1) continue;
-        runs.dispatch({ type: "NEW_SESSION_FAIL", runId: effect.runId, operationId: effect.operationId, error: message(error), busy: isBusyError(error) });
-        finish(effect.operationId, undefined, error);
-        return;
-      }
+    try {
+      const binding = await register(target);
+      const { approval_mode, ...sessionChoice } = effect.choice ?? {};
+      const params = { ...sessionChoice, ...(target.features.includes("new_session_settings") && approval_mode ? { approval_mode } : {}), ...(binding ? { host_commands: [binding.command] } : {}) };
+      const { session } = await target.request("new_session", params, { timeoutMs: 30_000 }) as { session: SessionMeta };
+      if (binding) await bindings!.bind(binding.registration_id, session.session_id);
+      if (!live(target) || !current(effect.runId, effect.operationId)) return;
+      runs.dispatch({ type: "NEW_SESSION_OK", runId: effect.runId, sessionId: session.session_id as SessionId, operationId: effect.operationId, session });
+      finish(effect.operationId, session.session_id);
+    } catch (error) {
+      if (!live(target) || !current(effect.runId, effect.operationId)) return;
+      runs.dispatch({ type: "NEW_SESSION_FAIL", runId: effect.runId, operationId: effect.operationId, error: message(error), busy: isBusyError(error) });
+      finish(effect.operationId, undefined, error);
     }
   };
   const handleImages = async (effect: Extract<WorkspaceEffect, { type: "send-images" }>) => {
@@ -374,7 +354,7 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
   const onConnection = () => {
     if (connection.client === client) return;
     if (client) {
-      openAbort?.abort(); leaseSubscriptions.forEach((stop) => stop()); leaseSubscriptions.clear();
+      openAbort?.abort(); openOperation = null; leaseSubscriptions.forEach((stop) => stop()); leaseSubscriptions.clear();
       if (client.features.includes("approval_reconnect")) for (const record of runs.getCatalog().runs.values()) if (record.open) for (const { id } of record.open.lease.store.getOutline()) {
         const item = record.open.lease.store.getItem(id);
         if (item?.type === "approval" && !item.ended && item.request.type === "approval_request") record.open.lease.store.dispatch({ ...item.request, state: "reconnecting", status: "reconnecting…", disabled_reason: "decisions are disabled while disconnected" });
@@ -385,7 +365,10 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
     if (client) runs.dispatch({ type: "RECONNECT" });
   };
   return {
-    execute(effects: readonly WorkspaceEffect[]) { for (const effect of effects) executeOne(effect); },
+    execute(effects: readonly WorkspaceEffect[]) {
+      if (openOperation && !current(openOperation.runId, openOperation.operationId)) { openAbort?.abort(); openOperation = null; }
+      for (const effect of effects) executeOne(effect);
+    },
     start() { if (started) return; started = true; unsubscribe = connection.subscribe(onConnection); onConnection(); },
     create(runId: string, choice: { model?: string; provider?: string; approval_mode?: "ask" | "allow" } = {}) {
       const operationId = crypto.randomUUID() as OperationId;
@@ -413,7 +396,7 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
         runs.dispatch({ type: "DELIVERY_BEGIN", runId: sessionId as SessionId, operationId, delivery: { id: deliveryId, attemptId: deliveryId, operationId, method: "send_images", text, images, state: "requesting" } });
       });
     },
-    dispose() { unsubscribe(); openAbort?.abort(); leaseSubscriptions.forEach((stop) => stop()); leaseSubscriptions.clear(); pending.clear(); },
+    dispose() { unsubscribe(); openAbort?.abort(); openOperation = null; leaseSubscriptions.forEach((stop) => stop()); leaseSubscriptions.clear(); pending.clear(); },
   };
 }
 export type SessionManager = ReturnType<typeof createSessionManager>;
