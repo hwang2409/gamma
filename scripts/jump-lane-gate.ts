@@ -57,18 +57,25 @@ try {
       const element = document.querySelector<HTMLElement>(".scroll");
       return element && element.scrollTop < element.scrollHeight - element.clientHeight - 100;
     });
+    const rowBefore = await page.locator('[data-part="timeline"] [data-id]').first().evaluate((element) => ({ id: element.getAttribute("data-id"), top: element.getBoundingClientRect().top }));
+    if (!rowBefore) throw new Error(`${width}: missing comparison row`);
     const jump = page.getByRole("button", { name: /jump to latest/i });
     await jump.waitFor({ timeout: 15_000 });
     const [transcriptAfter, control] = await Promise.all([scroll.boundingBox(), jump.boundingBox()]);
-    if (!transcriptAfter || !control) throw new Error(`${width}: missing layout bounds`);
+    const rowAfter = await page.locator(`[data-part="timeline"] [data-id="${rowBefore.id}"]`).evaluate((element) => element.getBoundingClientRect().top).catch(() => null);
+    if (!transcriptAfter || !control || rowAfter === null) throw new Error(`${width}: missing layout bounds or comparison row`);
     if (transcriptBefore.y !== transcriptAfter.y || transcriptBefore.height !== transcriptAfter.height) throw new Error(`${width}: showing the control shifted the transcript (${transcriptBefore.y}/${transcriptBefore.height} to ${transcriptAfter.y}/${transcriptAfter.height})`);
+    if (Math.abs(rowBefore.top - rowAfter) > 0.5) throw new Error(`${width}: showing the control shifted row ${rowBefore.id} (${rowBefore.top} to ${rowAfter})`);
     if (control.y < transcriptAfter.y + transcriptAfter.height - 0.5) throw new Error(`${width}: control overlaps transcript text`);
 
+    const rowBeforeDisappearance = await page.locator(`[data-part="timeline"] [data-id="${rowBefore.id}"]`).evaluate((element) => element.getBoundingClientRect().top).catch(() => null);
     await jump.click();
     await page.waitForFunction(() => {
       const element = document.querySelector<HTMLElement>(".scroll");
       return element && element.scrollHeight - element.clientHeight - element.scrollTop < 2;
     });
+    const rowAfterDisappearance = await page.locator(`[data-part="timeline"] [data-id="${rowBefore.id}"]`).evaluate((element) => element.getBoundingClientRect().top).catch(() => null);
+    if (rowBeforeDisappearance !== null && rowAfterDisappearance !== null && Math.abs(rowBeforeDisappearance - rowAfterDisappearance) > 0.5) throw new Error(`${width}: hiding the control shifted row ${rowBefore.id} (${rowBeforeDisappearance} to ${rowAfterDisappearance})`);
     await scroll.evaluate((element) => { element.scrollTop = 0; });
     await composer.locator("textarea").fill(`follow accepted steer at ${width}`);
     await composer.locator('[data-part="composer-submit"]').click();
