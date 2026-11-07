@@ -107,7 +107,7 @@ describe("inline dollar skills", () => {
     expect(frames).toEqual([]);
   });
 
-  // Provisional fixtures from gamma-tui-parity.md "generic input preparation" item 1; zeta z1 has not shipped.
+  // Provisional fixtures from design-serve-capability-registry.md section 4 "z1"; zeta z1 has not shipped.
   const cases = [
     [{ kind: "direct" }, { kind: "send", text: "please use $review now" }],
     [{ kind: "model_input", input_id: "skill-1", display_text: "please use $review now" }, { kind: "send-input", inputId: "skill-1", displayText: "please use $review now" }],
@@ -118,6 +118,21 @@ describe("inline dollar skills", () => {
     const { controller, frames } = fake({ input_prepare: result }, inputPrepareCapabilities);
     expect(await controller.prepareComposerInput("please use $review now")).toEqual(expected);
     expect(frames).toEqual([{ method: "input_prepare", params: { session_id: "session-1", text: "please use $review now" } }]);
+  });
+
+  test.each([
+    ["null", null],
+    ["missing kind", {}],
+    ["unknown kind", { kind: "future" }],
+    ["model_input without required fields", { kind: "model_input" }],
+    ["error without text", { kind: "error" }],
+  ])("%s input_prepare frames become error receipts", async (_name, result) => {
+    const { controller } = fake({ input_prepare: result }, inputPrepareCapabilities);
+    expect(await controller.prepareComposerInput("please use $review now")).toEqual({
+      kind: "receipt",
+      text: "invalid response from server",
+      tone: "error",
+    });
   });
 });
 

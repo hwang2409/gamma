@@ -59,11 +59,6 @@ type SlashRunResult =
   | { kind: "client_only"; name: string }
   | { kind: "unknown"; name: string }
   | { kind: "error"; text: string };
-type InputPrepareResult =
-  | { kind: "direct" }
-  | { kind: "model_input"; input_id: string; display_text: string }
-  | { kind: "error"; text: string };
-
 const CLIENT_ACTIONS: Readonly<Record<string, ClientActionName>> = {
   new: "new_session",
   name: "rename_session",
@@ -123,11 +118,21 @@ export function createCommandController(
     }
 
     if (capabilities.features.has("input_prepare") && POSSIBLE_DOLLAR_SKILL.test(text)) {
-      const result = await request("input_prepare", { session_id: sessionId, text }) as InputPrepareResult;
-      if (result.kind === "direct") return { kind: "send", text };
-      if (result.kind === "error") return { kind: "receipt", text: result.text, tone: "error" };
-      if (!capabilities.features.has("model_input_ids")) return unavailableReceipt();
-      return { kind: "send-input", inputId: result.input_id, displayText: result.display_text };
+      const result: unknown = await request("input_prepare", { session_id: sessionId, text });
+      if (!isRecord(result) || typeof result.kind !== "string") return invalidResponseReceipt();
+      switch (result.kind) {
+        case "direct":
+          return { kind: "send", text };
+        case "error":
+          return typeof result.text === "string" ? { kind: "receipt", text: result.text, tone: "error" } : invalidResponseReceipt();
+        case "model_input":
+          if (typeof result.input_id !== "string" || typeof result.display_text !== "string") return invalidResponseReceipt();
+          return capabilities.features.has("model_input_ids")
+            ? { kind: "send-input", inputId: result.input_id, displayText: result.display_text }
+            : unavailableReceipt();
+        default:
+          return invalidResponseReceipt();
+      }
     }
 
     return { kind: "send", text };
