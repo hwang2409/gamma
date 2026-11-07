@@ -79,8 +79,15 @@ test("client-only commands use only the explicit gamma mapping and keep argument
     const { controller } = fake({ slash_run: { kind: "client_only", name: command } });
     expect(await controller.prepareComposerInput(`/${command} alpha beta`)).toEqual({ kind: "client-action", name: action, args: "alpha beta" });
   }
-  const { controller } = fake({ slash_run: { kind: "client_only", name: "restart" } });
-  expect(await controller.prepareComposerInput("/restart")).toEqual({ kind: "receipt", text: "not available in this server version", tone: "error" });
+  const { controller } = fake({ slash_run: { kind: "client_only", name: "permissions" } });
+  expect(await controller.prepareComposerInput("/permissions")).toEqual({ kind: "receipt", text: "/permissions is not available in gamma yet", tone: "error" });
+
+  const oldServer = fake({ slash_run: { kind: "client_only", name: "mcp" } }).controller;
+  expect(await oldServer.prepareComposerInput("/mcp")).toEqual({ kind: "receipt", text: "/mcp is not available in gamma yet", tone: "error" });
+
+  // zeta PR #835 head 886f5720 (unmerged): new servers return output for /mcp.
+  const newServer = fake({ slash_run: { kind: "output", text: "mcp status" } }).controller;
+  expect(await newServer.prepareComposerInput("/mcp")).toEqual({ kind: "receipt", text: "mcp status", tone: "quiet" });
 });
 
 test("leading whitespace still dispatches the first nonempty slash token", async () => {
@@ -159,6 +166,23 @@ test("autocomplete filters and ranks slash and skill rows and exposes source bad
     { trigger: "/", name: "review", description: "review this change", sourceBadge: "home" },
   ]);
   expect(frames).toEqual([{ method: "slash_list", params: { session_id: "session-1" } }]);
+});
+
+test("slash autocomplete hides unavailable commands", async () => {
+  // zeta PR #835 head 886f5720 (unmerged): complete catalogs include unavailable TUI-only rows.
+  const { controller } = fake({ slash_list: {
+    commands: [
+      { name: "restart", description: "restart", kind: "builtin", source: "builtin", client_only: true, unavailable: "requires_tui" },
+      { name: "permissions", description: "permissions", kind: "builtin", source: "builtin", client_only: true, unavailable: "requires_tui" },
+      { name: "status", description: "status", kind: "builtin", source: "builtin", client_only: false, unavailable: null },
+    ],
+    notices: [],
+  } });
+  expect(await controller.completions("/re")).toEqual([]);
+  expect(await controller.completions("/pe")).toEqual([]);
+  expect(await controller.completions("/st")).toEqual([
+    { trigger: "/", name: "status", description: "status", sourceBadge: "builtin" },
+  ]);
 });
 
 test("slash autocomplete only applies at the start of the composer", async () => {
