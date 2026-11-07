@@ -94,9 +94,11 @@ try {
     });
     await check("new run clears the current run and its YOLO mark", async () => {
       await page.locator('.dock [data-part="composer"][data-state="idle"]').waitFor({ timeout: 10_000 });
+      const oldRun = new URL(page.url()).searchParams.get("run");
       await page.getByRole("button", { name: "new run" }).click();
       await page.locator(".empty-run").waitFor();
-      if (new URL(page.url()).searchParams.has("run")) throw new Error("run remains in url");
+      const draftRun = new URL(page.url()).searchParams.get("run");
+      if (!draftRun?.startsWith("draft:") || draftRun === oldRun) throw new Error("new run did not get its own draft history entry");
       if (await page.locator(".topbar-yolo").count()) throw new Error("YOLO mark stayed on the blank run");
     });
     await check("composer attaches real images with loaded thumbnails, removes, pastes, and sends them", async () => {
