@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createCommandController, type CommandCapabilities, type CommandRequest } from "../src/commands";
+import { createCommandController, mapUnavailableSlashResult, type CommandCapabilities, type CommandRequest } from "../src/commands";
 
 type Frame = { method: string; params: Record<string, unknown> };
 
@@ -49,6 +49,14 @@ describe("slash results", () => {
   test("unknown slash input is never returned as model text", async () => {
     const { controller } = fake({ slash_run: { kind: "unknown", name: "missing" } });
     expect((await controller.prepareComposerInput("/missing args")).kind).toBe("receipt");
+  });
+
+  test("maps fulcrum unavailable slash results to the local receipt", () => {
+    expect(mapUnavailableSlashResult({ kind: "unavailable", feature: "model_input_ids" })).toEqual({
+      kind: "receipt",
+      text: "not available in this server version",
+      tone: "error",
+    });
   });
 
   test("an opaque model input id is returned once without expansion text", async () => {
