@@ -1,7 +1,7 @@
 // A scripted `zeta serve --ws` for the browser gate and for trying the app without a real zeta. It speaks the subset
 // of protocol 1.2 the app uses (hello, list_sessions, new_session, status, resume, session_history, approve, deny,
 // send, steer, abort, with the delivery_id and user_message_event features), checks the
-// token and Origin like the real upgrade, and writes the discovery file under its own ZETA_HOME, never ~/.zeta.
+// bearer subprotocol and Origin like the real upgrade, and writes the discovery file under its own ZETA_HOME, never ~/.zeta.
 //
 // Manual use: `bun scripts/fake-zeta.ts`, then start vite with the printed ZETA_HOME.
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -197,7 +197,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   const home = await mkdtemp(join(tmpdir(), "fulcrum-web-zeta-"));
   await mkdir(join(home, "run"), { recursive: true });
   const discovery = join(home, "run", "serve.ws.json");
-  let token = crypto.randomUUID();
+  let controllerToken = crypto.randomUUID();
+  let observerToken = crypto.randomUUID();
   let mode: Mode = "ok";
   let liveEnabled = live;
   let currentHistoryMode = historyMode;
@@ -224,8 +225,9 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   const imageSends: Json[] = [];
   const decisions: Json[] = [];
   const requests: Array<{ method: string; received: number; started: number; replied?: number }> = [];
-  const sockets = new Set<ServerWebSocket<unknown>>();
-  let controller: ServerWebSocket<unknown> | null = null;
+  type SocketData = { role: "controller" | "observer" };
+  const sockets = new Set<ServerWebSocket<SocketData>>();
+  let controller: ServerWebSocket<SocketData> | null = null;
   const reconnectControllers = new WeakSet<object>();
   let approvalExpiry: ReturnType<typeof setTimeout> | null = null;
   const approvalCall = { id: "live-2", name: "bash", arguments: { command: "rm -rf packages/zeta/dist && bun run build" } };
@@ -261,10 +263,12 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     hostname: "127.0.0.1",
     port,
     fetch(request, bun) {
-      const url = new URL(request.url);
       const origin = request.headers.get("origin");
-      if (url.searchParams.get("token") !== token || (origin && !allowed.includes(origin))) return new Response("forbidden", { status: 403 });
-      return bun.upgrade(request) ? undefined : new Response("upgrade required", { status: 426 });
+      const protocols = request.headers.get("sec-websocket-protocol")?.split(",").map((value) => value.trim()) ?? [];
+      const bearer = protocols.find((value) => value.startsWith("zeta.bearer."))?.slice("zeta.bearer.".length);
+      const role = bearer === controllerToken ? "controller" : bearer === observerToken ? "observer" : null;
+      if (!protocols.includes("zeta.v1") || !role || (origin && !allowed.includes(origin))) return new Response("forbidden", { status: 403 });
+      return bun.upgrade(request, { data: { role }, headers: { "Sec-WebSocket-Protocol": "zeta.v1" } }) ? undefined : new Response("upgrade required", { status: 426 });
     },
     websocket: {
       open(socket) { sockets.add(socket); },
@@ -300,6 +304,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         };
         const send = (event: Json) => { for (const each of sockets) each.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: event })); };
         if (method === "hello") {
+          if (params.role !== socket.data.role) { reply({ error: { code: -32602, message: `credential permits ${socket.data.role} role only` } }); socket.close(); return; }
           if (mode === "busy" || sockets.size > 1) { socket.send(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "server busy" } })); socket.close(); return; }
           if (mode === "incompatible") { reply({ error: { code: -32002, message: "version mismatch", data: { requested: "1.2", supported: ["1.0"] } } }); socket.close(); return; }
           if (mode === "slow") await wait(60_000);
@@ -397,7 +402,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   });
 
   const write = (value: Json) => writeFile(discovery, JSON.stringify(value), { mode: 0o600 });
-  await write({ port: server.port, token, pid: process.pid, origins: allowed });
+  await write({ port: server.port, controller_token: controllerToken, observer_token: observerToken, pid: process.pid, origins: allowed });
   return {
     home,
     port: server.port,
@@ -420,14 +425,15 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     },
     async start() {
       allowed = origins;
-      token = crypto.randomUUID();
+      controllerToken = crypto.randomUUID();
+      observerToken = crypto.randomUUID();
       if (!decide) { approvalAborted = false; running = false; }
-      await write({ port: server.port, token, pid: process.pid, origins: allowed });
+      await write({ port: server.port, controller_token: controllerToken, observer_token: observerToken, pid: process.pid, origins: allowed });
     },
     /** Lists other origins in the allowlist, so this page's origin is missing. */
-    async foreignOrigin() { allowed = ["http://localhost:5173"]; await write({ port: server.port, token, pid: process.pid, origins: allowed }); },
-    /** Hands out a token the server will refuse. */
-    async wrongToken() { await write({ port: server.port, token: "stale-token", pid: process.pid, origins: allowed }); },
+    async foreignOrigin() { allowed = ["http://localhost:5173"]; await write({ port: server.port, controller_token: controllerToken, observer_token: observerToken, pid: process.pid, origins: allowed }); },
+    /** Hands out a credential the server will refuse. */
+    async wrongToken() { await write({ port: server.port, controller_token: "stale-token", observer_token: observerToken, pid: process.pid, origins: allowed }); },
     setMode(next: Mode) { mode = next; },
     setSettingsEnabled(value: boolean) { settingsEnabled = value; },
     setOpenDelay(ms: number) { openDelay = ms; },
