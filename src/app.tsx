@@ -11,7 +11,7 @@ import { createSessionManager, sessionTitle, type OpenRun, type RunState, type S
 import { ThemePicker, useTheme } from "./theme";
 import { GammaComposer, type Submit } from "./composer";
 import { nextRunModel, RunSettings, SettingsMenu, useVimSetting, VimToggle } from "./controls";
-import { createRunStateStore, workspaceRunState, type DraftRunId, type EntryId, type RunId, type RunStateStore } from "./run-state";
+import { createRunStateStore, hasPendingDelivery, workspaceRunState, type DraftRunId, type EntryId, type RunId, type RunStateStore } from "./run-state";
 import { artifactContentUrl, hostBindings, useArtifacts } from "./host-client";
 import type { Artifact } from "./host/types";
 
@@ -379,7 +379,7 @@ function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, ru
   useEffect(() => { deliveries.bind(runId, open?.lease.store); }, [deliveries, runId, open?.lease.store]);
   const record = useSyncExternalStore(runState.subscribe, () => runState.get(runId));
   const starting = record.lifecycle.kind === "creating";
-  const pendingDelivery = [...record.deliveries.values()].some((delivery) => delivery.state !== "dropped");
+  const pendingDelivery = hasPendingDelivery(record);
 
   const onSubmit: Submit = useCallback(async (text, images, { steer, deliveryId }) => {
     const preferred = record.model.choice === "explicit" ? record.model.model : undefined;

@@ -15,8 +15,8 @@ const failures: string[] = [];
 let passed = 0;
 
 async function ready(page: Page) { try { await page.locator('.dock textarea[aria-label^="message"]').waitFor({ timeout: 15_000 }); } catch (error) { throw new Error(`${String(error)}\n${(await page.locator("body").innerText()).slice(0, 2_000)}`); } }
-async function fresh(browser: Browser) {
-  const context = await browser.newContext({ viewport: { width: 1080, height: 800 } });
+async function fresh(browser: Browser, width = 1080) {
+  const context = await browser.newContext({ viewport: { width, height: width === 390 ? 844 : 900 } });
   const page = await context.newPage();
   await page.goto(origin); await ready(page);
   return { context, page };
@@ -53,12 +53,14 @@ try {
       try { await startQueued(page, "reload natural"); await page.reload(); await ready(page); await waitForSent("queued reload natural"); }
       finally { await cleanup(context, page); }
     });
-    await check("explicit-stop-mark-survives-navigation-and-reload", async () => {
-      const { context, page } = await fresh(browser);
+    for (const width of [1440, 390]) await check(`explicit-stop-mark-survives-navigation-and-reload-${width}`, async () => {
+      const { context, page } = await fresh(browser, width);
       try {
         await startQueued(page, "explicit stop");
         const owner = page.url(); await page.getByRole("button", { name: "stop the running turn" }).click();
         await page.locator('.undelivered[role="note"]').waitFor({ timeout: 10_000 });
+        await page.locator('.status-line[data-state="ready"]').waitFor({ timeout: 10_000 });
+        if (await page.locator('[data-part="composer-message"]', { hasText: "sending" }).count()) throw new Error(`idle composer still said sending at ${width}`);
         await page.getByRole("button", { name: "new run" }).click(); await page.goBack(); await page.waitForURL(owner);
         await page.reload(); await ready(page); await page.locator('.undelivered[role="note"]').waitFor({ timeout: 10_000 });
         await page.getByRole("button", { name: "resend" }).click(); await waitForSent("queued explicit stop");

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createRunStateStore, reduceWorkspace, selectedRun, type DraftRunId, type EntryId, type OperationId, type SessionId, type WorkspaceEffect, type WorkspaceEvent, type WorkspaceState } from "../src/run-state";
+import { createRunStateStore, hasPendingDelivery, reduceWorkspace, selectedRun, type DraftRunId, type EntryId, type OperationId, type SessionId, type WorkspaceEffect, type WorkspaceEvent, type WorkspaceState } from "../src/run-state";
 
 const draft = (id: number) => `draft:${id}` as DraftRunId;
 const session = (id: number) => `s-${id}` as SessionId;
@@ -141,23 +141,21 @@ test("cache eviction and disposal release owned session leases", () => {
   expect(released.filter((effect) => effect.type === "release-lease" && effect.runId === runId)).toHaveLength(2);
 });
 
-test("a natural turn end reconciles queued steers and an accepted resend settles them", () => {
+test("a successful stop settles the sent prompt and keeps only the dropped steer for resend", () => {
   const runId = session(1);
-  const first = operation(1);
+  const send = operation(1);
+  const steer = operation(2);
+  const stop = operation(3);
   let state = reduceWorkspace(initial(), { type: "STATUS", sessionId: runId, turn: "running" }).state;
-  state = reduceWorkspace(state, { type: "DELIVERY_BEGIN", runId, operationId: first, delivery: { id: "steer", attemptId: "steer", operationId: first, method: "steer", text: "keep this", images: [], state: "requesting" } }).state;
-  state = reduceWorkspace(state, { type: "DELIVERY_ACK", runId, intentId: "steer", operationId: first, attemptId: "steer", queued: true }).state;
+  state = reduceWorkspace(state, { type: "DELIVERY_BEGIN", runId, operationId: send, delivery: { id: "send", attemptId: "send", operationId: send, method: "send", text: "start", images: [], state: "requesting" } }).state;
+  state = reduceWorkspace(state, { type: "DELIVERY_ACK", runId, intentId: "send", operationId: send, attemptId: "send", queued: true }).state;
+  state = reduceWorkspace(state, { type: "DELIVERY_BEGIN", runId, operationId: steer, delivery: { id: "steer", attemptId: "steer", operationId: steer, method: "steer", text: "keep this", images: [], state: "requesting" } }).state;
+  state = reduceWorkspace(state, { type: "DELIVERY_ACK", runId, intentId: "steer", operationId: steer, attemptId: "steer", queued: true }).state;
+  state = reduceWorkspace(state, { type: "STOP", runId, operationId: stop }).state;
 
-  const ended = reduceWorkspace(state, { type: "TURN_END", runId });
-  const status = ended.effects.find((effect) => effect.type === "delivery-status");
-  expect(status?.type).toBe("delivery-status");
-  if (status?.type !== "delivery-status") throw new Error("missing delivery status effect");
-  const dropped = reduceWorkspace(ended.state, { type: "DELIVERY_STATUS", runId, intentId: "steer", operationId: status.operationId, status: "dropped" });
-  const resend = dropped.effects.find((effect) => effect.type === "deliver");
-  expect(resend?.type).toBe("deliver");
-  if (resend?.type !== "deliver") throw new Error("missing resend effect");
-  const accepted = reduceWorkspace(dropped.state, { type: "DELIVERY_ACK", runId, intentId: "steer", operationId: resend.operationId, attemptId: "retry", queued: true });
-  expect(accepted.state.runs.get(runId)?.deliveries.has("steer")).toBeFalse();
+  const stopped = reduceWorkspace(state, { type: "STOP_OK", runId, operationId: stop }).state.runs.get(runId)!;
+  expect([...stopped.deliveries]).toEqual([["steer", expect.objectContaining({ state: "dropped" })]]);
+  expect(hasPendingDelivery(stopped)).toBeFalse();
 });
 
 test("store updates cannot invalidate an in-flight delivery acknowledgement", () => {

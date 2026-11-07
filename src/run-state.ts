@@ -166,9 +166,7 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     case "NAVIGATED": {
       const target = canonical({ ...state, aliases }, event.runId);
       cancelSelectedOpen(target); entry = { id: event.entryId, run: target }; if (!runs.has(target)) runs.set(target, blank(target));
-      const record = runs.get(target);
-      const attached = attachment.kind === "attached" && attachment.sessionId === target;
-      if (connected && !target.startsWith("draft:") && !openingOwner() && (!record?.open || record.open.stale || !attached)) beginOpen(target as SessionId, crypto.randomUUID() as OperationId);
+      if (connected && !target.startsWith("draft:") && !openingOwner()) beginOpen(target as SessionId, crypto.randomUUID() as OperationId);
       break;
     }
     case "FIRST_SEND":
@@ -219,16 +217,6 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     case "TURN_END": {
       if (attachment.kind !== "attached" || attachment.sessionId !== event.runId) break;
       attachment = { ...attachment, turn: "idle" };
-      update(event.runId, (record) => {
-        const deliveries = new Map(record.deliveries);
-        for (const [intentId, delivery] of deliveries) {
-          if (delivery.state === "dropped" || delivery.state === "requesting") continue;
-          const operationId = crypto.randomUUID() as OperationId;
-          deliveries.set(intentId, { ...delivery, operationId });
-          effects.push({ type: "delivery-status", runId: event.runId, operationId, intentId });
-        }
-        return { ...record, deliveries };
-      });
       break;
     }
     case "DELIVERY_BEGIN": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); deliveries.set(event.delivery.id, event.delivery); effects.push(event.delivery.method === "send_images" ? { type: "send-images", runId: record.id as SessionId, operationId: event.operationId, intentId: event.delivery.id } : { type: "deliver", runId: record.id, operationId: event.operationId, intentId: event.delivery.id }); return { ...record, deliveries, submitting: false }; }); break;
@@ -248,7 +236,7 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     case "CATALOG_OK": if (state.catalogPending === event.operationId) { state = { ...state, modelCatalog: event.catalog, catalogPending: undefined, catalogError: undefined }; } break;
     case "CATALOG_FAIL": if (state.catalogPending === event.operationId) state = { ...state, catalogPending: undefined, catalogError: event.error }; break;
     case "STOP": { const operationId = event.operationId ?? crypto.randomUUID() as OperationId; update(event.runId, (record) => ({ ...record, stopOperation: operationId })); effects.push({ type: "abort", runId: event.runId, operationId }); break; }
-    case "STOP_OK": update(event.runId, (record) => record.stopOperation !== event.operationId ? record : ({ ...record, stopOperation: undefined, deliveries: new Map([...record.deliveries].map(([id, delivery]) => [id, delivery.method === "steer" ? { ...delivery, state: "dropped" as const } : delivery])) })); break;
+    case "STOP_OK": update(event.runId, (record) => record.stopOperation !== event.operationId ? record : ({ ...record, stopOperation: undefined, deliveries: new Map([...record.deliveries].filter(([, delivery]) => delivery.method === "steer").map(([id, delivery]) => [id, { ...delivery, state: "dropped" as const }])) })); break;
     case "STOP_FAIL": update(event.runId, (record) => record.stopOperation === event.operationId ? { ...record, stopOperation: undefined } : record); break;
     case "DISCONNECT":
       connected = false;
@@ -266,6 +254,7 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
 }
 
 export const selectedRun = (state: WorkspaceState) => state.runs.get(canonical(state, state.entry.run));
+export const hasPendingDelivery = (record: RunRecord) => [...record.deliveries.values()].some((delivery) => delivery.state !== "dropped");
 export const activeRun = (state: WorkspaceState) => state.attachment.kind === "attached" && state.attachment.turn !== "idle" ? state.attachment.sessionId : state.attachment.kind === "disconnected" ? state.attachment.lastTurnOwner ?? null : null;
 export const workspaceRunState = (state: WorkspaceState) => {
   const record = selectedRun(state);

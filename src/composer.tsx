@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type ClipboardEvent, type Dispatch, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject, type SetStateAction } from "react";
 import { addImage, readImage, type QueuedImage } from "./image-queue";
-import type { RunStateStore } from "./run-state";
+import { hasPendingDelivery, type RunStateStore } from "./run-state";
 import { escape, normalKey, startVim, type Draft, type Step, type Vim } from "./vim";
 
 // gamma's composer. It keeps @fulcrum/react's composer parts (data-part names, so the shipped styles apply) and adds what
@@ -198,7 +198,7 @@ export function GammaComposer({ state, reason, blockedReason, vim: vimOn, onSubm
   const removeImage = useCallback((index: number) => store.removeAttachment(runId, index), [store, runId]);
   const draft = useComposerDraft(vimOn, record.text, saveText);
   const attachments = useAttachments(draft.input, record.attachments, saveImages, removeImage);
-  const pending = record.deliveries.size > 0;
+  const pending = hasPendingDelivery(record);
   const submission = useSubmission(state, Boolean(blockedReason), onSubmit, onStop, draft, attachments, store, runId, pending);
   useEffect(() => { if (autoFocus && (!document.activeElement || document.activeElement === document.body)) draft.input.current?.focus({ preventScroll: true }); }, [autoFocus]);
   const stopRef = useCallback((button: HTMLButtonElement | null) => {

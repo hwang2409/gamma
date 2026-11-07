@@ -115,6 +115,9 @@ const liveTurn = (send: (event: Json) => void, ask: () => Promise<"approve" | "d
  * The composer's methods (send, steer, delivery_status, abort) with zeta's delivery_id rules. A send starts a
  * text-only reply that streams for about 2.5 s, long enough to steer and to stop. As in zeta, an accepted message is
  * echoed as `user_message` before the reply, and a steer is persisted only once a turn takes it.
+ * Zeta 5feea2fc parity: `test_duplicate_steer_is_queued_once_and_status_becomes_delivered`,
+ * `test_session_abort_marks_accepted_steering_dropped`, `test_disconnect_marks_accepted_steering_dropped`, and
+ * `test_tool_less_turn_end_marks_late_steering_dropped` in tests/test_server_delivery.py.
  */
 export function composerMethods(wait: (ms: number) => Promise<void>, running: { get(): boolean; set(value: boolean): void }) {
   const sent: Json[] = [];
@@ -391,7 +394,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           return;
         }
         if (method === "new_session") {
-          // zeta's reply (server.py `new_session`): the full metadata of the new session, which becomes the server's own.
+          // Zeta 5feea2fc src/zeta/server/server.py:561-593 creates and activates this metadata;
+          // src/zeta/server/control.py:160-180 makes a reserved or running turn return -32004 first.
           const busy = transientBusy.get(method) ?? 0;
           if (busy > 0) { transientBusy.set(method, busy - 1); return reply({ error: { code: -32004, message: "a turn is already running" } }); }
           if (running || rejectCreate) return reply({ error: { code: -32004, message: "a turn is already running" } });
@@ -422,6 +426,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           return reply({ result: { session: active ? sessions.find((session) => session.session_id === active) ?? null : null, state: running ? (decide ? "tool" : "running") : "idle", explicit_finish: false, pending_approvals: pending, usage: {}, compaction_markers: 0 } });
         }
         if (method === "resume") {
+          // Zeta 5feea2fc src/zeta/server/server.py:601-626 and src/zeta/server/control.py:160-180 keep the
+          // current session while busy and return -32004 before a session swap.
           if (mode === "broken-session") return reply({ error: { code: -32602, message: "session log is invalid at line 12" } });
           const busy = transientBusy.get(method) ?? 0;
           if (busy > 0) { transientBusy.set(method, busy - 1); return reply({ error: { code: -32004, message: "a turn is already running" } }); }
@@ -440,7 +446,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           const offset = Number(params.offset ?? 0);
           const pageSize = active === LARGE ? 128 : 8;
           reply({ result: { messages: rows.slice(offset, offset + pageSize), next_offset: offset + pageSize < rows.length ? offset + pageSize : null } });
-          // The run starts once, after the first open of the active session finishes its history.
+          // Zeta 5feea2fc tests/test_server.py::test_approval_and_steer_continue_the_same_turn and
+          // ::test_resumed_approval_finishes_idle_after_terminal_event define this approval-turn lifecycle.
           if (liveEnabled && active === ACTIVE && offset + pageSize >= rows.length && !turnStarted) {
             turnStarted = true;
             running = true;

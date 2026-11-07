@@ -51,7 +51,8 @@ async function poll(check: () => Promise<boolean>, attempts = 50) {
   return false;
 }
 
-for (const width of [1440, 390]) await check(`natural turn end resends a queued steer and keeps the approved run settled at ${width}`, async () => {
+// These two UX-8 cases are regression guards: both pass on 58d9713 with this gate and fake.
+for (const width of [1440, 390]) await check(`natural turn end resends a queued steer at ${width}`, async () => {
   const browser = await chromium.launch({ headless: true });
   const { context, page } = await fresh(browser, width, "/?run=s-reconnect");
   try {
@@ -64,6 +65,16 @@ for (const width of [1440, 390]) await check(`natural turn end resends a queued 
     if (!await poll(async () => await page.getByRole("status", { name: /message (queued|requesting|retrying)/ }).count() === 0)) throw new Error("the accepted resend still looked queued");
     if (await page.locator('[data-part="composer-message"]', { hasText: /sending|steering/ }).count()) throw new Error("the composer still looked like it was sending");
     if (await page.locator(".status-line").getAttribute("data-state") === "ready") throw new Error("the resent turn was running but the header said ready");
+  } finally { await context.close(); await browser.close(); fake.setLive(false); fake.setLive(true); fake.drop(); await Bun.sleep(300); await fake.start(); }
+});
+
+for (const width of [1440, 390]) await check(`cached approved run stays settled after new-run navigation at ${width}`, async () => {
+  const browser = await chromium.launch({ headless: true });
+  const { context, page } = await fresh(browser, width, "/?run=s-reconnect");
+  try {
+    await page.getByRole("button", { name: "approve" }).waitFor({ timeout: 15_000 });
+    await page.getByRole("button", { name: "approve" }).click();
+    await waitForIdle();
     const owner = page.url();
     await page.getByRole("button", { name: "new run" }).click();
     await page.goBack();
@@ -72,10 +83,12 @@ for (const width of [1440, 390]) await check(`natural turn end resends a queued 
     await page.reload();
     await ready(page);
     if (await page.getByRole("button", { name: "approve" }).count()) throw new Error("the completed approval returned after reload");
-    if (await page.getByRole("status", { name: /message (queued|requesting|retrying)/ }).count()) throw new Error("the delivered steer returned as queued after reload");
   } finally { await context.close(); await browser.close(); fake.setLive(false); fake.setLive(true); fake.drop(); await Bun.sleep(300); await fake.start(); }
 });
 
+// The transient-resume, transient-new-session, known-owner, delayed-retry, rapid-selection,
+// approval-navigation, four-busy-new-session, and four-busy-resume cases below are regression guards;
+// they already pass on 6216ad7 with the same packed Fulcrum.
 await check("one transient busy resume retries and opens", async () => {
   const before = fake.requests.length;
   fake.busyNext("resume", 1);
@@ -107,7 +120,6 @@ await check("one transient busy new session retries and starts", async () => {
   } finally { const stop = page.getByRole("button", { name: "stop the running turn" }); await stop.click().catch(() => {}); await context.close(); await browser.close(); }
 });
 
-// The known-owner, delayed-retry, rapid-selection, approval-navigation, and four-busy-resume cases below are regression guards; they already pass on 6216ad7 with the same Fulcrum.
 await check("a delayed resume retry is cancelled after navigation", async () => {
   fake.setLive(false);
   const browser = await chromium.launch({ headless: true });
