@@ -62,7 +62,7 @@ test("a reload reconciles a queued steer from durable status and resends a dropp
   await after.reconcile("s");
   expect(calls.map(([method]) => method)).toEqual(["steer", "delivery_status", "send"]);
   expect((calls.at(-1)?.[1] as { delivery_id?: string }).delivery_id).not.toBe("intent-1");
-  expect(after.marks("s").waiting.size).toBe(0);
+  expect(after.marks("s").waiting).toEqual(new Set(["intent-1"]));
 });
 
 test("send and steer go to their methods with a delivery id when the feature is negotiated", async () => {

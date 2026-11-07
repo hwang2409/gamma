@@ -43,7 +43,7 @@ function UserRow({ id }: { id: string }) {
   const waiting = waitingDeliveries.has(identity) && !lost;
   return (
     <>
-      <Message id={id} markdown={RichMarkdown} />
+      <Fallback id={id} />
       {waiting ? <p className="queued-delivery" role="status" aria-label="message queued">queued</p> : null}
       <p className="undelivered" data-empty={!lost || undefined} data-reserve={identity || undefined} data-user-id={id} role={lost ? "note" : undefined} aria-hidden={!lost || undefined}>{lost ? <>not delivered · the stop ended the turn before zeta took this steer {resend ? <button type="button" className="ghost" onClick={() => resend(identity)}>resend</button> : null}</> : "\u00a0"}</p>
     </>
@@ -139,7 +139,7 @@ const initialEntry = (): BrowserEntry => {
 export function App() {
   const [theme, setTheme] = useTheme();
   const [vim, setVim] = useVimSetting();
-  const connection = useMemo(() => createConnection({ origin: location.origin }), []);
+  const connection = useMemo(() => createConnection({ origin: location.origin, initialPort: Number(import.meta.env.VITE_ZETA_PORT) || 8765 }), []);
   const firstEntry = useMemo(initialEntry, []);
   const runState = useMemo(() => createRunStateStore(), []);
   const [browserEntry, setBrowserEntry] = useState(firstEntry);
@@ -183,9 +183,12 @@ export function App() {
   const openViewer = useCallback((block: any) => { viewerOpener.current = document.activeElement as HTMLElement | null; setViewer(block); }, []);
   const closeViewer = useCallback(() => { setViewer(null); requestAnimationFrame(() => viewerOpener.current?.focus()); }, []);
   const deliveries = useMemo(() => createDeliveryManager(() => connection.client), [connection]);
-  const deliveryVersion = useSyncExternalStore(deliveries.subscribe, () => { const marks = deliveries.marks(browserEntry.run); return `${marks.waiting.size}:${marks.undelivered.size}`; });
+  const deliveryVersion = useSyncExternalStore(deliveries.subscribe, () => { const marks = deliveries.marks(runState.canonical(browserEntry.run)); return `${marks.waiting.size}:${marks.undelivered.size}`; });
   void deliveryVersion;
-  const { undelivered, waiting: waitingDeliveries } = deliveries.marks(browserEntry.run);
+  const deliveryMarks = deliveries.marks(runState.canonical(browserEntry.run));
+  // Context values must change identity when the manager mutates its internal sets.
+  const undelivered = new Set(deliveryMarks.undelivered);
+  const waitingDeliveries = new Set(deliveryMarks.waiting);
   const previousActive = useRef<string | null>(null);
   useEffect(() => {
     const previous = previousActive.current;

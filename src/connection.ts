@@ -61,6 +61,7 @@ export type ConnectionDeps = {
   setTimer?: (callback: () => void, ms: number) => unknown;
   clearTimer?: (timer: unknown) => void;
   helloTimeoutMs?: number;
+  initialPort?: number;
 };
 
 export type Connection = {
@@ -107,10 +108,11 @@ export function createConnection({
   setTimer = (callback, ms) => setTimeout(callback, ms),
   clearTimer = (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
   helloTimeoutMs = 15_000,
+  initialPort = 8765,
 }: ConnectionDeps): Connection {
   let state = initialConnection;
   let client: ZetaClient | null = null;
-  let port = 8765;
+  let port = initialPort;
   let timer: unknown = null;
   let generation = 0;
   let stopped = false;

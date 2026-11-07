@@ -177,11 +177,15 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
     const value = String(params.text ?? "");
     sent.push({ method, text: value, delivery_id: delivery });
     const userMessage = { event: "user_message", session_id: active, text: value, mode: method, attachments: images.map((image) => ({ name: image.name, mime_type: image.mime_type, size: Math.floor(String(image.data).length * 3 / 4) })), ...(delivery ? { delivery_id: delivery } : {}) };
-    if (echo) send(userMessage); else withheldEchoes.push(() => send(userMessage));
+    const persistAndEcho = () => {
+      // serve-protocol.md:811-817: the accepted echo and durable history row become visible together.
+      histories[active] = [...(histories[active] ?? []), { id: `sent-${sent.length}`, role: "user", content: [text(value)], ...(delivery ? { delivery_id: delivery } : {}), tool_result: null }];
+      if (delivery && method === "send") statuses.set(delivery, "delivered");
+      send(userMessage);
+    };
+    if (echo) persistAndEcho(); else withheldEchoes.push(persistAndEcho);
     const accepted = method === "send" ? { accepted: true, session_id: active } : { accepted: true };
-    if (delivery) { deliveries.set(delivery, accepted); statuses.set(delivery, method === "steer" ? "queued" : "delivered"); }
-    // serve-protocol.md:811-817: the accepted echo is also a durable user history row with its delivery id.
-    histories[active] = [...(histories[active] ?? []), { id: `sent-${sent.length}`, role: "user", content: [text(value)], ...(delivery ? { delivery_id: delivery } : {}), tool_result: null }];
+    if (delivery) { deliveries.set(delivery, accepted); statuses.set(delivery, "queued"); }
     if (method === "steer") { if (delivery) chat?.steers.push(delivery); return { result: accepted }; }
     // After the reply, as zeta starts the turn once the send is persisted.
     queueMicrotask(() => void chatTurn(active, send, value));

@@ -26,7 +26,7 @@ await mkdir(shots, { recursive: true });
 // A private gamma host, so the gate never touches a running one.
 const gammaHome = await mkdtemp(join(tmpdir(), "gamma-gate-"));
 const fake = await startFakeZeta({ origins: [origin] });
-const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: root, env: { ...process.env, ZETA_HOME: fake.home, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin }, stdio: "ignore" });
+const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: root, env: { ...process.env, ZETA_HOME: fake.home, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin, VITE_ZETA_PORT: String(fake.port) }, stdio: "ignore" });
 const failures: string[] = [];
 const fail = (message: string) => { failures.push(message); console.log(`FAIL ${message}`); };
 const ok = (message: string) => console.log(`ok   ${message}`);
@@ -334,7 +334,7 @@ try {
     });
     await check("model, YOLO, reconnect persistence, image queue, and image viewer", async () => {
       const footer = page.locator('.dock [data-part="composer"] .composer-tools');
-      await footer.getByRole("button", { name: "model: gpt-5.1-codex" }).click({ timeout: 5000 }).catch(() => { throw new Error("footer model picker did not open"); });
+      await footer.getByRole("button", { name: /model: (?:default \()?gpt-5\.1-codex/ }).click({ timeout: 5000 }).catch(() => { throw new Error("footer model picker did not open"); });
       await footer.getByRole("option", { name: "claude-opus-4-6" }).click({ timeout: 5000 }).catch(() => { throw new Error("model option could not be selected"); });
       await footer.getByRole("button", { name: "model: claude-opus-4-6" }).waitFor({ timeout: 5000 }).catch(() => { throw new Error("model change did not reload from zeta"); });
       if (fake.settings.model !== "claude-opus-4-6") throw new Error("model change did not reach zeta");
