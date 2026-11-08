@@ -44,12 +44,12 @@ describe("completion tokens", () => {
 
 describe("slash results", () => {
   const cases = [
-    ["output", { kind: "output", text: "model: luna" }, { kind: "receipt", text: "model: luna", tone: "quiet" }],
+    ["output", { kind: "output", text: "model: luna" }, { kind: "receipt", text: "model: luna", tone: "quiet", command: "review" }],
     // Legacy /mcp status frame from Zeta 5feea2fc src/zeta/server/slash_commands.py:413-425.
-    ["text", { kind: "text", text: "server: connected" }, { kind: "receipt", text: "server: connected", tone: "quiet" }],
+    ["text", { kind: "text", text: "server: connected" }, { kind: "receipt", text: "server: connected", tone: "quiet", command: "review" }],
     ["error", { kind: "error", text: "status unavailable" }, { kind: "receipt", text: "status unavailable", tone: "error" }],
     ["unknown", { kind: "unknown", name: "wat" }, { kind: "receipt", text: "unknown command: /wat", tone: "error" }],
-    ["model_input", { kind: "model_input", input_id: "opaque-1", display_text: "/review this" }, { kind: "send-input", inputId: "opaque-1", displayText: "/review this" }],
+    ["model_input", { kind: "model_input", input_id: "opaque-1", display_text: "/review this" }, { kind: "send-input", inputId: "opaque-1", displayText: "/review this", command: "review" }],
   ] as const;
 
   for (const [name, result, expected] of cases) test(name, async () => {
@@ -74,7 +74,7 @@ describe("slash results", () => {
 
   test("an opaque model input id is returned once without expansion text", async () => {
     const { controller, frames } = fake({ slash_run: { kind: "model_input", input_id: "one-use", display_text: "/review secret", text: "hidden expansion" } });
-    expect(await controller.prepareComposerInput("/review secret")).toEqual({ kind: "send-input", inputId: "one-use", displayText: "/review secret" });
+    expect(await controller.prepareComposerInput("/review secret")).toEqual({ kind: "send-input", inputId: "one-use", displayText: "/review secret", command: "review" });
     expect(frames).toHaveLength(1);
   });
 
@@ -95,21 +95,23 @@ describe("slash results", () => {
 test("client-only commands use only the explicit gamma mapping and keep arguments", async () => {
   const mappings = {
     new: "new_session", name: "rename_session", approve: "approve", always: "always", deny: "deny",
-    theme: "theme", tree: "branch_view", model: "model", vim: "vim", paste: "paste", accounts: "accounts",
+    theme: "theme", tree: "branch_view", paste: "paste", keys: "keys", restart: "restart", permissions: "permissions",
   } as const;
   for (const [command, action] of Object.entries(mappings)) {
     const { controller } = fake({ slash_run: { kind: "client_only", name: command } });
     expect(await controller.prepareComposerInput(`/${command} alpha beta`)).toEqual({ kind: "client-action", name: action, args: "alpha beta" });
   }
-  const { controller } = fake({ slash_run: { kind: "client_only", name: "permissions" } });
-  expect(await controller.prepareComposerInput("/permissions")).toEqual({ kind: "receipt", text: "/permissions is not available in gamma yet", tone: "error" });
+  for (const name of ["model", "vim", "accounts"]) {
+    const { controller } = fake({ slash_run: { kind: "client_only", name } });
+    expect(await controller.prepareComposerInput(`/${name}`)).toEqual({ kind: "receipt", text: `/${name} is not available in gamma yet`, tone: "error" });
+  }
 
   const oldServer = fake({ slash_run: { kind: "client_only", name: "mcp" } }).controller;
   expect(await oldServer.prepareComposerInput("/mcp")).toEqual({ kind: "receipt", text: "/mcp is not available in gamma yet", tone: "error" });
 
   // zeta PR #835 head 886f5720 (unmerged): new servers return output for /mcp.
   const newServer = fake({ slash_run: { kind: "output", text: "mcp status" } }).controller;
-  expect(await newServer.prepareComposerInput("/mcp")).toEqual({ kind: "receipt", text: "mcp status", tone: "quiet" });
+  expect(await newServer.prepareComposerInput("/mcp")).toEqual({ kind: "receipt", text: "mcp status", tone: "quiet", command: "mcp" });
 });
 
 test("leading whitespace still dispatches the first nonempty slash token", async () => {

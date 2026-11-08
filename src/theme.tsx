@@ -4,7 +4,8 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent
 export const AUTO = "auto";
 export type ThemeChoice = ThemeName | typeof AUTO;
 const KEY = "fulcrum-web-theme";
-const choices: readonly ThemeChoice[] = [AUTO, ...themes];
+export const themeChoices: readonly ThemeChoice[] = [AUTO, ...themes];
+const choices = themeChoices;
 // Swatches: bg, fg, accent, ok, warn, danger, then three syntax colors. Drawn under each option's own theme.
 const swatches = ["bg", "fg", "accent", "ok", "warn", "danger", "tok-keyword", "tok-string", "tok-function"];
 
