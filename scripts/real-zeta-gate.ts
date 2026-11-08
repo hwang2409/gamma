@@ -134,12 +134,16 @@ try {
   if (planProof) {
   await page.goto(`${origin}/?run=${discovery.pending_session}`);
   await field.waitFor({ timeout: 20_000 });
+  await field.fill("/pla");
+  await page.getByRole("option", { name: /plan/ }).first().waitFor({ timeout: 10_000 });
+  await field.fill("");
+  await field.press("Escape");
   const pendingBefore = frames.length;
   await submit("/plan");
   try {
     await page.getByText("commands wait for pending work to finish: tools, approvals, or background agents", { exact: true }).waitFor({ timeout: 10_000 });
   } catch (error) {
-    throw new Error(`pending command refusal missing; body=${JSON.stringify((await page.locator("body").innerText()).slice(0, 2000))}; cause=${String(error)}`);
+    throw new Error(`pending command refusal missing; value=${JSON.stringify(await field.inputValue())}; body=${JSON.stringify((await page.locator("body").innerText()).slice(0, 2000))}; frames=${frames.slice(pendingBefore).join("\n").slice(-3000)}; cause=${String(error)}`);
   }
   if ((await field.inputValue()).trim() !== "/plan") throw new Error("real pending-work refusal lost the plan draft");
   const pendingFrames = frames.slice(pendingBefore).map((frame) => { try { return JSON.parse(frame); } catch { return null; } });
@@ -147,6 +151,10 @@ try {
 
   await page.goto(`${origin}/?run=${created.session.session_id}`);
   await field.waitFor({ timeout: 20_000 });
+  await field.fill("/pla");
+  await page.getByRole("option", { name: /plan/ }).first().waitFor({ timeout: 10_000 });
+  await field.fill("");
+  await field.press("Escape");
   for (const [command, output, chip] of [["/plan", "plan mode: on", true], ["/plan off", "plan mode: off", false], ["/plan on", "plan mode: on", true], ["/plan toggle", "plan mode: off", false]] as const) {
     const settingsBefore = frames.filter((frame) => frame.includes('"method":"session_settings"')).length;
     await submit(command);
