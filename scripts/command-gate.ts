@@ -182,7 +182,10 @@ try {
       await page.locator(".command-receipt-text", { hasText: "choose images to attach" }).waitFor();
       await page.getByRole("button", { name: "dismiss command result" }).click();
       await commandReceipt("/restart", "gamma reconnects on its own");
-      await commandReceipt("/permissions", "session grants view");
+      await submit(page, "/permissions");
+      await page.getByRole("dialog", { name: "session permissions" }).waitFor();
+      await page.keyboard.press("Escape");
+      await page.getByRole("dialog", { name: "session permissions" }).waitFor({ state: "detached" });
       await commandReceipt("/tree", "experiment");
       const before = fake.requests.length;
       await commandReceipt("/tree 2", "switched to branch 2");
