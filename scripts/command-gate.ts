@@ -673,6 +673,38 @@ try {
       if (sent.length !== 1 || sent[0]!.method !== "send" || new URL(page.url()).searchParams.get("run") !== run) throw new Error(`the attach-window message went ${JSON.stringify(sent.map((request) => request.method))} from ${page.url()}`);
     });
 
+    await check("back to an open run while it reopens sends nothing and keeps the draft, then sends exactly once", async () => {
+      // Back reopens the run; its replay evicts the old store, so until the reopen's status reply nothing may be sent.
+      const run = new URL(page.url()).searchParams.get("run");
+      await page.getByRole("button", { name: "new run" }).click();
+      await waitReady(page);
+      // The reopen may reuse a known status, but it always awaits the first history page of its fresh replay.
+      fake.delayNext("session_history", 4_000);
+      const since = fake.requests.length;
+      const accepted = fake.sent.length;
+      await page.goBack();
+      await step(page, "back selects the run again", () => until(() => new URL(page.url()).searchParams.get("run") === run, 5_000));
+      await waitReady(page);
+      await field(page).fill("hello after back");
+      await field(page).press("Enter");
+      await page.waitForTimeout(300);
+      const window = fake.requests.slice(since);
+      const page0 = window.find((request) => request.method === "session_history");
+      if (!page0 || page0.replied !== undefined) throw new Error("the reopen was not waiting on its first history page at Enter, so this check missed the reopen window");
+      const early = window.filter((request) => SENDS.includes(request.method)).map((request) => request.method);
+      const status = await page.locator('[data-part="composer-message"]').innerText();
+      if (early.length || await field(page).inputValue() !== "hello after back" || status !== "sending is paused until the run opens") throw new Error(`enter during the reopen: requests=${JSON.stringify(early)} draft=${JSON.stringify(await field(page).inputValue())} status=${JSON.stringify(status)}`);
+      await step(page, "the dock status says the run is opening", () => page.locator(".dock").getByText("opening the run…", { exact: true }).waitFor({ timeout: 2_000 }));
+      if (await page.getByText("could not send", { exact: false }).count()) throw new Error("enter during the reopen showed a send error");
+      await step(page, "the reopen's first history page arrives", () => until(() => fake.requests.slice(since).some((request) => request.method === "session_history" && request.replied !== undefined), 10_000));
+      await step(page, "sending resumes", () => page.locator('[data-part="composer-submit"]:not([aria-disabled])').waitFor({ timeout: 10_000 }));
+      await field(page).press("Enter");
+      await step(page, "the message is sent", () => until(() => fake.requests.slice(since).some((request) => request.method === "send"), 10_000));
+      await stopTurn(page);
+      const sends = fake.requests.slice(since).filter((request) => SENDS.includes(request.method)).length;
+      if (sends !== 1 || fake.sent.length - accepted !== 1 || await field(page).inputValue() !== "") throw new Error(`back during the reopen: ${sends} send requests, ${fake.sent.length - accepted} accepted turns, draft ${JSON.stringify(await field(page).inputValue())}`);
+    });
+
     await check("an open that fails after the attach window ends the pause with the open error and keeps the draft", async () => {
       // Zeta 5feea2fc server.py:601-626: a resume of a broken session log is refused with -32602 (fake mode "broken-session").
       fake.setMode("broken-session");
