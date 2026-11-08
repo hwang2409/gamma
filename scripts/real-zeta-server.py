@@ -24,8 +24,8 @@ def private_proof_home() -> Path:
     default = (Path.home() / ".zeta").resolve()
     if home == default or home.is_relative_to(default):
         raise RuntimeError("real-zeta proof must never use ~/.zeta or a child of it")
-    if not home.is_relative_to(Path(tempfile.gettempdir()).resolve()) and not home.is_relative_to(Path(worktree).resolve()):
-        raise RuntimeError("real-zeta proof ZETA_HOME must be under tmp or the proof worktree")
+    if not home.is_relative_to(Path(tempfile.gettempdir()).resolve()) and not home.is_relative_to(Path("/tmp").resolve()) and not home.is_relative_to(Path(worktree).resolve()):
+        raise RuntimeError("real-zeta proof ZETA_HOME must be under /tmp or the proof worktree")
     return home
 
 
