@@ -43,8 +43,17 @@ def make_server() -> tuple[ZetaServer, Path, str]:
         [(call.id, call)],
     )
     pending.store.close()
+    plan_turns = (
+        [
+            ScriptedTurn(content=[TextContent("plan prompt proof complete")]),
+            ScriptedTurn(content=[TextContent("implement prompt proof complete")]),
+        ]
+        if os.environ.get("ZETA_PLAN_PROOF") == "1"
+        else []
+    )
     backend = FakeBackend(
         [
+            *plan_turns,
             ScriptedTurn(
                 content=[TextContent("\n".join(f"proof context line {index}" for index in range(1, 81)))],
                 tool_calls=[ToolCall("proof-call", "bash", {"command": "printf real-zeta-proof"})],

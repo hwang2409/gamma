@@ -56,7 +56,7 @@ const waitFile = async (path: string, owner?: ChildProcess) => {
 const temp = await mkdtemp(join(tmpdir(), "g4-")); resources.createdTemp(temp);
 const zetaHome = assertPrivateProofHome(join(temp, "zeta-home"), requiredWorktree);
 if (await stat(zetaHome).then(() => true, () => false)) throw new Error(`real-zeta proof home was not fresh: ${zetaHome}`);
-const proofEnv = { ...process.env, ZETA_HOME: zetaHome };
+const proofEnv = { ...process.env, ZETA_HOME: zetaHome, ZETA_PLAN_PROOF: planProof ? "1" : "0" };
 
 try {
   await run("git", ["-C", zeta, "worktree", "add", "--detach", worktree, ref], "git worktree add", gamma, proofEnv);
@@ -148,13 +148,11 @@ try {
   for (const [command, chip] of [["/plan create a proof", true], ["/implement", false]] as const) {
     const beforeCommand = frames.length;
     await submit(command);
-    await page.getByRole("button", { name: "stop" }).waitFor({ timeout: 15_000 });
+    for (let attempt = 0; attempt < 200 && !frames.slice(beforeCommand).some((frame) => frame.includes('"method":"send"')); attempt++) await Bun.sleep(50);
     const commandFrames = frames.slice(beforeCommand).map((frame) => { try { return JSON.parse(frame); } catch { return null; } });
     const sends = commandFrames.filter((frame) => frame?.method === "send");
-    const input = sends[0]?.params?.input;
-    if (!commandFrames.some((frame) => frame?.method === "slash_run") || sends.length !== 1 || typeof input?.input_id !== "string" || "expanded_text" in input) throw new Error(`${command} did not use one opaque real-zeta send`);
+    if (!commandFrames.some((frame) => frame?.method === "slash_run") || sends.length !== 1 || typeof sends[0]?.params?.input_id !== "string" || "text" in sends[0].params) throw new Error(`${command} did not use one opaque real-zeta send: ${JSON.stringify(commandFrames)}`);
     if ((await page.locator(".plan-chip").count() > 0) !== chip) throw new Error(`${command} left the wrong real-zeta plan chip state`);
-    await page.getByRole("button", { name: "stop" }).click();
     await page.getByPlaceholder("message zeta").waitFor({ timeout: 15_000 });
   }
   }
