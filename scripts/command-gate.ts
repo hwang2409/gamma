@@ -639,6 +639,72 @@ try {
 
     await check("receipt text lines up with its dismiss button", () => receiptAlignment(page, "chromium"));
 
+    /**
+     * Loads `run` (default: reloads this one) with zeta's status reply held, so the run is selected but has no lease yet,
+     * and presses Enter on `text`. A run other than zeta's active session must be resumed, which is where an open can fail.
+     */
+    const typeWhileAttaching = async (text: string, run?: string) => {
+      fake.delayNext("status", 1_500);
+      const since = fake.requests.length;
+      if (run) await page.goto(`${origin}/?run=${run}`); else await page.reload();
+      await waitReady(page);
+      await field(page).fill(text);
+      await field(page).press("Enter");
+      await page.waitForTimeout(200);
+      const window = fake.requests.slice(since);
+      if (window.find((request) => request.method === "status")?.replied !== undefined) throw new Error("the run attached before Enter, so this check missed the attach window");
+      return { since, window };
+    };
+    const SENDS = ["send", "send_images", "new_session", "slash_run"];
+
+    await check("a plain message during the attach window stays in the draft, then sends once to this run", async () => {
+      const run = new URL(page.url()).searchParams.get("run");
+      const { since, window } = await typeWhileAttaching("hello from the attach window");
+      const early = window.filter((request) => SENDS.includes(request.method)).map((request) => `${request.method} ${JSON.stringify(request.params)}`);
+      const receipts = await page.locator(".command-receipt-text").allInnerTexts();
+      const status = await page.locator('[data-part="composer-message"]').innerText();
+      if (early.length || receipts.length || await field(page).inputValue() !== "hello from the attach window" || status !== "sending is paused until the run opens") throw new Error(`enter during the attach: requests=${JSON.stringify(early)} receipts=${JSON.stringify(receipts)} draft=${JSON.stringify(await field(page).inputValue())} status=${JSON.stringify(status)}`);
+      await step(page, "the run opens", () => until(() => fake.requests.slice(since).some((request) => request.method === "slash_list" && request.replied !== undefined), 10_000));
+      await step(page, "sending resumes", () => page.locator('[data-part="composer-submit"]:not([aria-disabled])').waitFor({ timeout: 10_000 }));
+      await field(page).press("Enter");
+      await step(page, "the message is sent once", () => until(() => fake.requests.slice(since).some((request) => request.method === "send"), 10_000));
+      await stopTurn(page);
+      const sent = fake.requests.slice(since).filter((request) => SENDS.includes(request.method));
+      if (sent.length !== 1 || sent[0]!.method !== "send" || new URL(page.url()).searchParams.get("run") !== run) throw new Error(`the attach-window message went ${JSON.stringify(sent.map((request) => request.method))} from ${page.url()}`);
+    });
+
+    await check("an open that fails after the attach window ends the pause with the open error and keeps the draft", async () => {
+      // Zeta 5feea2fc server.py:601-626: a resume of a broken session log is refused with -32602 (fake mode "broken-session").
+      fake.setMode("broken-session");
+      try {
+        await typeWhileAttaching("keep me when the open fails", "s-themes");
+        await step(page, "the open error shows", () => page.getByRole("heading", { name: "could not open this run" }).waitFor({ timeout: 10_000 }));
+        await step(page, "the open error names the cause", () => page.getByText("session log is invalid at line 12").waitFor({ timeout: 5_000 }));
+        if (await field(page).inputValue() !== "keep me when the open fails") throw new Error("the failed open dropped the draft");
+        if (await page.locator(".command-receipt-text").count()) throw new Error("the failed open left a receipt");
+      } finally { fake.setMode("ok"); }
+      const since = fake.requests.length;
+      await page.getByRole("button", { name: "try again" }).click();
+      await step(page, "try again opens the run", () => until(() => fake.requests.slice(since).some((request) => request.method === "slash_list" && request.replied !== undefined), 10_000));
+      await field(page).fill("");
+    });
+
+    await check("a busy open after the attach window shows the busy panel and keeps the draft", async () => {
+      // Zeta 5feea2fc server.py:601-626 and control.py:160-180: resume while another turn runs returns -32004.
+      fake.busyNext("resume", 8);
+      try {
+        await typeWhileAttaching("keep me while zeta is busy", "s-new-7");
+        await step(page, "the busy panel shows", () => page.getByRole("heading", { name: "another run is active" }).waitFor({ timeout: 30_000 }));
+        if (await field(page).inputValue() !== "keep me while zeta is busy") throw new Error("the busy open dropped the draft");
+        const status = await page.locator('[data-part="composer-message"]').innerText();
+        if (status !== "sending is paused until the run opens") throw new Error(`busy open composer status: ${JSON.stringify(status)}`);
+      } finally { fake.busyNext("resume", 0); }
+      const since = fake.requests.length;
+      await page.getByRole("button", { name: "try again" }).click();
+      await step(page, "try again opens the run", () => until(() => fake.requests.slice(since).some((request) => request.method === "slash_list" && request.replied !== undefined), 10_000));
+      await field(page).fill("");
+    });
+
     await check("one escape closes the menu after one-shot input; modified tab and enter never accept", async () => {
       const listbox = page.getByRole("listbox", { name: "command suggestions" });
       await field(page).fill("");
