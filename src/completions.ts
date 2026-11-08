@@ -21,9 +21,18 @@ export class CompletionModel {
   private state = CLOSED;
   /** Value and selection of the last update; kept across Escape so a repeated select event does not reopen. */
   private input?: string;
+  /** Escape closed the menu for the current input; a new command source must not reopen it. */
+  private dismissed = false;
   private readonly listeners = new Set<() => void>();
 
-  constructor(private readonly controller: CommandController) {}
+  constructor(private controller: CommandController) {}
+
+  /** The run's command source changed (the run attached, reconnected, or reopened): ask the new one about the token being typed. */
+  setController(controller: CommandController) {
+    if (controller === this.controller) return;
+    this.controller = controller;
+    if (this.input !== undefined && this.token && !this.dismissed) this.update(this.value, this.caret);
+  }
 
   readonly getSnapshot = (): CompletionSnapshot => this.state;
   readonly subscribe = (listener: () => void): (() => void) => {
@@ -43,6 +52,7 @@ export class CompletionModel {
 
   update(value: string, selectionStart: number, selectionEnd = selectionStart) {
     this.input = `${selectionStart}:${selectionEnd}:${value}`;
+    this.dismissed = false;
     this.value = value;
     this.caret = selectionStart;
     this.token = selectionStart === selectionEnd ? findCommandCompletionToken(value.slice(0, selectionStart)) : undefined;
@@ -82,7 +92,7 @@ export class CompletionModel {
   /** `modified`: Shift, Alt, Ctrl, or Meta is held; then Tab and Enter keep their normal meaning and close the menu. */
   key(key: string, isComposing = false, modified = false): CompletionKeyResult {
     if (isComposing || !this.state.open) return { handled: false };
-    if (key === "Escape") { const input = this.input; this.close(); this.input = input; return { handled: true }; }
+    if (key === "Escape") { const input = this.input; this.close(); this.input = input; this.dismissed = true; return { handled: true }; }
     if ((key === "Tab" || key === "Enter") && modified) { this.close(); return { handled: false }; }
     if (key === "ArrowUp" || key === "ArrowDown") {
       const delta = key === "ArrowDown" ? 1 : -1;

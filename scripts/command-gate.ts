@@ -22,13 +22,50 @@ const fake = await startFakeZeta({ origins: [origin], live: false });
 const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: root, env: { ...process.env, ZETA_HOME: fake.home, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin, VITE_ZETA_PORT: String(fake.port) }, stdio: ["ignore", "pipe", "pipe"] });
 const failures: string[] = [];
 const errors: string[] = [];
+/** The page whose state a failed check reports. */
+let statePage: Page | undefined;
 const check = async (name: string, run: () => Promise<void>) => {
   try { if (vite.exitCode !== null) throw new Error(`vite exited ${vite.exitCode}`); await run(); if (vite.exitCode !== null) throw new Error(`vite exited ${vite.exitCode}`); console.log(`ok   ${name}`); }
-  catch (error) { const message = `${name}: ${error instanceof Error ? error.message.split("\n")[0] : error}`; failures.push(message); console.log(`FAIL ${message}`); }
+  catch (error) {
+    // Playwright's call log names the locator an unlabeled wait was waiting for.
+    const lines = error instanceof Error ? error.message.split("\n") : [String(error)];
+    const waiting = lines.find((line) => /^\s*- waiting for /.test(line))?.trim();
+    const state = statePage && !lines[0]!.includes("; saw {") ? `; saw ${await seen(statePage).catch(() => "unreadable")}` : "";
+    const message = `${name}: ${lines[0]}${waiting ? ` (${waiting})` : ""}${state}`;
+    failures.push(message); console.log(`FAIL ${message}`);
+  }
 };
 const requests = (method: string) => fake.requests.filter((request) => request.method === method);
 const field = (page: Page) => page.locator('textarea[aria-label="message"]');
+/** What a failed step saw: the composer, the command catalog requests, and the fake's turn, on one line. */
+const seen = async (page: Page) => JSON.stringify({
+  url: page.url(),
+  value: await field(page).inputValue({ timeout: 1_000 }).catch(() => "missing"),
+  expanded: await field(page).getAttribute("aria-expanded", { timeout: 1_000 }).catch(() => "missing"),
+  placeholder: await field(page).getAttribute("placeholder", { timeout: 1_000 }).catch(() => "missing"),
+  running: fake.running,
+  slashList: requests("slash_list").map((request) => request.replied === undefined ? "pending" : "replied").join(","),
+  last: fake.requests.slice(-6).map((request) => request.method).join(","),
+  receipts: await page.locator(".command-receipt-text").allInnerTexts().catch(() => []),
+});
+/** Names the step in the error, so a timeout says which wait failed and what the page and fake showed then. */
+const step = async <T,>(page: Page, label: string, run: () => Promise<T>): Promise<T> => {
+  try { return await run(); }
+  catch (error) { throw new Error(`${label}: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}; saw ${await seen(page)}`); }
+};
 const waitReady = (page: Page) => page.locator('.dock form[data-part="composer"]').waitFor({ timeout: 15_000 });
+const until = async (condition: () => boolean, timeout: number) => {
+  for (const end = Date.now() + timeout; !condition(); await Bun.sleep(25)) if (Date.now() > end) throw new Error(`timed out after ${timeout}ms`);
+};
+/**
+ * A loaded run accepts commands once zeta reports it attached; until then the composer shows but holds the fresh-run
+ * stand-in, which refuses commands. The run's own command source asks for the catalog when it mounts, so that request
+ * marks the moment commands reach zeta.
+ */
+const waitRunCommands = async (page: Page, since: number, label: string) => {
+  await step(page, `${label}: the composer renders`, () => waitReady(page));
+  await step(page, `${label}: the attached run asks for its command catalog`, () => until(() => fake.requests.slice(since).some((request) => request.method === "slash_list"), 15_000));
+};
 const PIXEL = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 /** The sRGB bytes of one screen pixel and of a CSS color, read the same way so they compare. */
 const pixel = async (page: Page, x: number, y: number) => {
@@ -78,7 +115,7 @@ const openList = async (page: Page) => {
   await page.mouse.move(0, 0);
   await field(page).fill("");
   await field(page).fill("/");
-  await page.getByRole("listbox", { name: "command suggestions" }).waitFor();
+  await step(page, "typing / opens the list", () => page.getByRole("listbox", { name: "command suggestions" }).waitFor());
   await settle(page);
 };
 const closeList = async (page: Page) => { await page.mouse.move(0, 0); await field(page).press("Escape"); await field(page).fill(""); };
@@ -156,8 +193,10 @@ try {
     try {
       const other = await safari.newPage({ viewport: { width: 1440, height: 900 } });
       other.on("pageerror", (error) => errors.push(`webkit: ${error.message}`));
+      statePage = other;
+      const since = fake.requests.length;
       await other.goto(`${origin}/?run=${ACTIVE}`);
-      await waitReady(other);
+      await waitRunCommands(other, since, "webkit opens the active run");
       await check("webkit edge shades stay visible over the active and the hovered edge row", () => listShades(other, "webkit"));
       await check("webkit free wheel scrolling rests on whole rows", () => listWheel(other, "webkit"));
     } finally { await safari.close(); }
@@ -166,9 +205,12 @@ try {
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    // GATE_CPU_THROTTLE=20 runs chromium's main thread 20x slower, the way a loaded machine does, to reproduce timing races.
+    if (process.env.GATE_CPU_THROTTLE) await (await page.context().newCDPSession(page)).send("Emulation.setCPUThrottlingRate", { rate: Number(process.env.GATE_CPU_THROTTLE) });
     page.on("console", (message) => { if (message.type() === "error" && !/WebSocket connection|Failed to load resource/.test(message.text())) errors.push(message.text()); });
     page.on("response", (response) => { if (response.status() >= 400) errors.push(`${response.status()} ${response.url()}`); });
     page.on("pageerror", (error) => errors.push(error.message));
+    statePage = page;
     await page.goto(origin);
     await waitReady(page);
     await page.waitForLoadState("networkidle");
@@ -411,21 +453,21 @@ try {
     await check("listbox keyboard, pointer, ime, focus, and placement", async () => {
       await field(page).fill("/st");
       const listbox = page.getByRole("listbox", { name: "command suggestions" });
-      await listbox.waitFor();
+      await step(page, "typing /st opens the list", () => listbox.waitFor());
       const option = page.getByRole("option", { name: /\/status/ });
       const box = await listbox.boundingBox();
       const composer = await page.locator('[data-part="composer-field"]').boundingBox();
       if (!box || !composer || box.y + box.height > composer.y + 1) throw new Error("listbox overlaps the composer field");
       await field(page).press("ArrowDown"); await field(page).press("ArrowUp"); await field(page).press("Tab");
       if (await field(page).inputValue() !== "/status ") throw new Error("tab did not accept the active option");
-      await field(page).fill("/st"); await listbox.waitFor();
+      await field(page).fill("/st"); await step(page, "retyping /st after tab acceptance reopens the list", () => listbox.waitFor());
       await option.click();
       await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
       const pointerValue = await field(page).inputValue();
       const pointerFocus = await field(page).evaluate((node) => node === document.activeElement);
       if (pointerValue !== "/status " || !pointerFocus) throw new Error(`pointer acceptance has value ${JSON.stringify(pointerValue)} and focus ${pointerFocus}`);
       await page.setViewportSize({ width: 390, height: 844 });
-      await field(page).fill("/"); await listbox.waitFor();
+      await field(page).fill("/"); await step(page, "typing / at 390px opens the list", () => listbox.waitFor());
       const mobile = await listbox.locator('[role="option"]').evaluateAll((nodes) => nodes.map((node) => {
         const row = node.getBoundingClientRect();
         const description = node.querySelector<HTMLElement>(".command-description")!;
@@ -433,7 +475,7 @@ try {
       }).sort((a, b) => Number(b.clipped) - Number(a.clipped))[0]);
       if (!mobile || mobile.height > 56 || !mobile.clipped || mobile.ellipsis !== "ellipsis" || !mobile.label?.includes(mobile.description)) throw new Error(`mobile command row is not one accessible row: ${JSON.stringify(mobile)}`);
       await page.setViewportSize({ width: 1440, height: 900 });
-      await field(page).fill("/st"); await listbox.waitFor();
+      await field(page).fill("/st"); await step(page, "typing /st at 1440px opens the list for the ime check", () => listbox.waitFor());
       const imeRequests = fake.requests.length;
       await field(page).evaluate((node) => node.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true })));
       await field(page).dispatchEvent("keydown", { key: "Enter", code: "Enter", isComposing: true });
@@ -465,9 +507,25 @@ try {
       });
       await field(page).press("Escape");
       await field(page).fill("");
+      const since = fake.requests.length;
+      await page.reload();
+      await waitRunCommands(page, since, "reload restores the stylesheets");
+      if (unsupported.maxHeight === "none" || unsupported.height > 6 * unsupported.row + 1) throw new Error(`without round() the command list grows unbounded: ${JSON.stringify(unsupported)}`);
+    });
+
+    await check("a command typed while the run attaches opens its list once the run attaches", async () => {
+      // Zeta's status reply is what attaches a reloaded run (run-state.ts STATUS); holding it opens the window a slow load hits.
+      fake.delayNext("status", 1_500);
+      const since = fake.requests.length;
       await page.reload();
       await waitReady(page);
-      if (unsupported.maxHeight === "none" || unsupported.height > 6 * unsupported.row + 1) throw new Error(`without round() the command list grows unbounded: ${JSON.stringify(unsupported)}`);
+      await field(page).fill("/st");
+      const status = () => fake.requests.slice(since).find((request) => request.method === "status");
+      if (status()?.replied !== undefined) throw new Error("the run attached before /st was typed, so this check missed the attach window");
+      await step(page, "the attach reply arrives", () => until(() => status()?.replied !== undefined, 10_000));
+      await step(page, "/st typed before the attach opens the list after it", () => page.getByRole("listbox", { name: "command suggestions" }).waitFor({ timeout: 10_000 }));
+      await field(page).press("Escape");
+      await field(page).fill("");
     });
 
     await check("one escape closes the menu after one-shot input; modified tab and enter never accept", async () => {
@@ -693,7 +751,7 @@ try {
     await field(page).waitFor();
     await check("active commands use server busy routing and keep opaque input local", async () => {
       await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 }).catch(async () => { throw new Error(`composer did not become idle; text: ${await page.locator("body").innerText()}`); });
-      await submit(page, "start a turn");
+      await submit(page, "hold until stopped");
       await page.getByPlaceholder("steer the running turn").waitFor({ timeout: 10_000 }).catch(() => { throw new Error(`turn did not start; requests: ${fake.requests.slice(-8).map((request) => request.method).join(",")}`); });
       const busyImage = join(gammaHome, "busy-plan.png");
       await writeFile(busyImage, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
@@ -732,10 +790,8 @@ try {
     await field(page).fill("");
 
     await check("an active turn offers only commands it can run", async () => {
-      const wordDelay = process.env.FAKE_ZETA_WORD_MS;
       try {
-        process.env.FAKE_ZETA_WORD_MS = "300";
-        await submit(page, "hold this turn");
+        await submit(page, "hold until stopped");
         await page.getByPlaceholder("steer the running turn").waitFor({ timeout: 10_000 });
         const listbox = page.getByRole("listbox", { name: "command suggestions" });
         // Zeta ee6a82d6 server/slash_commands.py:516-536 refuses skills and prompt macros while a turn runs; "/g" matches only the greet skill.
@@ -756,7 +812,6 @@ try {
         await listbox.waitFor({ timeout: 5_000 }).catch(() => { throw new Error("an idle run no longer offers the greet skill"); });
         await field(page).press("Escape");
       } finally {
-        if (wordDelay === undefined) delete process.env.FAKE_ZETA_WORD_MS; else process.env.FAKE_ZETA_WORD_MS = wordDelay;
         if (await page.getByRole("button", { name: "stop" }).count()) await page.getByRole("button", { name: "stop" }).click();
         for (let attempt = 0; attempt < 200 && fake.running; attempt++) await Bun.sleep(25);
         await field(page).fill("");
@@ -801,14 +856,16 @@ try {
 
     await check("missing model input feature blocks slash_run", async () => {
       fake.setModelInputIds(false);
-      await page.reload();
-      await waitReady(page);
-      const start = fake.requests.length;
-      await submit(page, "/review");
-      await page.getByText("not available in this server version", { exact: true }).waitFor();
-      if (fake.requests.slice(start).some((request) => request.method === "slash_run" || request.method === "send")) throw new Error("downgrade path reached slash_run or send");
-      if ((await field(page).inputValue()).trim() !== "/review") throw new Error("downgrade path lost its draft");
-      fake.setModelInputIds(true);
+      try {
+        const since = fake.requests.length;
+        await page.reload();
+        await waitRunCommands(page, since, "reload without model_input_ids");
+        const start = fake.requests.length;
+        await submit(page, "/review");
+        await step(page, "/review without model_input_ids shows the unavailable receipt", () => page.getByText("not available in this server version", { exact: true }).waitFor());
+        if (fake.requests.slice(start).some((request) => request.method === "slash_run" || request.method === "send")) throw new Error("downgrade path reached slash_run or send");
+        if ((await field(page).inputValue()).trim() !== "/review") throw new Error("downgrade path lost its draft");
+      } finally { fake.setModelInputIds(true); }
     });
 
     await check("approve always reaches zeta with persistence", async () => {
@@ -817,11 +874,12 @@ try {
       await page.getByText("approved", { exact: true }).waitFor({ timeout: 10_000 }).catch(async () => { throw new Error(`ordinary approval wording missing; body=${await page.locator("body").innerText()}`); });
       if (await page.getByText("always allowed for this session", { exact: true }).count()) throw new Error("ordinary approval used the session-wide wording");
       fake.setLive(true);
+      const since = fake.requests.length;
       await page.goto(`${origin}/?run=${ACTIVE}`);
-      await waitReady(page);
-      await page.getByRole("button", { name: "always allow", exact: true }).waitFor({ timeout: 15_000 });
+      await waitRunCommands(page, since, "open the live approval run");
+      await step(page, "the live approval shows always allow", () => page.getByRole("button", { name: "always allow", exact: true }).waitFor({ timeout: 15_000 }));
       await submit(page, "/always approval-1");
-      await page.getByText("approval · always allowed", { exact: false }).waitFor({ timeout: 10_000 });
+      await step(page, "/always approval-1 shows its receipt", () => page.getByText("approval · always allowed", { exact: false }).waitFor({ timeout: 10_000 }));
       await page.waitForFunction(() => document.querySelector('[data-part="approval-actions"]') === null, undefined, { timeout: 10_000 }).catch(() => {});
       await page.getByText("always allowed for this session", { exact: true }).waitFor({ timeout: 5_000 }).catch(async () => { throw new Error(`always-allowed decided wording missing; approval=${await page.locator(".gamma-approval").evaluateAll((nodes) => nodes.map((node) => node.outerHTML).join(" | "))}`); });
       const decision = fake.decisions.at(-1);
@@ -831,7 +889,7 @@ try {
     await check("new opens an immediate draft run", async () => {
       const before = page.url();
       await submit(page, "/new");
-      await page.waitForURL((url) => url.toString() !== before && url.searchParams.get("run")?.startsWith("draft:"), { timeout: 10_000 });
+      await step(page, "/new moves to a draft run url", () => page.waitForURL((url) => url.toString() !== before && url.searchParams.get("run")?.startsWith("draft:"), { timeout: 10_000 }));
       await page.getByPlaceholder("message zeta").waitFor();
     });
 

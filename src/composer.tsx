@@ -245,11 +245,12 @@ export function GammaComposer({ state, reason, blockedReason, vim: vimOn, comman
   const draft = useComposerDraft(vimOn, record.text, saveText);
   const attachments = useAttachments(draft.input, record.attachments, saveImages, removeImage);
   const pending = hasPendingDelivery(record);
-  const completions = useMemo(() => new CompletionModel(commands), [commands]);
+  // One model for the composer's life: a new command source re-asks about the typed token instead of dropping it.
+  const [completions] = useState(() => new CompletionModel(commands));
   const completion = useSyncExternalStore(completions.subscribe, completions.getSnapshot);
   const submission = useSubmission(state, Boolean(blockedReason), commands, onSubmit, onPreparationFailure, onStop, draft, attachments, store, runId, pending);
   useEffect(() => { if (autoFocus && (!document.activeElement || document.activeElement === document.body)) draft.input.current?.focus({ preventScroll: true }); }, [autoFocus]);
-  useEffect(() => { void commands.refreshCatalog().catch(() => {}); }, [commands]);
+  useEffect(() => { completions.setController(commands); void commands.refreshCatalog().catch(() => {}); }, [completions, commands]);
   useEffect(() => { onFileInput?.(attachments.files.current); return () => onFileInput?.(null); }, [attachments.files, onFileInput]);
   const stopRef = useCallback((button: HTMLButtonElement | null) => {
     if (!button) return;

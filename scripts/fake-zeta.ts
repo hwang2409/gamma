@@ -166,6 +166,11 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
       e("error", { error: { code: "provider_error", message: "the provider is overloaded (529)" } });
       return finish();
     }
+    // A turn that runs until the client stops it, so a check of the running state cannot race the scripted reply.
+    if (prompt.includes("hold until stopped")) {
+      while (!turn.aborted) await wait(25);
+      return;
+    }
     if (prompt.includes("use a tool")) {
       const call = { id: `chat-tool-${sent.length}`, name: "bash", arguments: { command: "sleep 2" } };
       e("tool_start", { tool_call: call, data: {} });
