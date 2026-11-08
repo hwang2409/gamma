@@ -43,6 +43,7 @@ try {
     const beforeEvent = reads();
     fake.changeSessionGrants(ACTIVE, ["bash"], "grant");
     await page.getByRole("button", { name: /permissions: 1 session grant/ }).waitFor();
+    await control.locator(".permissions-count").filter({ hasText: /^1$/ }).waitFor({ timeout: 5_000 }).catch(() => { throw new Error("one grant did not show the visible count badge 1"); });
     if (reads() !== beforeEvent) throw new Error("grant event triggered an unnecessary session_grants read");
     await control.click();
     const dialog = page.getByRole("dialog", { name: "session permissions" });
@@ -88,6 +89,17 @@ try {
     if ((await field.inputValue()).trim()) await field.press("Enter");
     await dialog.waitFor();
     await page.waitForFunction(() => document.activeElement?.matches(".permissions-popover h2"), undefined, { timeout: 5_000 }).catch(() => { throw new Error("typed /permissions did not focus the popover heading"); });
+
+    // a reconnect remounts the control; the earlier typed request must not reopen it or move focus
+    await page.getByRole("button", { name: "close permissions" }).click();
+    await field.click();
+    fake.drop();
+    await control.waitFor({ state: "detached", timeout: 15_000 });
+    await control.waitFor({ timeout: 15_000 });
+    await page.waitForTimeout(300);
+    if (await dialog.count()) throw new Error("reconnect reopened the permissions popover without a new request");
+    if (await page.evaluate(() => document.activeElement?.matches(".permissions-popover h2") ?? false)) throw new Error("reconnect moved focus to the permissions heading");
+    if (await field.evaluate((node) => document.activeElement !== node)) throw new Error(`reconnect moved focus away from the composer: ${await page.evaluate(() => document.activeElement?.outerHTML.slice(0, 120))}`);
 
     await page.goto(origin);
     await page.getByRole("button", { name: "new run" }).click();

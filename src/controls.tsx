@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
 import type { RunStateStore } from "./run-state";
 import type { DeliveryManager } from "./delivery";
 import { catalogModels, catalogProviders } from "./settings";
-import type { SessionGrantsModel } from "./session-grants";
+import type { SessionGrantsModel, SessionGrantsState } from "./session-grants";
 
 const CATALOG = "gamma-catalog";
 const MODEL = "gamma-model";
@@ -137,9 +137,31 @@ export function RunSettings({ available, deliveries, sessionId, createdWithDefau
 
 const RuleList = ({ label, rules }: { label: string; rules: readonly string[] }) => <div className="permission-rule"><dt>{label}</dt><dd>{rules.length ? rules.join(", ") : "none"}</dd></div>;
 
+type PermissionsPopoverProps = { state: SessionGrantsState; heading: RefObject<HTMLHeadingElement | null>; actionError?: string; confirmClear: boolean; onClose: () => void; onRevoke: (grant: string) => void; onClear: () => void };
+
+export function PermissionsPopover({ state, heading, actionError, confirmClear, onClose, onRevoke, onClear }: PermissionsPopoverProps) {
+  const snapshot = state.snapshot;
+  const grants = snapshot?.session_grants ?? [];
+  return <section className="permissions-popover" role="dialog" aria-label="session permissions">
+    <header><div><h2 ref={heading} tabIndex={-1}>session permissions</h2><p>what this agent may run without asking</p></div><button type="button" className="ghost permissions-close" aria-label="close permissions" onClick={onClose}>close</button></header>
+    {state.status === "loading" && !snapshot ? <p className="permissions-status" role="status">loading permissions…</p> : null}
+    {state.error || actionError ? <p className="permissions-error" role="alert">{actionError ?? state.error}</p> : null}
+    {snapshot ? <>
+      <div className="permission-grants">
+        <div className="permissions-section-heading"><h3>session grants</h3>{state.readOnly ? <span>read-only observer</span> : null}</div>
+        {grants.length ? <ul>{grants.map((grant) => <li className="permission-grant" key={grant}><code>{grant}</code>{state.readOnly ? null : <button type="button" className="ghost" onClick={() => onRevoke(grant)}>revoke</button>}</li>)}</ul> : <p className="permissions-empty">no removable session grants</p>}
+        <p className="permissions-note">revoking affects future calls only; pending and already allowed calls are unchanged; other allow rules can still permit a call</p>
+        {!state.readOnly && grants.length >= 2 ? <button type="button" className={confirmClear ? "permissions-clear confirm" : "permissions-clear"} onClick={onClear}>{confirmClear ? "confirm clear" : "clear all"}</button> : null}
+      </div>
+      <div className="effective-rules"><h3>effective rules</h3><dl><RuleList label="default" rules={[snapshot.default]} /><RuleList label="precedence" rules={snapshot.precedence} /><RuleList label="deny" rules={snapshot.rules.deny} /><RuleList label="ask" rules={snapshot.rules.ask} /><RuleList label="allow" rules={snapshot.rules.allow} /></dl></div>
+    </> : null}
+  </section>;
+}
+
 export function PermissionsControl({ model, openRequest }: { model: SessionGrantsModel; openRequest: number }) {
   const state = useSyncExternalStore(model.subscribe, () => model.state, () => model.state);
-  const [open, setOpen] = useState(openRequest > 0);
+  // only a new request opens; a remount (reconnect, dock branch flip) must not reopen or move focus
+  const [open, setOpen] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [actionError, setActionError] = useState<string>();
   const root = useRef<HTMLDivElement>(null);
@@ -184,20 +206,7 @@ export function PermissionsControl({ model, openRequest }: { model: SessionGrant
     <button ref={button} type="button" className="composer-tool permissions-trigger" aria-haspopup="dialog" aria-expanded={open} aria-label={`permissions${grants.length ? `: ${grants.length} session grant${grants.length === 1 ? "" : "s"}` : ""}`} onClick={() => open ? close() : show()}>
       permissions{grants.length ? <span className="permissions-count" aria-hidden="true">{grants.length}</span> : null}
     </button>
-    {open ? <section className="permissions-popover" role="dialog" aria-label="session permissions">
-      <header><div><h2 ref={heading} tabIndex={-1}>session permissions</h2><p>what this agent may run without asking</p></div><button type="button" className="ghost permissions-close" aria-label="close permissions" onClick={close}>close</button></header>
-      {state.status === "loading" && !snapshot ? <p className="permissions-status" role="status">loading permissions…</p> : null}
-      {state.error || actionError ? <p className="permissions-error" role="alert">{actionError ?? state.error}</p> : null}
-      {snapshot ? <>
-        <div className="permission-grants">
-          <div className="permissions-section-heading"><h3>session grants</h3>{state.readOnly ? <span>read-only observer</span> : null}</div>
-          {grants.length ? <ul>{grants.map((grant) => <li className="permission-grant" key={grant}><code>{grant}</code>{state.readOnly ? null : <button type="button" className="ghost" onClick={() => void revoke(grant)}>revoke</button>}</li>)}</ul> : <p className="permissions-empty">no removable session grants</p>}
-          <p className="permissions-note">revoking affects future calls only; pending and already allowed calls are unchanged; other allow rules can still permit a call</p>
-          {!state.readOnly && grants.length >= 2 ? <button type="button" className={confirmClear ? "permissions-clear confirm" : "permissions-clear"} onClick={() => void clear()}>{confirmClear ? "confirm clear" : "clear all"}</button> : null}
-        </div>
-        <div className="effective-rules"><h3>effective rules</h3><dl><RuleList label="default" rules={[snapshot.default]} /><RuleList label="precedence" rules={snapshot.precedence} /><RuleList label="deny" rules={snapshot.rules.deny} /><RuleList label="ask" rules={snapshot.rules.ask} /><RuleList label="allow" rules={snapshot.rules.allow} /></dl></div>
-      </> : null}
-    </section> : null}
+    {open ? <PermissionsPopover state={state} heading={heading} actionError={actionError} confirmClear={confirmClear} onClose={close} onRevoke={(grant) => void revoke(grant)} onClear={() => void clear()} /> : null}
   </div>;
 }
 

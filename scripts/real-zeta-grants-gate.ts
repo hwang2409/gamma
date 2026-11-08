@@ -114,8 +114,8 @@ try {
   await permissionsControl.waitFor({ timeout: 10_000 });
   await permissionsControl.click();
   await page.getByRole("dialog", { name: "session permissions" }).getByRole("code").filter({ hasText: "bash" }).waitFor();
-  const grantEvents = frames.slice(grantProofStart).filter((frame) => frame.includes('"event":"session_grants_changed"') && frame.includes('"change":"grant"'));
-  if (grantEvents.length !== 1) throw new Error(`always-allow plus cancel emitted ${grantEvents.length} grant-change events: ${grantEvents.join("\n")}`);
+  const grantEvents = frames.slice(grantProofStart).filter((frame) => frame.includes('"event":"session_grants_changed"'));
+  if (grantEvents.length !== 1 || !grantEvents[0]!.includes('"change":"grant"')) throw new Error(`always-allow plus cancel must emit exactly one session_grants_changed (change:"grant"); got ${grantEvents.length}: ${grantEvents.join("\n")}`);
 
   const grantReads = frames.slice(grantProofStart).filter((frame) => frame.includes('"method":"session_grants"'));
   if (!grantReads.length) throw new Error("permissions control listed bash without an observed session_grants read");
