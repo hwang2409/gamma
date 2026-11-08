@@ -19,6 +19,8 @@ const shots = process.env.WEB_SHOTS ?? join(root, "gate-artifacts", "commands");
 await mkdir(shots, { recursive: true });
 const gammaHome = await mkdtemp(join(tmpdir(), "gamma-command-gate-"));
 const fake = await startFakeZeta({ origins: [origin], live: false });
+// Turns run until the gate stops them: a check about a running turn must not race the fake's scripted reply.
+fake.setHoldTurns(true);
 const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: root, env: { ...process.env, ZETA_HOME: fake.home, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin, VITE_ZETA_PORT: String(fake.port) }, stdio: ["ignore", "pipe", "pipe"] });
 const failures: string[] = [];
 const errors: string[] = [];
@@ -54,6 +56,15 @@ const step = async <T,>(page: Page, label: string, run: () => Promise<T>): Promi
   catch (error) { throw new Error(`${label}: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}; saw ${await seen(page)}`); }
 };
 const waitReady = (page: Page) => page.locator('.dock form[data-part="composer"]').waitFor({ timeout: 15_000 });
+/** Stops the fake's held turn with the stop button and waits until zeta and the composer are idle again. */
+const stopTurn = async (page: Page) => {
+  if (!fake.running) return;
+  await step(page, "stop the held turn", async () => {
+    await page.getByRole("button", { name: "stop" }).click({ timeout: 10_000 });
+    await until(() => !fake.running, 10_000);
+    await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
+  });
+};
 const until = async (condition: () => boolean, timeout: number) => {
   for (const end = Date.now() + timeout; !condition(); await Bun.sleep(25)) if (Date.now() > end) throw new Error(`timed out after ${timeout}ms`);
 };
@@ -270,7 +281,7 @@ try {
       for (let attempt = 0; attempt < 100 && !fake.requests.slice(direct).some((request) => request.method === "send"); attempt++) await Bun.sleep(50);
       const calls = fake.requests.slice(direct);
       if (calls.filter((request) => request.method === "new_session").length !== 1 || calls.filter((request) => request.method === "send" && request.params.text === "/status").length !== 1 || calls.some((request) => request.method === "slash_run")) throw new Error(`wrong escaped slash flow: ${calls.map((call) => call.method).join(",")}`);
-      if (await page.getByRole("button", { name: "stop" }).count()) await page.getByRole("button", { name: "stop" }).click();
+      await stopTurn(page);
     });
     await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
     await page.waitForTimeout(300);
@@ -423,8 +434,7 @@ try {
       const calls = fake.requests.slice(before);
       const sent = calls.find((request) => request.method === "send");
       const refreshed = calls.some((request) => request.method === "session_settings");
-      if (await page.getByRole("button", { name: "stop" }).count()) await page.getByRole("button", { name: "stop" }).click();
-      for (let attempt = 0; attempt < 200 && fake.running; attempt++) await Bun.sleep(25);
+      await stopTurn(page);
       await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
       if (typeof sent?.params.input_id !== "string" || "text" in (sent?.params ?? {})) throw new Error(`plan prompt was not opaque: ${JSON.stringify(calls)}`);
       if (!refreshed) throw new Error("plan prompt model-input identity did not refresh settings before delivery");
@@ -445,8 +455,7 @@ try {
       if (!implementation.some((request) => request.method === "send" && typeof request.params.input_id === "string") || implementation.some((request) => request.method === "send" && "text" in request.params)) throw new Error("/implement was not opaque");
       if (planWasOn && await page.locator(".plan-chip").count()) throw new Error("/implement model-input identity did not refresh the plan indicator off");
       if (requests("session_settings").length !== implementSettings + 1) throw new Error("/implement model-input identity did not refresh settings exactly once");
-      if (await page.getByRole("button", { name: "stop" }).count()) await page.getByRole("button", { name: "stop" }).click();
-      for (let attempt = 0; attempt < 200 && fake.running; attempt++) await Bun.sleep(25);
+      await stopTurn(page);
       await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
     });
 
@@ -671,7 +680,7 @@ try {
       await page.getByRole("button", { name: "stop" }).waitFor({ timeout: 15_000 });
     });
 
-    if (await page.getByRole("button", { name: "stop" }).count()) await page.getByRole("button", { name: "stop" }).click();
+    await stopTurn(page);
     await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
     await page.waitForTimeout(300);
     await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
@@ -690,7 +699,7 @@ try {
       if (await page.locator('[data-part="attachment"]').count() !== 1) throw new Error("opaque input cleared its attachment");
       await page.getByRole("button", { name: "stop" }).waitFor({ timeout: 10_000 }).catch(() => { throw new Error("opaque attachment turn did not stay active"); });
     });
-    if (await page.getByRole("button", { name: "stop" }).count()) await page.getByRole("button", { name: "stop" }).click();
+    await stopTurn(page);
     await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
     await page.getByLabel("remove opaque.png").click();
 
@@ -702,7 +711,7 @@ try {
       if (calls.filter((request) => request.method === "send" && request.params.text === "$review").length !== 1 || calls.some((request) => request.method === "slash_run" || request.method === "input_prepare")) throw new Error(`dollar text took command preparation: ${calls.map((call) => call.method).join(",")}`);
       await page.getByRole("button", { name: "stop" }).waitFor();
     });
-    await page.getByRole("button", { name: "stop" }).click();
+    await stopTurn(page);
     await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
 
     await check("retry after a failed opaque turn restores the command instead of sending its text", async () => {
@@ -751,7 +760,7 @@ try {
     await field(page).waitFor();
     await check("active commands use server busy routing and keep opaque input local", async () => {
       await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 }).catch(async () => { throw new Error(`composer did not become idle; text: ${await page.locator("body").innerText()}`); });
-      await submit(page, "hold until stopped");
+      await submit(page, "start a turn");
       await page.getByPlaceholder("steer the running turn").waitFor({ timeout: 10_000 }).catch(() => { throw new Error(`turn did not start; requests: ${fake.requests.slice(-8).map((request) => request.method).join(",")}`); });
       const busyImage = join(gammaHome, "busy-plan.png");
       await writeFile(busyImage, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
@@ -783,15 +792,14 @@ try {
       if ((await field(page).inputValue()).trim() !== "/review") throw new Error("active opaque command lost its draft");
     });
 
-    if (await page.getByRole("button", { name: "stop" }).count()) await page.getByRole("button", { name: "stop" }).click();
-    for (let attempt = 0; attempt < 200 && fake.running; attempt++) await Bun.sleep(25);
+    await stopTurn(page);
     await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
     if (await page.getByLabel("remove busy-plan.png").count()) await page.getByLabel("remove busy-plan.png").click();
     await field(page).fill("");
 
     await check("an active turn offers only commands it can run", async () => {
       try {
-        await submit(page, "hold until stopped");
+        await submit(page, "hold this turn");
         await page.getByPlaceholder("steer the running turn").waitFor({ timeout: 10_000 });
         const listbox = page.getByRole("listbox", { name: "command suggestions" });
         // Zeta ee6a82d6 server/slash_commands.py:516-536 refuses skills and prompt macros while a turn runs; "/g" matches only the greet skill.
@@ -812,8 +820,7 @@ try {
         await listbox.waitFor({ timeout: 5_000 }).catch(() => { throw new Error("an idle run no longer offers the greet skill"); });
         await field(page).press("Escape");
       } finally {
-        if (await page.getByRole("button", { name: "stop" }).count()) await page.getByRole("button", { name: "stop" }).click();
-        for (let attempt = 0; attempt < 200 && fake.running; attempt++) await Bun.sleep(25);
+        await stopTurn(page);
         await field(page).fill("");
       }
     });
@@ -825,7 +832,7 @@ try {
       for (let attempt = 0; attempt < 200 && fake.running; attempt++) await Bun.sleep(25);
       await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
       const stopped = await page.locator('[data-part="timeline"] [data-kind="stopped"]').count();
-      await submit(page, "hold until stopped");
+      await submit(page, "then stop this turn");
       await page.getByRole("button", { name: "stop" }).click({ timeout: 10_000 });
       for (let attempt = 0; attempt < 200 && await page.locator('[data-part="timeline"] [data-kind="stopped"]').count() === stopped; attempt++) await Bun.sleep(25);
       await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
