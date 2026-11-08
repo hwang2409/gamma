@@ -34,12 +34,14 @@ open http://localhost:5190.
 
 run `/keys` in gamma for the same browser key table used by the composer hint. help is grouped into composer, menus, vim normal mode, browser actions, and exclusions. browser and assistive-technology conventions take precedence over terminal shortcuts.
 
+<!-- keyboard-help:start -->
 | action | gamma behavior |
 | --- | --- |
-| `/keys` | shows the complete keyboard help |
-| `/paste` | opens the browser file picker; paste and drop also attach images |
-| `/restart` | terminal-only and not available in gamma |
-| `!shell` | raw terminal shell mode is not available in gamma |
-| `$EDITOR` | terminal editor integration is not available in gamma |
+| `/keys` | show this keyboard help |
+| `/paste` | open the browser file picker |
+| `/restart` | terminal-only; not a gamma action |
+| `!shell` | terminal-only; raw shell mode is not a gamma action |
+| `$EDITOR` | terminal-only; editor integration is not a gamma action |
+<!-- keyboard-help:end -->
 
 vim help lists only the supported subset. it is declared in `src/keys.ts` and checked against the transitions in `src/vim.ts`.

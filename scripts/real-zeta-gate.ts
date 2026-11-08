@@ -10,14 +10,15 @@ import { assertPrivateProofHome } from "./proof-home";
 // This checkout, from the script location, so the gate runs from any gamma worktree or main.
 const gamma = new URL("..", import.meta.url).pathname;
 const zeta = "/Users/henry/me/fun/zeta";
-const requiredWorktree = `${zeta}/.worktrees/parity-g3-proof`;
 const worktree = process.env.ZETA_PROOF_WORKTREE;
 const ref = process.env.ZETA_PROOF_REF;
 const portText = process.env.WEB_REAL_ZETA_GATE_PORT ?? "4196";
-if (worktree !== requiredWorktree) throw new Error(`ZETA_PROOF_WORKTREE must be ${requiredWorktree}`);
 if (!ref || !/^[0-9a-f]{40}$/.test(ref)) throw new Error("ZETA_PROOF_REF must be an exact 40-character sha");
 const planProof = ref === "3e1f48a39cc5a08e4814b91d0ecaa44dba17e489";
-if (!planProof && ref !== "37622b5eb6716526fb315e766ca33c915ac5ce92") throw new Error("ZETA_PROOF_REF must be the pinned #899 or #900 merge sha");
+const keysProof = ref === "8389c6e90af7fa6c26f1fa1c8eab2470244b27a5";
+const requiredWorktree = `${zeta}/.worktrees/${keysProof ? "parity-g5k-proof" : "parity-g3-proof"}`;
+if (worktree !== requiredWorktree) throw new Error(`ZETA_PROOF_WORKTREE must be ${requiredWorktree}`);
+if (!planProof && !keysProof && ref !== "37622b5eb6716526fb315e766ca33c915ac5ce92") throw new Error("ZETA_PROOF_REF must be a pinned parity proof sha");
 if (!/^\d+$/.test(portText)) throw new Error("WEB_REAL_ZETA_GATE_PORT must be an integer");
 const appPort = Number(portText);
 if (appPort < 1 || appPort > 65_535 || appPort === 5190 || appPort === 8765) throw new Error("WEB_REAL_ZETA_GATE_PORT is outside the allowed disposable range");
