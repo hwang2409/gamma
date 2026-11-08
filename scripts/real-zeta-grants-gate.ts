@@ -98,6 +98,8 @@ try {
   await page.getByRole("button", { name: "send message", exact: true }).click();
   const always = page.getByRole("button", { name: "always allow" });
   await always.waitFor({ timeout: 30_000 }).catch(async () => { throw new Error(`first approval missing; body=${(await page.locator("body").innerText()).slice(-4000)}; frames=${frames.slice(-40).join("\n")}; zeta=${(logs.get(server) ?? []).join("").slice(-4000)}`); });
+  // window starts at always-allow: the send's resume emits a reset before the first approval (zeta 473784f server.py:664,717)
+  const cancelWindowStart = frames.length;
   await always.click();
 
   for (let attempt = 0; attempt < 300; attempt++) {
@@ -114,7 +116,7 @@ try {
   await permissionsControl.waitFor({ timeout: 10_000 });
   await permissionsControl.click();
   await page.getByRole("dialog", { name: "session permissions" }).getByRole("code").filter({ hasText: "bash" }).waitFor();
-  const grantEvents = frames.slice(grantProofStart).filter((frame) => frame.includes('"event":"session_grants_changed"'));
+  const grantEvents = frames.slice(cancelWindowStart).filter((frame) => frame.includes('"event":"session_grants_changed"'));
   if (grantEvents.length !== 1 || !grantEvents[0]!.includes('"change":"grant"')) throw new Error(`always-allow plus cancel must emit exactly one session_grants_changed (change:"grant"); got ${grantEvents.length}: ${grantEvents.join("\n")}`);
 
   const grantReads = frames.slice(grantProofStart).filter((frame) => frame.includes('"method":"session_grants"'));
