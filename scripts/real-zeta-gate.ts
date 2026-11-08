@@ -136,21 +136,6 @@ try {
   if (!frames.some((frame) => frame.includes('"name":"review"'))) throw new Error("slash_list omitted the private review skill");
 
   if (planProof) {
-  await navigateRun(discovery.pending_session);
-  await page.getByText("pending proof", { exact: true }).waitFor({ timeout: 20_000 });
-  const pendingBefore = frames.length;
-  await submit("/plan");
-  try {
-    await page.getByText("commands wait for pending work to finish: tools, approvals, or background agents", { exact: true }).waitFor({ timeout: 10_000 });
-  } catch (error) {
-    throw new Error(`pending command refusal missing; value=${JSON.stringify(await field.inputValue())}; body=${JSON.stringify((await page.locator("body").innerText()).slice(0, 2000))}; frames=${frames.slice(pendingBefore).join("\n").slice(-3000)}; cause=${String(error)}`);
-  }
-  if ((await field.inputValue()).trim() !== "/plan") throw new Error("real pending-work refusal lost the plan draft");
-  const pendingFrames = frames.slice(pendingBefore).map((frame) => { try { return JSON.parse(frame); } catch { return null; } });
-  if (!pendingFrames.some((frame) => frame?.method === "slash_run") || pendingFrames.some((frame) => frame?.method === "session_settings")) throw new Error(`pending-work plan used the wrong route: ${JSON.stringify(pendingFrames)}`);
-
-  await navigateRun(created.session.session_id);
-  await page.getByText("real zeta proof", { exact: true }).waitFor({ timeout: 20_000 });
   for (const [command, output, chip] of [["/plan", "plan mode: on", true], ["/plan off", "plan mode: off", false], ["/plan on", "plan mode: on", true], ["/plan toggle", "plan mode: off", false]] as const) {
     const settingsBefore = frames.filter((frame) => frame.includes('"method":"session_settings"')).length;
     await submit(command);
@@ -209,6 +194,21 @@ try {
   await approval.waitFor({ state: "detached", timeout: 20_000 });
   const approvals = frames.map((frame) => { try { return JSON.parse(frame); } catch { return null; } }).filter((frame) => frame?.method === "approve");
   if (approvals.length !== 1 || approvals[0].params?.scope !== "always_tool") throw new Error(`wrong approval scope: ${JSON.stringify(approvals)}`);
+  if (planProof) {
+    await page.getByPlaceholder("message zeta").waitFor({ timeout: 20_000 });
+    await navigateRun(discovery.pending_session);
+    await page.getByText("pending proof", { exact: true }).waitFor({ timeout: 20_000 });
+    const pendingBefore = frames.length;
+    await submit("/plan");
+    try {
+      await page.getByText("commands wait for pending work to finish: tools, approvals, or background agents", { exact: true }).waitFor({ timeout: 10_000 });
+    } catch (error) {
+      throw new Error(`pending command refusal missing; value=${JSON.stringify(await field.inputValue())}; body=${JSON.stringify((await page.locator("body").innerText()).slice(0, 2000))}; frames=${frames.slice(pendingBefore).join("\n").slice(-3000)}; cause=${String(error)}`);
+    }
+    if ((await field.inputValue()).trim() !== "/plan") throw new Error("real pending-work refusal lost the plan draft");
+    const pendingFrames = frames.slice(pendingBefore).map((frame) => { try { return JSON.parse(frame); } catch { return null; } });
+    if (!pendingFrames.some((frame) => frame?.method === "slash_run") || pendingFrames.some((frame) => frame?.method === "session_settings")) throw new Error(`pending-work plan used the wrong route: ${JSON.stringify(pendingFrames)}`);
+  }
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
   console.log(`real zeta gate passed: ${ref}; private home ${zetaHome}; model_input_ids, slash_list, /status, opaque send, hidden-text, approval always_tool${planProof ? ", plan idle/active/pending" : ""}`);
 } finally {
