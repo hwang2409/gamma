@@ -75,7 +75,7 @@ def make_server() -> tuple[ZetaServer, Path, str]:
         ZetaServer(
             home=home,
             cwd=cwd,
-            ws_port=0,
+            ws_port=int(os.environ.get("ZETA_PROOF_WS_PORT", "0")),
             ws_origins=(os.environ["ZETA_PROOF_ORIGIN"],),
             provider="codex",
             auto_memory=False,

@@ -141,8 +141,8 @@ export function createCommandController(
 
   async function prepareComposerInput(text: string): Promise<ComposerAction> {
     if (!isSlashCommandText(text)) return directSend(text);
-    if (!capabilities.requests.has("slash_run")) return unavailableReceipt();
     const normalized = text.trimStart();
+    if (!capabilities.requests.has("slash_run")) return localAction(normalized) ?? unavailableReceipt();
     return slashAction(await runSlashCommand(client, sessionId, normalized), normalized);
   }
 
@@ -163,8 +163,10 @@ export function createCommandController(
         return typeof result.input_id === "string"
           ? { kind: "send-input", inputId: result.input_id, displayText: result.display_text, command }
           : unavailableReceipt();
+      case "unavailable":
+        return localAction(text) ?? unavailableReceipt();
       default:
-        return mapUnavailableSlashResult(result) ?? invalidResponseReceipt();
+        return invalidResponseReceipt();
     }
   }
 
@@ -185,13 +187,18 @@ export function createUnavailableCommandController(message = "not available in t
   return {
     async prepareComposerInput(text) {
       if (detached && /^\/permissions(?:\s|$)/.test(text.trim())) return { kind: "receipt", text: "open this run before changing permissions", tone: "error", retain: true };
-      const local = detached && isSlashCommandText(text) ? CLIENT_ACTIONS[commandName(text.trimStart())] : undefined;
-      if (local && isLocalAction(local)) return { kind: "client-action", name: local, args: commandArgs(text.trimStart()) };
-      return isSlashCommandText(text) ? { kind: "receipt", text: message, tone: "error", retain: true } : directSend(text);
+      if (!isSlashCommandText(text)) return directSend(text);
+      return localAction(text.trimStart()) ?? { kind: "receipt", text: message, tone: "error", retain: true };
     },
     async completions() { return []; },
     async refreshCatalog() {},
   };
+}
+
+/** Gamma's own actions, which need no zeta session, feature, or connection. */
+function localAction(text: string): ComposerAction | undefined {
+  const name = CLIENT_ACTIONS[commandName(text)];
+  return name && isLocalAction(name) ? { kind: "client-action", name, args: commandArgs(text) } : undefined;
 }
 
 function commandLine(text: string): string {
@@ -206,10 +213,6 @@ function commandArgs(text: string): string {
   const line = commandLine(text);
   const separator = line.search(/\s/);
   return separator < 0 ? "" : line.slice(separator).trimStart();
-}
-
-export function mapUnavailableSlashResult(result: { kind?: unknown }): ComposerAction | undefined {
-  return result.kind === "unavailable" ? unavailableReceipt() : undefined;
 }
 
 function unavailableReceipt(): ComposerAction {
