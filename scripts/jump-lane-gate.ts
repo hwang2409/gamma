@@ -37,8 +37,6 @@ try {
       const element = document.querySelector<HTMLElement>(".scroll");
       return element && element.scrollHeight > element.clientHeight * 2;
     });
-    const transcriptBefore = await scroll.boundingBox();
-    if (!transcriptBefore) throw new Error(`${width}: missing transcript bounds`);
     const composer = page.locator('.dock [data-part="composer"]');
     await scroll.evaluate((element) => { element.scrollTop = 0; });
     await composer.locator("textarea").fill(`use a tool; follow accepted send at ${width}`);
@@ -59,8 +57,11 @@ try {
       const element = document.querySelector<HTMLElement>(".scroll");
       return element && element.scrollTop < element.scrollHeight - element.clientHeight - 100;
     });
+    const transcriptBefore = await scroll.boundingBox();
+    if (!transcriptBefore) throw new Error(`${width}: missing transcript bounds`);
     const rowBefore = await page.locator('[data-part="timeline"] [data-id]').first().evaluate((element) => ({ id: element.getAttribute("data-id"), top: element.getBoundingClientRect().top }));
     if (!rowBefore) throw new Error(`${width}: missing comparison row`);
+    // The only change between the two samples is the control's visibility.
     const jump = page.getByRole("button", { name: /jump to latest/i });
     await jump.waitFor({ timeout: 15_000 });
     const [transcriptAfter, control] = await Promise.all([scroll.boundingBox(), jump.boundingBox()]);
