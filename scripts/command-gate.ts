@@ -201,11 +201,12 @@ const measureReceipt = (page: Page) => page.locator(".command-receipt").evaluate
   const range = document.createRange();
   range.selectNodeContents(text);
   const line = range.getClientRects()[0]!;
+  const lines = Math.round(text.scrollHeight / parseFloat(getComputedStyle(text).lineHeight));
   const button = node.querySelector('[aria-label="dismiss command result"]')!.getBoundingClientRect();
   const box = node.getBoundingClientRect();
-  return { lineCenter: line.top + line.height / 2, buttonCenter: button.top + button.height / 2, buttonTop: button.top - box.top, padding: parseFloat(getComputedStyle(node).paddingTop) + node.clientTop, scrolls: text.scrollHeight > text.clientHeight + 1 };
+  return { lines, lineCenter: line.top + line.height / 2, buttonCenter: button.top + button.height / 2, buttonTop: button.top - box.top, textTop: text.getBoundingClientRect().top - box.top, padding: parseFloat(getComputedStyle(node).paddingTop) + node.clientTop, scrolls: text.scrollHeight > text.clientHeight + 1 };
 });
-/** A one-line receipt reads on the dismiss button's center line; a long one keeps the button at the top and scrolls. */
+/** A one-line receipt reads on the dismiss button's center line; a longer one starts at the top, and a long one scrolls. */
 async function receiptAlignment(page: Page, name: string) {
   const dismiss = () => page.locator(".command-receipt").getByRole("button", { name: "dismiss command result" }).click({ timeout: 5_000 });
   for (const width of [1440, 390]) {
@@ -215,12 +216,15 @@ async function receiptAlignment(page: Page, name: string) {
     const one = await measureReceipt(page);
     await page.screenshot({ path: join(shots, `${name}-receipt-one-line-${width}.png`), clip: await page.locator(".command-receipt").boundingBox() ?? undefined });
     await dismiss();
-    if (Math.abs(one.lineCenter - one.buttonCenter) > 2) throw new Error(`${name} ${width}: one-line receipt text sits ${(one.buttonCenter - one.lineCenter).toFixed(1)} px off the dismiss button's center: ${JSON.stringify(one)}`);
+    // At 1440 /restart fits one line; at 390 it wraps to two, which start within a few px of the top, beside the button.
+    if (width === 1440 && one.lines !== 1) throw new Error(`${name} ${width}: /restart no longer fits one line, so this check lost its case: ${JSON.stringify(one)}`);
+    if (one.lines === 1 && Math.abs(one.lineCenter - one.buttonCenter) > 2) throw new Error(`${name} ${width}: one-line receipt text sits ${(one.buttonCenter - one.lineCenter).toFixed(1)} px off the dismiss button's center: ${JSON.stringify(one)}`);
+    if (one.lines > 1 && one.textTop > one.padding + 4) throw new Error(`${name} ${width}: a two-line receipt must start at the top: ${JSON.stringify(one)}`);
     await submit(page, "/keys");
     await step(page, `${name} ${width} /keys shows its long receipt`, () => page.locator(".command-receipt-text", { hasText: "enter" }).waitFor({ timeout: 5_000 }));
     const long = await measureReceipt(page);
     await dismiss();
-    if (!long.scrolls || long.buttonTop > long.padding + 1) throw new Error(`${name} ${width}: a long receipt must scroll with its dismiss button at the top: ${JSON.stringify(long)}`);
+    if (!long.scrolls || long.buttonTop > long.padding + 1 || long.textTop > long.padding + 1) throw new Error(`${name} ${width}: a long receipt must scroll with its dismiss button at the top: ${JSON.stringify(long)}`);
   }
   await page.setViewportSize({ width: 1440, height: 900 });
   await field(page).fill("");

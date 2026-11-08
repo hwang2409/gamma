@@ -171,11 +171,10 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .turn-retry { min-height: 30px; padding: 0 10px; font-size: 12px; }
 
 /* Command results are run-local and stay separate from the transcript. */
-/* The label and the text start half a control below the top, minus half a line, so the first line sits on the dismiss
-   button's center line. The text's padding is inside its max-height, so a long receipt is no taller and still scrolls. */
 .command-receipt { --receipt-control: 40px; display: flex; align-items: flex-start; gap: 12px; margin-bottom: 6px; padding: 8px 10px; border: 1px solid var(--fulcrum-border); border-left: var(--rail) solid var(--fulcrum-muted); background: var(--fulcrum-bg); font-size: 12px; }
 .command-receipt[data-tone="error"] { border-left-color: var(--fulcrum-danger); color: var(--fulcrum-danger); }
-.command-receipt-label, .command-receipt-text { padding-top: calc((var(--receipt-control) - 1lh) / 2); }
+/* Centered against the buttons while it is shorter than them (one line); a taller body fills the row, so it starts at the top. */
+.command-receipt-body { display: flex; flex: 1; align-self: center; gap: 12px; min-width: 0; }
 .command-receipt-label { flex: none; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
 .command-receipt-text { flex: 1; min-width: 0; max-height: min(10dvh, 80px); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* The global ring is drawn 2 px inside; on the receipt text it would cover the first glyph column. */
