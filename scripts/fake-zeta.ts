@@ -312,6 +312,13 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   let rejectCreate = false;
   let delayedOpen = false;
   let catalogBusy = false;
+  // Old or future servers for the compatibility gate. Zeta 8389c6e docs/serve-protocol.md:127-133: a 1.0 hello
+  // returns only the legacy requests and no features key; docs/serve-protocol.md:1501-1504: a missing request is -32601.
+  let protocolVersion: "1.0" | "1.2" = "1.2";
+  let omittedRequests = new Set<string>();
+  let extraRequests: string[] = [];
+  let extraHelloFields: Json = {};
+  const resultOverrides = new Map<string, (params: Json) => unknown>();
   let settingsEnabled = true;
   let advertiseNewSessionSettings = newSessionSettings;
   type Settings = { model: string; approval_mode: "ask" | "allow" | "deny"; plan_mode: boolean };
@@ -450,11 +457,13 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           if (mode === "slow") await wait(helloDelay);
           if (!sockets.has(socket)) return;
           if (socket.data.role === "controller") controller = socket;
-          const features = (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (name === "model_input_ids" && modelInputIds) || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings) || (name === "session_grants" && sessionGrants)) ?? [];
+          const features = protocolVersion === "1.0" ? [] : (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (name === "model_input_ids" && modelInputIds) || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings) || (name === "session_grants" && sessionGrants)) ?? [];
           socket.data.features = features;
           const reconnect = features.includes("approval_reconnect");
           if (reconnect) reconnectControllers.add(socket as object);
-          reply({ result: { protocol_version: "1.2", server: "fake-zeta", capabilities: { features, requests: ["status", "approve", "deny", "rename_session", "session_tree", "switch_branch", "slash_list", "slash_run", ...(sessionGrants ? ["session_grants", "revoke_session_grants"] : []), ...(settingsEnabled ? ["model_catalog", "session_settings", "set_settings", "send_images", ...(advertiseNewSessionSettings ? ["new_session_settings"] : [])] : [])] } } });
+          const advertised = protocolVersion === "1.0" ? ["list_sessions", "new_session", "resume", "send", "steer", "approve", "deny", "abort", "status"] : ["status", "approve", "deny", "rename_session", "session_tree", "switch_branch", "slash_list", "slash_run", ...(sessionGrants ? ["session_grants", "revoke_session_grants"] : []), ...(settingsEnabled ? ["model_catalog", "session_settings", "set_settings", "send_images", ...(advertiseNewSessionSettings ? ["new_session_settings"] : [])] : []), ...extraRequests];
+          const offered = advertised.filter((name) => !omittedRequests.has(name));
+          reply({ result: { ...extraHelloFields, protocol_version: protocolVersion, server: "fake-zeta", capabilities: protocolVersion === "1.0" ? { requests: offered, notifications: ["event"] } : { features, requests: offered } } });
           if (decide && !approvalAborted) {
             if (!reconnect) expireApproval();
             else {
@@ -465,6 +474,9 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           }
           return;
         }
+        if (omittedRequests.has(method)) return reply({ error: { code: -32601, message: `method not found: ${method}` } });
+        const override = resultOverrides.get(method);
+        if (override) return reply({ result: override(params) });
         if (method === "new_session") {
           // Zeta 5feea2fc src/zeta/server/server.py:561-593 creates and activates this metadata;
           // src/zeta/server/control.py:160-180 makes a reserved or running turn return -32004 first.
@@ -689,6 +701,12 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     setMode(next: Mode) { mode = next; },
     setSettingsEnabled(value: boolean) { settingsEnabled = value; },
     setModelInputIds(value: boolean) { modelInputIds = value; },
+    /** The server generation the next hello describes: protocol version, missing requests, and additive extras. */
+    setServerShape({ protocol = "1.2", omitRequests = [], addRequests = [], helloFields = {} }: { protocol?: "1.0" | "1.2"; omitRequests?: string[]; addRequests?: string[]; helloFields?: Json } = {}) {
+      protocolVersion = protocol; omittedRequests = new Set(omitRequests); extraRequests = addRequests; extraHelloFields = helloFields;
+    },
+    /** Replaces one method's result, for legacy or additive shapes; `null` restores the scripted reply. */
+    overrideResult(method: string, result: ((params: Json) => unknown) | null) { if (result) resultOverrides.set(method, result); else resultOverrides.delete(method); },
     setLongStatus(value: boolean) { longStatus = value; },
     setNewSessionSettings(value: boolean) { advertiseNewSessionSettings = value; },
     setOpenDelay(ms: number) { openDelay = ms; },
