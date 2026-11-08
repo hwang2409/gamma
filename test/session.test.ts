@@ -1,37 +1,8 @@
 import { expect, test } from "bun:test";
-import { createClient, type Transport, type ZetaClient } from "@fulcrum/zeta";
+import { handlers, history, meta, server, source, tick, waitFor } from "./zeta-harness";
 import { createSessionManager, sessionTitle, type RunState, type SessionMeta } from "../src/session";
 import { createRunStateStore, workspaceRunState, type DraftRunId, type EntryId, type RunId } from "../src/run-state";
 
-type Handler = (params: Record<string, unknown>) => unknown;
-
-/** A real zeta client over an in-memory transport; `handlers` answer requests by method. */
-async function server(handlers: Record<string, Handler>, features: string[] = []) {
-  let deliver!: (text: string) => void;
-  let close!: (code?: number) => void;
-  const calls: Array<[string, Record<string, unknown>]> = [];
-  const transport: Transport = {
-    onMessage(callback) { deliver = callback; },
-    onClose(callback) { close = callback; },
-    close() {},
-    send(text) {
-      const { id, method, params } = JSON.parse(text);
-      calls.push([method, params]);
-      queueMicrotask(async () => {
-        try {
-          const result = method === "hello" ? { protocol_version: "1.2", capabilities: { features } } : await handlers[method]!(params);
-          deliver(JSON.stringify({ jsonrpc: "2.0", id, result }));
-        } catch (error) {
-          deliver(JSON.stringify({ jsonrpc: "2.0", id, error: error as object }));
-        }
-      });
-    },
-  };
-  const client = createClient(transport, (flush) => flush());
-  await client.hello(features);
-  const event = (params: Record<string, unknown>) => deliver(JSON.stringify({ jsonrpc: "2.0", method: "event", params }));
-  return { client, calls, event, drop: () => close(1006) };
-}
 
 function harness(connection: ReturnType<typeof source>, options: { selected?: string; onSelect?(id: string | null): void; bindings?: Parameters<typeof createSessionManager>[2] } = {}) {
   const first = options.selected ?? `draft:${crypto.randomUUID()}`;
@@ -58,50 +29,9 @@ function harness(connection: ReturnType<typeof source>, options: { selected?: st
 
 type TestRun = ReturnType<typeof harness>;
 const present = (view: TestRun) => view.state;
-const meta = (id: string, updated: string, extra: Partial<SessionMeta> = {}): SessionMeta => ({ session_id: id, created_at: updated, updated_at: updated, ...extra });
 const sessions = [meta("a", "2026-11-01T10:00:00Z", { name: "alpha" }), meta("b", "2026-11-02T10:00:00Z", { first_message_preview: "fix the build" }), meta("c", "2026-11-03T10:00:00Z", { parent_session_id: "b" })];
-const history: Record<string, unknown[]> = {
-  a: [{ id: "a1", role: "user", content: [{ type: "text", text: "hello a" }], tool_result: null }],
-  b: [
-    { id: "b1", role: "user", content: [{ type: "text", text: "hello b" }], tool_result: null },
-    { id: "b2", role: "assistant", content: [{ type: "text", text: "on it" }], tool_result: null },
-  ],
-  c: [
-    { id: "c1", role: "assistant", content: [{ type: "tool_use", tool_call: { id: "tool-c", name: "bash", arguments: {} } }], tool_result: null },
-    { id: "c2", role: "tool_result", content: [{ type: "text", text: "done" }], tool_result: { tool_call_id: "tool-c", content: "done", is_error: false } },
-  ],
-};
 
-function source(client: ZetaClient | null) {
-  const listeners = new Set<() => void>();
-  return {
-    client,
-    subscribe(listener: () => void) { listeners.add(listener); return () => listeners.delete(listener); },
-    set(next: ZetaClient | null) { this.client = next; listeners.forEach((listener) => listener()); },
-  };
-}
-const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
-async function waitFor(check: () => boolean, timeout = 5_000) {
-  const deadline = Date.now() + timeout;
-  while (!check()) {
-    if (Date.now() >= deadline) throw new Error(`timed out after ${timeout}ms`);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-}
 
-function handlers(active: string | null, extra: Record<string, Handler> = {}): Record<string, Handler> {
-  let current = active;
-  return {
-    status: () => ({ session: current ? meta(current, "x") : null, state: "idle", pending_approvals: current === "b" || current === "c" ? [{ request_id: "r1", tool_call: { id: "t9", name: "bash", arguments: { command: "rm -rf dist" } }, delegated: false }] : [] }),
-    resume: (params) => { current = params.session_id as string; return { session: meta(current, "x") }; },
-    session_history: (params) => {
-      const rows = history[params.session_id as string] ?? [];
-      const offset = params.offset as number;
-      return { messages: rows.slice(offset, offset + 1), next_offset: offset + 1 < rows.length ? offset + 1 : null };
-    },
-    ...extra,
-  };
-}
 const kinds = (state: ReturnType<typeof harness>["state"]) => {
   const store = state.open!.lease.store;
   return store.getOutline().map(({ kind }) => kind);
@@ -257,7 +187,7 @@ test("a failed replacement shows only the requested run error", async () => {
   expect(present(view).opening).toBeNull();
 });
 
-test("a busy resume displays the URL-selected cached run and forward restores the active run", async () => {
+test("a busy resume shows the busy error for the URL-selected run, never its evicted store, and forward restores the active run", async () => {
   let current = "a";
   let blockA = false;
   const fake = await server(handlers("a", {
@@ -277,7 +207,8 @@ test("a busy resume displays the URL-selected cached run and forward restores th
   blockA = true;
   view.select("a");
   for (let attempt = 0; attempt < 400 && !present(view).openError; attempt++) await tick();
-  expect(present(view).open?.id).toBe("a");
+  // The reopen's replay evicted A's old store, so it is not shown as if it were open.
+  expect(present(view).open).toBeNull();
   expect(view.state.session?.session_id).toBe("a");
   expect(present(view).openError).toMatchObject({ id: "a", busy: true });
   view.select("b"); await tick();

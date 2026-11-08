@@ -47,6 +47,8 @@ export type RunRecord = {
   readonly session?: SessionMeta;
   readonly submitting?: boolean;
   readonly lastDeliveryMethod?: DeliveryMethod;
+  /** The delivery id of a draft whose last send failed: a retry of the same draft reuses it, so zeta dedupes it. */
+  readonly retryDelivery?: { id: string; key: string };
 };
 export type AttachmentState =
   | { kind: "detached" }
@@ -106,7 +108,7 @@ export type WorkspaceEvent =
   | { type: "TURN_START"; runId: SessionId; turn?: "running" | "tool" | "approval" }
   | { type: "TURN_END"; runId: SessionId }
   | { type: "DELIVERY_BEGIN"; runId: RunId; delivery: PendingDelivery; operationId: OperationId }
-  | { type: "DELIVERY_ACK"; runId: RunId; intentId: string; operationId: OperationId; attemptId: string; queued?: boolean; failed?: boolean }
+  | { type: "DELIVERY_ACK"; runId: RunId; intentId: string; operationId: OperationId; attemptId: string; queued?: boolean; failed?: boolean; refused?: boolean }
   | { type: "DELIVERY_STATUS"; runId: RunId; intentId: string; operationId: OperationId; status: "delivered" | "dropped" }
   | { type: "DELIVERY_RECONCILE"; runId: RunId }
   | { type: "DELIVERY_RESEND"; runId: RunId; intentId: string }
@@ -151,7 +153,8 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     const owner = activeOwner();
     update(runId, (record) => owner && owner !== runId
       ? { ...record, openError: { id: runId, message: `${owner} has the active turn`, busy: true } }
-      : { ...record, lifecycle: { kind: "opening", operationId }, openOperation: operationId, openingMessages: 0, openError: undefined });
+      // A reopen replays into a fresh store and evicts the old one, so the old open stops being the open run now.
+      : { ...record, lifecycle: { kind: "opening", operationId }, openOperation: operationId, openingMessages: 0, openError: undefined, ...(record.open && !record.open.stale ? { open: undefined } : {}) });
     if (!owner || owner === runId) effects.push({ type: "open-session", runId, operationId });
   };
   switch (event.type) {
@@ -186,8 +189,6 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     case "NEW_SESSION_FAIL": {
       const accepted = operationMatches(runs.get(canonical({ ...state, aliases }, event.runId)), event.operationId);
       update(event.runId, (record) => accepted ? { ...record, lifecycle: { kind: "failed", error: event.error }, openError: { id: event.runId, message: event.error, busy: event.busy ?? false }, submitting: false } : record);
-      const selected = canonical({ ...state, aliases }, entry.run);
-      if (accepted && selected !== event.runId && !selected.startsWith("draft:")) beginOpen(selected as SessionId, crypto.randomUUID() as OperationId);
       break;
     }
     case "STATUS": {
@@ -196,9 +197,6 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
         update(event.sessionId, (record) => ({ ...record, session: event.session ?? record.session }));
         for (const intentId of runs.get(event.sessionId)?.deliveries.keys() ?? []) effects.push({ type: "delivery-status", runId: event.sessionId, operationId: crypto.randomUUID() as OperationId, intentId });
       }
-      const selected = canonical({ ...state, aliases }, entry.run);
-      const selectedRecord = runs.get(selected);
-      if (!selected.startsWith("draft:") && !openingOwner() && (!selectedRecord?.open || selectedRecord.open.stale)) beginOpen(selected as SessionId, event.operationId ?? crypto.randomUUID() as OperationId);
       break;
     }
     case "OPEN_REQUEST": if (!openingOwner()) beginOpen(event.runId, event.operationId); break;
@@ -224,14 +222,14 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     }
     case "DELIVERY_BEGIN": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); deliveries.set(event.delivery.id, event.delivery); effects.push(event.delivery.method === "send_images" ? { type: "send-images", runId: record.id as SessionId, operationId: event.operationId, intentId: event.delivery.id } : { type: "deliver", runId: record.id, operationId: event.operationId, intentId: event.delivery.id }); return { ...record, deliveries, submitting: false, lastDeliveryMethod: event.delivery.method }; }); break;
     case "DELIVERY_ACK": {
-      update(event.runId, (record) => { const deliveries = new Map(record.deliveries); const delivery = deliveries.get(event.intentId); if (delivery?.operationId !== event.operationId) return record; if (event.queued && !event.failed && delivery.state !== "retrying") deliveries.set(event.intentId, { ...delivery, attemptId: event.attemptId, state: "queued" }); else deliveries.delete(event.intentId); if (event.failed) return { ...record, deliveries }; return { ...record, text: record.text.startsWith(delivery.text) ? record.text.slice(delivery.text.length) : record.text, attachments: record.attachments.filter((image) => !delivery.images.includes(image)), deliveries }; });
-      const selected = canonical({ ...state, aliases }, entry.run);
-      if (event.failed && selected !== canonical({ ...state, aliases }, event.runId) && !selected.startsWith("draft:") && !openingOwner()) beginOpen(selected as SessionId, crypto.randomUUID() as OperationId);
+      // A failure keeps the draft and its attempt id for the retry (zeta returns duplicate:true if the first one landed);
+      // only a definite refusal (accepted:false, e.g. dropped) needs a new id.
+      update(event.runId, (record) => { const deliveries = new Map(record.deliveries); const delivery = deliveries.get(event.intentId); if (delivery?.operationId !== event.operationId) return record; if (event.queued && !event.failed && delivery.state !== "retrying") deliveries.set(event.intentId, { ...delivery, attemptId: event.attemptId, state: "queued" }); else deliveries.delete(event.intentId); if (event.failed) return { ...record, deliveries, retryDelivery: event.refused || !event.attemptId ? undefined : { id: event.attemptId, key: deliveryKey(delivery.text, delivery.images) } }; return { ...record, text: record.text.startsWith(delivery.text) ? record.text.slice(delivery.text.length) : record.text, attachments: record.attachments.filter((image) => !delivery.images.includes(image)), deliveries, retryDelivery: undefined }; });
       break;
     }
     case "DELIVERY_RESEND": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); const delivery = deliveries.get(event.intentId); if (delivery?.state === "dropped" && delivery.method !== "opaque") { const operationId = crypto.randomUUID() as OperationId; deliveries.set(event.intentId, { ...delivery, operationId, state: "retrying" }); effects.push({ type: "deliver", runId: record.id, operationId, intentId: event.intentId }); } return { ...record, deliveries }; }); break;
     case "DELIVERY_RECONCILE": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); for (const [intentId, delivery] of deliveries) { if (delivery.state === "dropped" || delivery.state === "requesting") continue; const operationId = crypto.randomUUID() as OperationId; deliveries.set(intentId, { ...delivery, operationId }); effects.push({ type: "delivery-status", runId: record.id as SessionId, operationId, intentId }); } return { ...record, deliveries }; }); break;
-    case "DELIVERY_STATUS": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); const delivery = deliveries.get(event.intentId); if (delivery?.operationId !== event.operationId) return record; if (event.status === "delivered") deliveries.delete(event.intentId); else if (delivery.method === "opaque") { deliveries.delete(event.intentId); return { ...record, text: restoreText(record.text, delivery.text), deliveries }; } else if (delivery.state !== "dropped") { const operationId = crypto.randomUUID() as OperationId; deliveries.set(event.intentId, { ...delivery, operationId, state: "retrying" }); effects.push({ type: "deliver", runId: record.id, operationId, intentId: event.intentId }); } return { ...record, deliveries }; }); break;
+    case "DELIVERY_STATUS": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); const delivery = deliveries.get(event.intentId); if (delivery?.operationId !== event.operationId) return record; if (event.status === "delivered") { deliveries.delete(event.intentId); return { ...record, deliveries, retryDelivery: undefined }; } else if (delivery.method === "opaque") { deliveries.delete(event.intentId); return { ...record, text: restoreText(record.text, delivery.text), deliveries }; } else if (delivery.state !== "dropped") { const operationId = crypto.randomUUID() as OperationId; deliveries.set(event.intentId, { ...delivery, operationId, state: "retrying" }); effects.push({ type: "deliver", runId: record.id, operationId, intentId: event.intentId }); } return { ...record, deliveries }; }); break;
     case "SETTINGS_DESIRED": update(event.runId, (record) => ({ ...record, model: event.model === undefined ? record.model : { ...(event.model ? { choice: "explicit" as const, model: event.model } : { choice: "default" as const, resolvedDefault: record.model.resolvedDefault }), deferred: record.model.deferred }, settings: { ...record.settings, desired: { ...record.settings.desired, ...(event.model !== undefined ? { model: event.model || undefined } : {}), ...(event.approval_mode !== undefined ? { approval_mode: event.approval_mode } : {}) }, error: undefined } })); break;
     case "SETTINGS_LOAD": update(event.runId, (record) => { effects.push({ type: "load-settings", runId: event.runId, operationId: event.operationId }); return { ...record, settings: { ...record.settings, pending: { operationId: event.operationId, kind: "load" }, error: undefined } }; }); break;
     case "SETTINGS_WRITE": update(event.runId, (record) => { const model = record.settings.desired?.model ?? record.settings.loaded?.model; const approvalMode = record.settings.desired?.approval_mode ?? record.settings.loaded?.approval_mode; const settings = { ...(model !== undefined ? { model } : {}), ...(approvalMode !== undefined ? { approval_mode: approvalMode } : {}) }; effects.push({ type: "set-settings", runId: event.runId, operationId: event.operationId, settings }); return { ...record, settings: { ...record.settings, pending: { operationId: event.operationId, kind: "write" }, error: undefined } }; }); break;
@@ -243,7 +241,8 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     case "STOP_FAIL": update(event.runId, (record) => record.stopOperation === event.operationId ? { ...record, stopOperation: undefined } : record); break;
     case "DISCONNECT":
       connected = false;
-      for (const [id, record] of runs) update(id, (current) => ({ ...current, ...(current.open ? { open: { ...current.open, stale: true } } : {}), deliveries: new Map([...record.deliveries].map(([intentId, delivery]) => [intentId, delivery.state === "requesting" ? { ...delivery, state: "queued" as const } : delivery])) }));
+      // The old client's opens are aborted; the post-step reopens the selection after the next status.
+      for (const [id, record] of runs) update(id, (current) => ({ ...current, ...(current.open ? { open: { ...current.open, stale: true } } : {}), openOperation: undefined, openingMessages: undefined, deliveries: new Map([...record.deliveries].map(([intentId, delivery]) => [intentId, delivery.state === "requesting" ? { ...delivery, state: "queued" as const } : delivery])) }));
       attachment = { kind: "disconnected", ...(attachment.kind === "attached" ? { lastAttached: attachment.sessionId, ...(attachment.turn !== "idle" ? { lastTurnOwner: attachment.sessionId } : {}) } : {}) }; break;
     case "RECONNECT":
       connected = true;
@@ -253,19 +252,61 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     case "SETTINGS_OK": update(event.runId, (record) => record.settings.pending?.operationId !== event.operationId ? record : { ...record, settings: { loaded: { model: event.model, approval_mode: event.approval_mode, plan_mode: event.plan_mode }, desired: record.settings.desired } }); break;
     case "SETTINGS_FAIL": update(event.runId, (record) => record.settings.pending?.operationId !== event.operationId ? record : { ...record, settings: { ...record.settings, pending: undefined, error: event.error }, submitting: false }); break;
   }
+  // The one place that recovers an open: whenever the selected run is not live and nothing blocks it, open it.
+  const selected = canonical({ ...state, aliases }, entry.run);
+  const record = runs.get(selected);
+  const inFlight = record?.openOperation && (!record.open || record.open.stale);
+  const live = attachment.kind === "attached" && attachment.sessionId === selected && record?.open && !record.open.stale;
+  if (connected && attachment.kind !== "disconnected" && !selected.startsWith("draft:") && record && !live && !inFlight && !record.openError && !openingOwner())
+    beginOpen(selected as SessionId, crypto.randomUUID() as OperationId);
   return { state: { ...state, entry, runs, aliases, attachment, connected, ...(notice ? { notice } : { notice: undefined }) }, effects };
 }
 
 export const selectedRun = (state: WorkspaceState) => state.runs.get(canonical(state, state.entry.run));
 export const hasPendingDelivery = (record: RunRecord) => [...record.deliveries.values()].some((delivery) => delivery.state !== "dropped");
 export const activeRun = (state: WorkspaceState) => state.attachment.kind === "attached" && state.attachment.turn !== "idle" ? state.attachment.sessionId : state.attachment.kind === "disconnected" ? state.attachment.lastTurnOwner ?? null : null;
+
+/** Why the composer of a run cannot submit. */
+export type InputBlock = "offline" | "opening" | "reconnecting" | "open-failed" | "syncing" | "pending" | "waits-for-active";
+export type RunInput = { run: RunId; open: OpenRun | null; accept: boolean; block: InputBlock | null; opening: { messages: number } | null };
+/** The executor guard: zeta's `send` has no session_id and goes to the attached runtime, so only that run may send. */
+export const canDeliver = (state: WorkspaceState, runId: RunId) => Boolean(state.connected) && state.attachment.kind === "attached" && state.attachment.sessionId === canonical(state, runId);
+/** The one answer to "which open does this run show, and can its composer submit". */
+export const runInput = (state: WorkspaceState, runId: RunId = state.entry.run): RunInput => {
+  const run = canonical(state, runId);
+  const record = state.runs.get(run);
+  const open = record?.open ?? null;
+  const attached = state.attachment.kind === "attached" && state.attachment.sessionId === run ? state.attachment : null;
+  const draft = run.startsWith("draft:");
+  const active = activeRun(state);
+  const opening = !draft && !open && !record?.openError ? { messages: record?.openingMessages ?? 0 } : null;
+  const block: InputBlock | null = record && hasPendingDelivery(record) ? "pending"
+    : draft && active ? "waits-for-active"
+    : !state.connected ? "offline"
+    : open?.stale ? "reconnecting"
+    : record?.openError ? "open-failed"
+    : draft ? null
+    : !open || !attached ? "opening"
+    : open.syncing && attached.turn === "idle" ? "syncing"
+    : null;
+  return { run, open, accept: block === null, block, opening };
+};
+export const inputBlockText = (block: InputBlock | null, active: string | null) => {
+  if (block === "pending") return "sending waits while the previous message is pending or retrying";
+  if (block === "waits-for-active") return `sending waits for the active run ${active}`;
+  if (block === "offline") return "sending is paused until zeta reconnects";
+  return block ? "sending is paused until the run opens" : null;
+};
+const deliveryKey = (text: string, images: readonly QueuedImage[]) => JSON.stringify([text, images.map((image) => image.url)]);
+
 export const workspaceRunState = (state: WorkspaceState) => {
   const record = selectedRun(state);
   const selected = state.entry.run.startsWith("draft:") ? null : state.entry.run as SessionId;
+  const input = runInput(state);
   return {
     selected,
-    open: record?.open ?? null,
-    opening: selected && !record?.open && record?.openOperation ? { id: selected, messages: record.openingMessages ?? 0 } : null,
+    open: input.open,
+    opening: selected && input.opening ? { id: selected, messages: input.opening.messages } : null,
     openError: record?.openError ?? null,
     session: record?.session ?? null,
     active: activeRun(state),
@@ -286,7 +327,7 @@ export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefi
   const seed = initialEntry.run;
   let cachedCatalog: ModelCatalog | undefined;
   try { const raw = JSON.parse(storage?.getItem("gamma-catalog") ?? "null"); cachedCatalog = { models: catalogModels(raw), providers: catalogProviders(raw) }; } catch {}
-  let state: WorkspaceState = { entry: initialEntry, runs: new Map(), aliases: new Map(), attachment: { kind: "detached" }, ...(cachedCatalog ? { modelCatalog: cachedCatalog } : {}) };
+  let state: WorkspaceState = { entry: initialEntry, runs: new Map(), aliases: new Map(), attachment: { kind: "disconnected" }, ...(cachedCatalog ? { modelCatalog: cachedCatalog } : {}) };
   const listeners = new Set<() => void>();
   let active: RunId = seed;
   let defaults = parseMap(storage, DEFAULTS_KEY);
@@ -321,6 +362,8 @@ export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefi
     restoreDraft(id: string, text: string) { const next = restoreText(value(id).text, text); dispatch({ type: "COMPOSER_EDIT", runId: key(id), text: next }); queueDraft(id, next); },
     removeAttachment(id: string, index: number) { const image = value(id).attachments[index]; if (!image) return; URL.revokeObjectURL(image.url); dispatch({ type: "REMOVE_ATTACHMENT", runId: key(id), index }); },
     beginDelivery(id: string, delivery: Omit<PendingDelivery, "operationId" | "state">, operationId = crypto.randomUUID() as OperationId) { dispatch({ type: "DELIVERY_BEGIN", runId: key(id), delivery: { ...delivery, operationId, state: "requesting" }, operationId }); return operationId; },
+    /** The delivery id for submitting this draft: the failed attempt's id when the same text and images are retried. */
+    deliveryIdFor(id: string, text: string, images: readonly QueuedImage[] = []) { const retry = value(id).retryDelivery; return retry && retry.key === deliveryKey(text, images) ? retry.id : `web-${crypto.randomUUID()}`; },
     reconcileDeliveries(id: string) { dispatch({ type: "DELIVERY_RECONCILE", runId: key(id) }); },
     requestOpen(id: string, operationId = crypto.randomUUID() as OperationId) { const runId = key(id); if (!runId.startsWith("draft:")) dispatch({ type: "OPEN_REQUEST", runId: runId as SessionId, operationId }); return operationId; },
     startSession(id: string, choice: { model?: string; provider?: string; approval_mode?: "ask" | "allow" } = {}, operationId = crypto.randomUUID() as OperationId) { const runId = key(id); if (runId.startsWith("draft:")) dispatch({ type: "FIRST_SEND", runId: runId as DraftRunId, operationId, choice }); return operationId; },

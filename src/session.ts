@@ -2,6 +2,7 @@ import { fromZetaEvent, fromZetaHistory, type SessionLease, type ZetaClient } fr
 import type { RunEvent } from "@fulcrum/core";
 import type { hostBindings, Registration } from "./host-client";
 import type { QueuedImage } from "./image-queue";
+import { canDeliver } from "./run-state";
 type HostBindings = typeof hostBindings;
 
 /** The `SessionMetadata` fields this app reads from `list_sessions` (zeta docs/serve-protocol.md). */
@@ -240,6 +241,7 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
   let openOperation: { runId: SessionId; operationId: OperationId } | null = null;
   const leaseSubscriptions = new Map<string, () => void>();
   const leases = new Map<string, OpenRun>();
+  const replays = new Map<string, Promise<void>>();
   const knownStatus = new Map<string, ServerStatus>();
   const pending = new Map<string, { resolve(value: unknown): void; reject(error: unknown): void }>();
   const live = (target: ZetaClient) => client === target;
@@ -282,7 +284,8 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
     const abort = new AbortController();
     openAbort = abort;
     openOperation = { runId: effect.runId, operationId: effect.operationId };
-    const previous = runs.get(effect.runId).open;
+    // The reducer already dropped a live open when this one began; the lease it held is still ours to release.
+    const previous = leases.get(effect.runId);
     if (previous) {
       leaseSubscriptions.get(effect.runId)?.();
       leaseSubscriptions.delete(effect.runId);
@@ -294,11 +297,17 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
       const registration = await register(target, effect.runId);
       const initialStatus = knownStatus.get(effect.runId);
       knownStatus.clear();
-      const opened = await openSession(target, effect.runId, (messages, complete) => {
+      // fulcrum refuses a second replay of a session until the aborted one unwinds (back then forward during an open).
+      const prior = replays.get(effect.runId);
+      if (prior) { await prior; if (!live(target) || !current(effect.runId, effect.operationId)) return; }
+      const attempt = openSession(target, effect.runId, (messages, complete) => {
         history = { messages, complete };
         runs.dispatch({ type: "OPEN_PROGRESS", runId: effect.runId, operationId: effect.operationId, messages });
       }, abort.signal, initialStatus, registration);
-      if (!live(target) || !current(effect.runId, effect.operationId)) { opened.lease.release(); return; }
+      const settled = attempt.then(() => {}, () => {}).finally(() => { if (replays.get(effect.runId) === settled) replays.delete(effect.runId); });
+      replays.set(effect.runId, settled);
+      const opened = await attempt;
+      if (!live(target) || !current(effect.runId, effect.operationId)) { opened.complete.catch(() => {}); opened.lease.release(); return; }
       const open: OpenRun = { id: effect.runId, lease: opened.lease, stale: false, history, syncing: true };
       runs.dispatch({ type: "RESUME_OK", runId: effect.runId, operationId: effect.operationId });
       runs.dispatch({ type: "OPEN_OK", runId: effect.runId, operationId: effect.operationId, open, ...(opened.session ? { session: opened.session } : {}) });
@@ -338,7 +347,7 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
   };
   const handleImages = async (effect: Extract<WorkspaceEffect, { type: "send-images" }>) => {
     const delivery = runs.get(effect.runId).deliveries.get(effect.intentId);
-    if (!client || !delivery) { const error = new Error("session is not attached"); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false, failed: true }); finish(effect.operationId, undefined, error); return; }
+    if (!client || !delivery || !canDeliver(runs.getCatalog(), effect.runId)) { const error = new Error(client && delivery ? "this run is not open yet; your message is still in the draft" : "session is not attached"); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false, failed: true }); finish(effect.operationId, undefined, error); return; }
     try {
       await client.request("send_images", { session_id: effect.runId, text: delivery.text, images: delivery.images.map(({ name, mime_type, data }) => ({ name, mime_type, data })), delivery_id: effect.intentId }, { timeoutMs: 30_000 });
       runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false }); finish(effect.operationId, true);
