@@ -518,7 +518,6 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           }
           if (command === "/review" || command.startsWith("/review ")) { opaqueInputs.set("opaque-review-input", command); return reply({ result: { kind: "model_input", input_id: "opaque-review-input", display_text: command } }); }
           if (command === "/malformed") return reply({ result: { unexpected: true } });
-          if (command === "/legacy-output") return reply({ result: { kind: "text", text: "legacy output" } });
           if (command === "/mcp" || command === "/mcp status") return reply({ result: { kind: "output", text: "mcp: 0 mounted, 0 failed\nmcp limits: deadline 300s | wire 67108864 bytes | spill 262144 bytes" } });
           if (command === "/help") return reply({ result: { kind: "output", text: `built-in commands:\n${defaultSlashCatalog.filter((entry) => entry.kind === "builtin").map((entry) => `  /${entry.name} — ${entry.description}`).join("\n")}\ncustom commands:\n  none\nskills (use /name or $name; $name also works inline):\n  none` } });
           const name = command.slice(1).split(/\s/, 1)[0] ?? "";
