@@ -58,6 +58,9 @@ const step = async <T,>(page: Page, label: string, run: () => Promise<T>): Promi
 const waitReady = (page: Page) => page.locator('.dock form[data-part="composer"]').waitFor({ timeout: 15_000 });
 /** Stops the fake's held turn with the stop button and waits until zeta and the composer are idle again. */
 const stopTurn = async (page: Page) => {
+  // The fake starts a turn in a microtask after it replies to send, so wait for every send's reply before reading running.
+  await step(page, "every send has its reply", () => until(() => fake.requests.every((request) => (request.method !== "send" && request.method !== "send_images") || request.replied !== undefined), 10_000));
+  await Bun.sleep(0);
   if (!fake.running) return;
   await step(page, "stop the held turn", async () => {
     await page.getByRole("button", { name: "stop" }).click({ timeout: 10_000 });
