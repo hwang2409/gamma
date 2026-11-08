@@ -25,6 +25,11 @@ export type ClientActionName =
   | "restart"
   | "permissions";
 
+/** Client actions that run in gamma alone, so a fresh draft with no zeta session can run them too. */
+export type LocalActionName = Extract<ClientActionName, "new_session" | "theme" | "paste" | "keys" | "restart">;
+const LOCAL_ACTIONS: ReadonlySet<ClientActionName> = new Set<LocalActionName>(["new_session", "theme", "paste", "keys", "restart"]);
+export const isLocalAction = (name: ClientActionName): name is LocalActionName => LOCAL_ACTIONS.has(name);
+
 export type CompletionRow = {
   trigger: "/" | "$";
   name: string;
@@ -48,9 +53,17 @@ export type CommandRequest = (
 export type CommandCapabilities = {
   features: ReadonlySet<string>;
   requests: ReadonlySet<string>;
+  /** True while this run's turn is active: the same test as the "waits until the turn ends" receipt. */
+  turnActive?(): boolean;
 };
 
-const CLIENT_ACTIONS: Readonly<Record<string, ClientActionName>> = {
+// Zeta ee6a82d6 server/slash_commands.py:516-536 and 586-606: skills and prompt macros become model input, which a
+// running turn always refuses. Builtins stay offered because their busy rule is zeta policy, which gamma does not copy;
+// six of them are still refused for any arguments while busy (zeta 1221f676 core/slash.py:1039-1148: plan, implement,
+// project-instructions, init, compact, decisions). Hiding those waits for a busy-eligibility field in zeta's slash_list.
+const REFUSED_WHILE_TURN_RUNS = new Set(["skill", "macro-prompt"]);
+
+const CLIENT_ACTIONS: Readonly<Partial<Record<string, ClientActionName>>> = {
   new: "new_session",
   name: "rename_session",
   approve: "approve",
@@ -115,8 +128,9 @@ export function createCommandController(
     if (!token || !capabilities.requests.has("slash_list")) return [];
     if (catalog === undefined) await refreshCatalog();
     const prefix = token.prefix.toLowerCase();
+    const busy = token.trigger === "/" && capabilities.turnActive?.() === true;
     return (catalog ?? [])
-      .filter((entry) => entry.unavailable === null && (token.trigger === "/" || entry.kind === "skill") && entry.name.toLowerCase().startsWith(prefix))
+      .filter((entry) => entry.unavailable === null && (token.trigger === "/" || entry.kind === "skill") && !(busy && REFUSED_WHILE_TURN_RUNS.has(entry.kind)) && entry.name.toLowerCase().startsWith(prefix))
       .sort((a, b) => Number(b.name.toLowerCase() === prefix) - Number(a.name.toLowerCase() === prefix) || a.name.localeCompare(b.name))
       .map((entry) => ({ trigger: token.trigger, name: entry.name, description: entry.description, sourceBadge: entry.source }));
   }
@@ -167,6 +181,8 @@ export function createUnavailableCommandController(message = "not available in t
   return {
     async prepareComposerInput(text) {
       if (detached && /^\/permissions(?:\s|$)/.test(text.trim())) return { kind: "receipt", text: "open this run before changing permissions", tone: "error", retain: true };
+      const local = detached && isSlashCommandText(text) ? CLIENT_ACTIONS[commandName(text.trimStart())] : undefined;
+      if (local && isLocalAction(local)) return { kind: "client-action", name: local, args: commandArgs(text.trimStart()) };
       return isSlashCommandText(text) ? { kind: "receipt", text: message, tone: "error", retain: true } : directSend(text);
     },
     async completions() { return []; },

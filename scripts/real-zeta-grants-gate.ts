@@ -98,7 +98,7 @@ try {
   await page.getByRole("button", { name: "send message", exact: true }).click();
   const always = page.getByRole("button", { name: "always allow" });
   await always.waitFor({ timeout: 30_000 }).catch(async () => { throw new Error(`first approval missing; body=${(await page.locator("body").innerText()).slice(-4000)}; frames=${frames.slice(-40).join("\n")}; zeta=${(logs.get(server) ?? []).join("").slice(-4000)}`); });
-  // window starts at always-allow: the send's resume emits a reset before the first approval (zeta 473784f server.py:664,717)
+  // window starts at always-allow: opening the run (its resume, not the send) emits a grant reset before the first approval (zeta 473784f server.py:664,717)
   const cancelWindowStart = frames.length;
   await always.click();
 

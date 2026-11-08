@@ -227,6 +227,9 @@ async function mobileKeysJourney(browserType: BrowserType, name: string) {
     await submit(page, "/keys");
     const receipt = page.locator(".command-receipt-text", { hasText: "browser precedence and terminal-only exclusions" });
     await receipt.waitFor();
+    // Chromium focuses scroll areas without tabindex, so these two lines are what keep CI guarding Safari's keyboard path.
+    expect(await receipt.getAttribute("tabindex") === "0", `${name} /keys receipt is not in the tab order`);
+    expect(await page.getByRole("status", { name: "command result", exact: true }).count() === 1, `${name} /keys receipt has no "command result" status name`);
     const bounds = await receipt.evaluate((node) => ({ clientHeight: node.clientHeight, scrollHeight: node.scrollHeight }));
     expect(bounds.scrollHeight > bounds.clientHeight, `${name} /keys receipt is not bounded at 390px`);
     for (let index = 0; index < 20 && !await receipt.evaluate((node) => node === document.activeElement); index++) await page.keyboard.press("Shift+Tab");
@@ -250,6 +253,66 @@ async function mobileKeysJourney(browserType: BrowserType, name: string) {
   } finally { await browser.close(); }
 }
 
+/** A slow machine delays frame callbacks; a refocus queued by /keys must not pull a reader back out of the receipt. */
+async function lateFrameKeepsReceiptFocus(browserType: BrowserType, name: string) {
+  const browser = await browserType.launch({ headless: true });
+  try {
+    const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+    await page.addInitScript(() => {
+      const state = window as unknown as { late?: boolean; lateFrames: { queued: number; ran: number } };
+      state.lateFrames = { queued: 0, ran: 0 };
+      const frame = window.requestAnimationFrame.bind(window);
+      window.requestAnimationFrame = (callback) => {
+        if (!state.late) return frame(callback);
+        state.lateFrames.queued++;
+        setTimeout(() => frame((time) => { state.lateFrames.ran++; callback(time); }), 150);
+        return 0;
+      };
+    });
+    await page.goto(`${origin}/?run=${ACTIVE}`);
+    await field(page).waitFor({ timeout: 15_000 });
+    await page.evaluate(() => { (window as unknown as { late: boolean }).late = true; });
+    await submit(page, "/keys");
+    const receipt = page.locator(".command-receipt-text", { hasText: "browser precedence and terminal-only exclusions" });
+    await receipt.waitFor({ timeout: 5_000 });
+    await receipt.focus();
+    const queued = await page.evaluate(() => (window as unknown as { lateFrames: { queued: number } }).lateFrames.queued);
+    expect(queued > 0, `${name} /keys queued no frame callback to wait for`);
+    await page.waitForFunction((count) => (window as unknown as { lateFrames: { ran: number } }).lateFrames.ran >= count, queued, { timeout: 5_000 });
+    expect(await receipt.evaluate((node) => node === document.activeElement), `${name} a late frame pulled focus out of the /keys receipt`);
+    console.log(`ok   ${name} late frame keeps focus in the /keys receipt`);
+  } finally { await browser.close(); }
+}
+
+/** A focused receipt behaves like any transient panel: its focus ring clears the text, and Escape closes it. */
+async function receiptKeyboardDismiss(browserType: BrowserType, name: string) {
+  const browser = await browserType.launch({ headless: true });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await page.goto(`${origin}/?run=${ACTIVE}`);
+    await field(page).waitFor({ timeout: 15_000 });
+    await submit(page, "/keys");
+    const receipt = page.locator(".command-receipt-text", { hasText: "browser precedence and terminal-only exclusions" });
+    await receipt.waitFor({ timeout: 5_000 });
+    for (let index = 0; index < 20 && !await receipt.evaluate((node) => node === document.activeElement); index++) await page.keyboard.press("Shift+Tab");
+    expect(await receipt.evaluate((node) => node === document.activeElement), `${name} keyboard did not reach the /keys receipt`);
+    const ring = await receipt.evaluate((node) => {
+      const style = getComputedStyle(node);
+      const px = (value: string) => parseFloat(value) || 0;
+      return { focusVisible: node.matches(":focus-visible"), style: style.outlineStyle, offset: px(style.outlineOffset), inset: px(style.paddingLeft) + px(style.borderLeftWidth) };
+    });
+    await page.screenshot({ path: join(gammaHome, `${name}-receipt-focus.png`) });
+    expect(ring.focusVisible && ring.style !== "none", `${name} the focused receipt shows no focus ring: ${JSON.stringify(ring)}`);
+    // A negative offset draws the ring inside the box, ending |offset| px in; the text starts after the border and padding.
+    const errorsBefore = errors.length;
+    if (ring.offset < 0 && ring.inset < -ring.offset + 1) errors.push(`${name} the receipt focus ring overlaps the first text column: ${JSON.stringify(ring)}`);
+    await page.keyboard.press("Escape");
+    await receipt.waitFor({ state: "detached", timeout: 2_000 }).catch(() => errors.push(`${name} Escape in the focused receipt did not dismiss it`));
+    if (!await receipt.count()) expect(await field(page).evaluate((node) => node === document.activeElement), `${name} Escape did not return focus to the composer`);
+    if (errors.length === errorsBefore) console.log(`ok   ${name} receipt focus ring clears the text and Escape dismisses it`);
+  } finally { await browser.close(); }
+}
+
 try {
   for (let attempt = 0; attempt < 300; attempt++) {
     if (vite.exitCode !== null) throw new Error(`vite exited ${vite.exitCode}: ${logs.join("").slice(-3000)}`);
@@ -262,9 +325,13 @@ try {
   finally { await browser.close(); }
   await browserReloadConvention("chromium", chromium);
   await mobileKeysJourney(chromium, "chromium");
+  await lateFrameKeepsReceiptFocus(chromium, "chromium");
+  await receiptKeyboardDismiss(chromium, "chromium");
   if (process.platform === "darwin") {
     await browserReloadConvention("webkit", webkit);
     await mobileKeysJourney(webkit, "webkit");
+    await lateFrameKeepsReceiptFocus(webkit, "webkit");
+    await receiptKeyboardDismiss(webkit, "webkit");
   }
   if (errors.length) throw new Error(errors.join(" | "));
 } finally {

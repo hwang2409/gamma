@@ -1,5 +1,5 @@
 import { pendingApprovals, type ApprovalStore } from "./approvals";
-import type { ClientActionName } from "./commands";
+import type { ClientActionName, LocalActionName } from "./commands";
 import { keysReceipt } from "./keys";
 import type { ThemeChoice } from "./theme";
 
@@ -12,18 +12,22 @@ type PermissionsAction = {
   clear(): Promise<{ removed: string[] }>;
 };
 
-export type ClientActionDependencies = {
-  sessionId: string;
-  requests: ReadonlySet<string>;
-  request(method: string, params: Record<string, unknown>): Promise<unknown>;
+/** What gamma's own actions need; none of it involves a zeta session. */
+export type LocalActionDependencies = {
   newRun(): void;
-  refreshStatus(): Promise<unknown>;
-  retrySession(sessionId: string): Promise<unknown>;
-  currentName(): string | undefined;
   themes: readonly ThemeChoice[];
   currentTheme(): ThemeChoice;
   setTheme(theme: ThemeChoice): void;
   openFilePicker(): void;
+};
+
+export type ClientActionDependencies = LocalActionDependencies & {
+  sessionId: string;
+  requests: ReadonlySet<string>;
+  request(method: string, params: Record<string, unknown>): Promise<unknown>;
+  refreshStatus(): Promise<unknown>;
+  retrySession(sessionId: string): Promise<unknown>;
+  currentName(): string | undefined;
   approvalStore: ApprovalStore;
   approvalDisabledReason?: string;
   decide(method: "approve" | "deny", requestId: string, always?: boolean): Promise<unknown>;
@@ -33,6 +37,30 @@ export type ClientActionDependencies = {
 
 const quiet = (text: string): ActionReceipt => ({ text, tone: "quiet" });
 const error = (text: string, retain = false): ActionReceipt => ({ text, tone: "error", ...(retain ? { retain: true } : {}) });
+
+export function createLocalActions(deps: LocalActionDependencies): Record<LocalActionName, (args: string) => Promise<ActionReceipt | void>> {
+  return {
+    async new_session(args) {
+      if (args) return error("new unchanged: /new does not accept arguments");
+      deps.newRun();
+    },
+    async theme(args) {
+      const available = deps.themes.join(", ");
+      if (!args || args === "list") return quiet(`theme: ${deps.currentTheme()} · available: ${available}`);
+      const theme = deps.themes.find((candidate) => candidate.toLowerCase() === args.toLowerCase());
+      if (!theme) return error(`theme unchanged: unknown theme '${args}'; available: ${available}`);
+      deps.setTheme(theme);
+      return quiet(`theme: ${theme}`);
+    },
+    async paste(args) {
+      if (args) return error("paste unavailable: /paste does not take arguments");
+      deps.openFilePicker();
+      return quiet("choose images to attach (paste and drop also work)");
+    },
+    async keys() { return quiet(keysReceipt()); },
+    async restart() { return quiet("/restart restarts the terminal app; gamma reconnects on its own"); },
+  };
+}
 
 export function createClientActions(deps: ClientActionDependencies): Record<ClientActionName, (args: string) => Promise<ActionReceipt | void>> {
   const requireRequest = (method: string, message: string) => {
@@ -65,10 +93,7 @@ export function createClientActions(deps: ClientActionDependencies): Record<Clie
     return quiet(`switched to branch ${index} (head ${branch.seq ?? branch.id})`);
   };
   return {
-    async new_session(args) {
-      if (args) return error("new unchanged: /new does not accept arguments");
-      deps.newRun();
-    },
+    ...createLocalActions(deps),
     async rename_session(args) {
       if (!args) return quiet(`session name: ${deps.currentName() || "(unnamed)"}`);
       requireRequest("rename_session", "session naming needs a newer zeta server");
@@ -83,22 +108,7 @@ export function createClientActions(deps: ClientActionDependencies): Record<Clie
     approve: (args) => approval("approve", args),
     always: (args) => approval("approve", args, true),
     deny: (args) => approval("deny", args),
-    async theme(args) {
-      const available = deps.themes.join(", ");
-      if (!args || args === "list") return quiet(`theme: ${deps.currentTheme()} · available: ${available}`);
-      const theme = deps.themes.find((candidate) => candidate.toLowerCase() === args.toLowerCase());
-      if (!theme) return error(`theme unchanged: unknown theme '${args}'; available: ${available}`);
-      deps.setTheme(theme);
-      return quiet(`theme: ${theme}`);
-    },
     branch_view: tree,
-    async paste(args) {
-      if (args) return error("paste unavailable: /paste does not take arguments");
-      deps.openFilePicker();
-      return quiet("choose images to attach (paste and drop also work)");
-    },
-    async keys() { return quiet(keysReceipt()); },
-    async restart() { return quiet("/restart restarts the terminal app; gamma reconnects on its own"); },
     async permissions(args) {
       const permissions = deps.permissions;
       if (!permissions) return error("permissions need a newer zeta server", true);

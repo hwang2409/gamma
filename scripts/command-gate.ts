@@ -2,12 +2,14 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
-import { chromium, type Page } from "playwright";
+import { chromium, webkit, type Page } from "playwright";
 import { themes } from "@fulcrum/react";
 import { ACTIVE, startFakeZeta } from "./fake-zeta";
 import { completeSlashCatalog, defaultSlashCatalog } from "./fake-slash-catalog";
 
 const root = new URL("..", import.meta.url).pathname;
+const FRESH_REFUSAL = "this command needs an open run: send a message first";
+const FRESH_REFUSAL_WITH_IMAGE = `${FRESH_REFUSAL}\nattachments stay queued for your next message.`;
 const portText = process.env.WEB_COMMAND_GATE_PORT ?? "4195";
 if (!/^\d+$/.test(portText)) throw new Error("WEB_COMMAND_GATE_PORT must be an integer");
 const port = Number(portText);
@@ -17,21 +19,181 @@ const shots = process.env.WEB_SHOTS ?? join(root, "gate-artifacts", "commands");
 await mkdir(shots, { recursive: true });
 const gammaHome = await mkdtemp(join(tmpdir(), "gamma-command-gate-"));
 const fake = await startFakeZeta({ origins: [origin], live: false });
+// Turns run until the gate stops them: a check about a running turn must not race the fake's scripted reply.
+fake.setHoldTurns(true);
 const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: root, env: { ...process.env, ZETA_HOME: fake.home, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin, VITE_ZETA_PORT: String(fake.port) }, stdio: ["ignore", "pipe", "pipe"] });
 const failures: string[] = [];
 const errors: string[] = [];
+/** The page whose state a failed check reports. */
+let statePage: Page | undefined;
 const check = async (name: string, run: () => Promise<void>) => {
   try { if (vite.exitCode !== null) throw new Error(`vite exited ${vite.exitCode}`); await run(); if (vite.exitCode !== null) throw new Error(`vite exited ${vite.exitCode}`); console.log(`ok   ${name}`); }
-  catch (error) { const message = `${name}: ${error instanceof Error ? error.message.split("\n")[0] : error}`; failures.push(message); console.log(`FAIL ${message}`); }
+  catch (error) {
+    // Playwright's call log names the locator an unlabeled wait was waiting for.
+    const lines = error instanceof Error ? error.message.split("\n") : [String(error)];
+    const waiting = lines.find((line) => /^\s*- waiting for /.test(line))?.trim();
+    const state = statePage && !lines[0]!.includes("; saw {") ? `; saw ${await seen(statePage).catch(() => "unreadable")}` : "";
+    const message = `${name}: ${lines[0]}${waiting ? ` (${waiting})` : ""}${state}`;
+    failures.push(message); console.log(`FAIL ${message}`);
+  }
 };
 const requests = (method: string) => fake.requests.filter((request) => request.method === method);
 const field = (page: Page) => page.locator('textarea[aria-label="message"]');
+/** What a failed step saw: the composer, the command catalog requests, and the fake's turn, on one line. */
+const seen = async (page: Page) => JSON.stringify({
+  url: page.url(),
+  value: await field(page).inputValue({ timeout: 1_000 }).catch(() => "missing"),
+  expanded: await field(page).getAttribute("aria-expanded", { timeout: 1_000 }).catch(() => "missing"),
+  placeholder: await field(page).getAttribute("placeholder", { timeout: 1_000 }).catch(() => "missing"),
+  running: fake.running,
+  slashList: requests("slash_list").map((request) => request.replied === undefined ? "pending" : "replied").join(","),
+  last: fake.requests.slice(-6).map((request) => request.method).join(","),
+  receipts: await page.locator(".command-receipt-text").allInnerTexts().catch(() => []),
+});
+/** Names the step in the error, so a timeout says which wait failed and what the page and fake showed then. */
+const step = async <T,>(page: Page, label: string, run: () => Promise<T>): Promise<T> => {
+  try { return await run(); }
+  catch (error) { throw new Error(`${label}: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}; saw ${await seen(page)}`); }
+};
 const waitReady = (page: Page) => page.locator('.dock form[data-part="composer"]').waitFor({ timeout: 15_000 });
+/** Stops the fake's held turn with the stop button and waits until zeta and the composer are idle again. */
+const stopTurn = async (page: Page) => {
+  // The fake starts a turn in a microtask after it replies to send, so wait for every send's reply before reading running.
+  await step(page, "every send has its reply", () => until(() => fake.requests.every((request) => (request.method !== "send" && request.method !== "send_images") || request.replied !== undefined), 10_000));
+  await Bun.sleep(0);
+  if (!fake.running) return;
+  await step(page, "stop the held turn", async () => {
+    await page.getByRole("button", { name: "stop" }).click({ timeout: 10_000 });
+    await until(() => !fake.running, 10_000);
+    await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
+  });
+};
+const until = async (condition: () => boolean, timeout: number) => {
+  for (const end = Date.now() + timeout; !condition(); await Bun.sleep(25)) if (Date.now() > end) throw new Error(`timed out after ${timeout}ms`);
+};
+/**
+ * A loaded run accepts commands once zeta reports it attached; until then the composer shows but holds the fresh-run
+ * stand-in, which refuses commands. The run's own command source asks for the catalog when it mounts, so that request
+ * marks the moment commands reach zeta.
+ */
+const waitRunCommands = async (page: Page, since: number, label: string) => {
+  await step(page, `${label}: the composer renders`, () => waitReady(page));
+  await step(page, `${label}: the attached run asks for its command catalog`, () => until(() => fake.requests.slice(since).some((request) => request.method === "slash_list"), 15_000));
+};
+const PIXEL = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+/** The sRGB bytes of one screen pixel and of a CSS color, read the same way so they compare. */
+const pixel = async (page: Page, x: number, y: number) => {
+  const png = (await page.screenshot({ clip: { x, y, width: 1, height: 1 } })).toString("base64");
+  return page.evaluate(async (data) => {
+    const image = new Image(); image.src = `data:image/png;base64,${data}`; await image.decode();
+    const context = document.createElement("canvas").getContext("2d", { willReadFrequently: true })!;
+    context.drawImage(image, 0, 0);
+    return [...context.getImageData(0, 0, 1, 1).data.slice(0, 3)];
+  }, png);
+};
+const cssColor = (page: Page, value: string) => page.evaluate((color) => {
+  const context = document.createElement("canvas").getContext("2d", { willReadFrequently: true })!;
+  context.fillStyle = "#000"; context.fillStyle = color; context.fillRect(0, 0, 1, 1);
+  return [...context.getImageData(0, 0, 1, 1).data.slice(0, 3)];
+}, value);
+const distance = (a: number[], b: number[]) => a.reduce((sum, part, index) => sum + Math.abs(part - b[index]!), 0);
 const submit = async (page: Page, text: string) => {
   await field(page).fill(text);
   await field(page).press("Enter");
   if (text.startsWith("/") && (await field(page).inputValue()).trim() === text) await field(page).press("Enter");
 };
+
+/** Rows inside the list's scrollport, the active row, and points just inside its top and bottom edges. */
+const measureList = (page: Page) => page.getByRole("listbox", { name: "command suggestions" }).evaluate((node) => {
+  const box = node.getBoundingClientRect();
+  const composerField = document.querySelector('[data-part="composer-field"]')!.getBoundingClientRect();
+  const top = box.top + node.clientTop, bottom = top + node.clientHeight;
+  const all = [...node.querySelectorAll('[role="option"]')].map((option) => option.getBoundingClientRect());
+  const rows = all.filter((row) => row.bottom > top + 0.5 && row.top < bottom - 0.5);
+  const active = document.getElementById(document.querySelector('textarea[aria-label="message"]')!.getAttribute("aria-activedescendant") ?? "")?.getBoundingClientRect();
+  const x = Math.floor(box.right) - 6;
+  return {
+    gap: composerField.top - box.bottom, overflowing: node.scrollHeight > node.clientHeight + 1, rows: rows.length,
+    moreAbove: node.scrollTop > 0.5, moreBelow: node.scrollTop + node.clientHeight < node.scrollHeight - 0.5,
+    clipped: rows.filter((row) => row.top < top - 0.5 || row.bottom > bottom + 0.5).map((row) => [Math.round(row.top - top), Math.round(row.bottom - bottom)]),
+    activeHidden: !active || active.top < top - 0.5 || active.bottom > bottom + 0.5,
+    topRow: rows[0] ? { x: Math.floor(rows[0].left + rows[0].width / 2), y: Math.floor(rows[0].top + rows[0].height / 2) } : null,
+    edge: { x, y: Math.floor(bottom) - 3 }, edgeMid: { x, y: Math.floor(bottom - all[0]!.height / 2) },
+    topEdge: { x, y: Math.ceil(top) + 2 }, topMid: { x, y: Math.floor(top + all[0]!.height / 2) },
+    background: getComputedStyle(node).backgroundColor,
+  };
+});
+const settle = (page: Page) => page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+const openList = async (page: Page) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.mouse.move(0, 0);
+  await field(page).fill("");
+  await field(page).fill("/");
+  await step(page, "typing / opens the list", () => page.getByRole("listbox", { name: "command suggestions" }).waitFor());
+  await settle(page);
+};
+const closeList = async (page: Page) => { await page.mouse.move(0, 0); await field(page).press("Escape"); await field(page).fill(""); };
+async function listGeometry(page: Page) {
+  try {
+    await openList(page);
+    const listbox = page.getByRole("listbox", { name: "command suggestions" });
+    const atTop = await measureList(page);
+    if (atTop.gap < 4) throw new Error(`command list touches the composer field: gap ${atTop.gap}px`);
+    if (!atTop.overflowing) throw new Error("the default catalog no longer overflows the command list");
+    if (atTop.clipped.length) throw new Error(`the command list cuts ${atTop.clipped.length} visible row(s) at its edge: ${JSON.stringify(atTop)}`);
+    const background = await cssColor(page, atTop.background);
+    const moreBelow = distance(await pixel(page, atTop.edge.x, atTop.edge.y), background);
+    if (moreBelow < 12) throw new Error(`the command list shows no boundary for rows below its edge (distance ${moreBelow})`);
+    for (let index = 0; index <= atTop.rows; index++) await field(page).press("ArrowDown");
+    await settle(page);
+    const moved = await measureList(page);
+    if (moved.activeHidden || moved.clipped.length) throw new Error(`keyboard moved the active row out of view: ${JSON.stringify(moved)}`);
+    await listbox.evaluate((node) => { node.scrollTop = node.scrollHeight; });
+    await settle(page);
+    const atEnd = await measureList(page);
+    if (atEnd.clipped.length) throw new Error(`the scrolled command list cuts ${atEnd.clipped.length} row(s)`);
+    const endEdge = distance(await pixel(page, atEnd.edge.x, atEnd.edge.y), background);
+    if (endEdge > 6) throw new Error(`the command list still marks rows below after the last row (distance ${endEdge})`);
+  } finally { await closeList(page); }
+}
+/** The "more rows" shade must paint over the rows: the active and hovered rows fill their whole box, so a shade under them is hidden. */
+async function listShades(page: Page, name: string) {
+  try {
+    await openList(page);
+    const listbox = page.getByRole("listbox", { name: "command suggestions" });
+    const atTop = await measureList(page);
+    for (let index = 0; index <= atTop.rows; index++) await field(page).press("ArrowDown");
+    await settle(page);
+    const arrowed = await measureList(page);
+    if (!arrowed.moreBelow) throw new Error(`${name} the catalog has no rows below the arrowed list: ${JSON.stringify(arrowed)}`);
+    const below = distance(await pixel(page, arrowed.edge.x, arrowed.edge.y), await pixel(page, arrowed.edgeMid.x, arrowed.edgeMid.y));
+    await page.screenshot({ path: join(shots, `${name}-list-arrowed-bottom-shade.png`), clip: await listbox.boundingBox() ?? undefined });
+    if (below < 12) throw new Error(`${name} the bottom shade is hidden by the active edge row after ${atTop.rows + 1} ArrowDown (distance ${below})`);
+    await listbox.evaluate((node) => { node.scrollTop = node.scrollHeight; });
+    await settle(page);
+    const atEnd = await measureList(page);
+    if (!atEnd.moreAbove || !atEnd.topRow) throw new Error(`${name} the scrolled list has no rows above: ${JSON.stringify(atEnd)}`);
+    await page.mouse.move(atEnd.topRow.x, atEnd.topRow.y);
+    await settle(page);
+    const above = distance(await pixel(page, atEnd.topEdge.x, atEnd.topEdge.y), await pixel(page, atEnd.topMid.x, atEnd.topMid.y));
+    await page.screenshot({ path: join(shots, `${name}-list-hovered-top-shade.png`), clip: await listbox.boundingBox() ?? undefined });
+    if (above < 12) throw new Error(`${name} the top shade is hidden by the hovered edge row after scrolling (distance ${above})`);
+  } finally { await closeList(page); }
+}
+/** A wheel or trackpad scroll comes to rest on a row boundary, as the keyboard does. */
+async function listWheel(page: Page, name: string) {
+  try {
+    await openList(page);
+    const box = (await page.getByRole("listbox", { name: "command suggestions" }).boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.wheel(0, 100);
+    await page.waitForTimeout(600);
+    await settle(page);
+    const rested = await measureList(page);
+    if (!rested.moreAbove) throw new Error(`${name} the wheel did not scroll the list: ${JSON.stringify(rested)}`);
+    if (rested.clipped.length) throw new Error(`${name} a wheel scroll left ${rested.clipped.length} half row(s): ${JSON.stringify(rested.clipped)}`);
+  } finally { await closeList(page); }
+}
 
 try {
   for (let attempt = 0; attempt < 300; attempt++) {
@@ -39,20 +201,81 @@ try {
     if (await fetch(origin).then((response) => response.ok, () => false)) break;
     await Bun.sleep(100);
   }
+  // CI installs only chromium; on macOS the list's paint order is also checked in webkit.
+  if (process.platform === "darwin") {
+    const safari = await webkit.launch();
+    try {
+      const other = await safari.newPage({ viewport: { width: 1440, height: 900 } });
+      other.on("pageerror", (error) => errors.push(`webkit: ${error.message}`));
+      statePage = other;
+      const since = fake.requests.length;
+      await other.goto(`${origin}/?run=${ACTIVE}`);
+      await waitRunCommands(other, since, "webkit opens the active run");
+      await check("webkit edge shades stay visible over the active and the hovered edge row", () => listShades(other, "webkit"));
+      await check("webkit free wheel scrolling rests on whole rows", () => listWheel(other, "webkit"));
+    } finally { await safari.close(); }
+  }
+
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    // GATE_CPU_THROTTLE=20 runs chromium's main thread 20x slower, the way a loaded machine does, to reproduce timing races.
+    if (process.env.GATE_CPU_THROTTLE) await (await page.context().newCDPSession(page)).send("Emulation.setCPUThrottlingRate", { rate: Number(process.env.GATE_CPU_THROTTLE) });
     page.on("console", (message) => { if (message.type() === "error" && !/WebSocket connection|Failed to load resource/.test(message.text())) errors.push(message.text()); });
     page.on("response", (response) => { if (response.status() >= 400) errors.push(`${response.status()} ${response.url()}`); });
     page.on("pageerror", (error) => errors.push(error.message));
+    statePage = page;
     await page.goto(origin);
     await waitReady(page);
     await page.waitForLoadState("networkidle");
 
+    await check("a fresh run's command refusal names the prerequisite and keeps the image queued", async () => {
+      const image = join(gammaHome, "fresh.png");
+      await writeFile(image, PIXEL);
+      await page.locator('input[type="file"]').setInputFiles(image);
+      await page.getByLabel("remove fresh.png").waitFor({ timeout: 5_000 });
+      try {
+        const start = fake.requests.length;
+        await submit(page, "/status");
+        const receipt = page.locator(".command-receipt-text");
+        await receipt.waitFor({ timeout: 5_000 });
+        await page.setViewportSize({ width: 390, height: 844 });
+        const fit = await receipt.evaluate((node) => ({ clientHeight: node.clientHeight, scrollHeight: node.scrollHeight, width: node.clientWidth, lineHeight: getComputedStyle(node).lineHeight, text: (node as HTMLElement).innerText }));
+        await page.screenshot({ path: join(shots, "fresh-refusal-390.png") });
+        await page.setViewportSize({ width: 1440, height: 900 });
+        if (fit.scrollHeight > fit.clientHeight) throw new Error(`at 390px the fresh refusal hides part of its text: ${JSON.stringify(fit)}`);
+        const copy = await receipt.innerText();
+        if (copy !== FRESH_REFUSAL_WITH_IMAGE) throw new Error(`fresh refusal copy was ${JSON.stringify(copy)}`);
+        if (fake.requests.slice(start).some((request) => ["new_session", "slash_run", "send", "send_images"].includes(request.method))) throw new Error("fresh attached slash reached zeta");
+        if (await page.locator('[data-part="attachment"]').count() !== 1) throw new Error("fresh refusal dropped the attachment");
+        if (!await field(page).evaluate((node) => node === document.activeElement)) throw new Error("fresh refusal moved focus out of the composer");
+        await page.getByRole("button", { name: "dismiss command result" }).click();
+        await page.locator(".command-receipt").waitFor({ state: "detached", timeout: 5_000 });
+        if (await page.locator('[data-part="attachment"]').count() !== 1) throw new Error("dismissing the refusal dropped the attachment");
+      } finally {
+        if (await page.getByRole("button", { name: "dismiss command result" }).count()) await page.getByRole("button", { name: "dismiss command result" }).click();
+        if (await page.getByLabel("remove fresh.png").count()) await page.getByLabel("remove fresh.png").click();
+        await field(page).fill("");
+      }
+    });
+
+    await check("a fresh run runs gamma's own commands, which need no zeta session", async () => {
+      const start = fake.requests.length;
+      await submit(page, "/keys");
+      const receipt = page.locator(".command-receipt-text");
+      await receipt.waitFor({ timeout: 5_000 });
+      const shown = await receipt.innerText();
+      if (!shown.includes("browser precedence and terminal-only exclusions")) throw new Error(`fresh /keys answered ${JSON.stringify(shown.slice(0, 120))}`);
+      if (fake.requests.slice(start).some((request) => ["new_session", "slash_run", "send"].includes(request.method))) throw new Error("fresh /keys reached zeta");
+      if ((await field(page).inputValue()).trim() !== "") throw new Error("fresh /keys left its draft in the composer");
+      await page.getByRole("button", { name: "dismiss command result" }).click();
+      await page.locator(".command-receipt").waitFor({ state: "detached", timeout: 5_000 });
+    });
+
     await check("fresh draft blocks slash but double slash starts a direct turn", async () => {
       const start = fake.requests.length;
       await submit(page, "/status");
-      await page.getByText("commands need an open run; send a message first or open a run", { exact: true }).waitFor();
+      await page.getByText(FRESH_REFUSAL, { exact: true }).waitFor();
       if (fake.requests.slice(start).some((request) => ["new_session", "slash_run", "send"].includes(request.method))) throw new Error("fresh slash reached zeta");
       if ((await field(page).inputValue()).trim() !== "/status") throw new Error("fresh slash did not retain its draft");
       await field(page).fill("");
@@ -61,7 +284,7 @@ try {
       for (let attempt = 0; attempt < 100 && !fake.requests.slice(direct).some((request) => request.method === "send"); attempt++) await Bun.sleep(50);
       const calls = fake.requests.slice(direct);
       if (calls.filter((request) => request.method === "new_session").length !== 1 || calls.filter((request) => request.method === "send" && request.params.text === "/status").length !== 1 || calls.some((request) => request.method === "slash_run")) throw new Error(`wrong escaped slash flow: ${calls.map((call) => call.method).join(",")}`);
-      if (await page.getByRole("button", { name: "stop" }).count()) await page.getByRole("button", { name: "stop" }).click();
+      await stopTurn(page);
     });
     await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
     await page.waitForTimeout(300);
@@ -87,6 +310,7 @@ try {
       const image = join(gammaHome, "prepare.png");
       await writeFile(image, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
       await page.locator('input[type="file"]').setInputFiles(image);
+      await page.getByLabel("remove prepare.png").waitFor({ timeout: 5_000 });
       for (const message of ["slash rejected", "request timed out"]) {
         fake.failNext("slash_run", message);
         await submit(page, "/status");
@@ -213,8 +437,7 @@ try {
       const calls = fake.requests.slice(before);
       const sent = calls.find((request) => request.method === "send");
       const refreshed = calls.some((request) => request.method === "session_settings");
-      if (await page.getByRole("button", { name: "stop" }).count()) await page.getByRole("button", { name: "stop" }).click();
-      for (let attempt = 0; attempt < 200 && fake.running; attempt++) await Bun.sleep(25);
+      await stopTurn(page);
       await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
       if (typeof sent?.params.input_id !== "string" || "text" in (sent?.params ?? {})) throw new Error(`plan prompt was not opaque: ${JSON.stringify(calls)}`);
       if (!refreshed) throw new Error("plan prompt model-input identity did not refresh settings before delivery");
@@ -235,29 +458,28 @@ try {
       if (!implementation.some((request) => request.method === "send" && typeof request.params.input_id === "string") || implementation.some((request) => request.method === "send" && "text" in request.params)) throw new Error("/implement was not opaque");
       if (planWasOn && await page.locator(".plan-chip").count()) throw new Error("/implement model-input identity did not refresh the plan indicator off");
       if (requests("session_settings").length !== implementSettings + 1) throw new Error("/implement model-input identity did not refresh settings exactly once");
-      if (await page.getByRole("button", { name: "stop" }).count()) await page.getByRole("button", { name: "stop" }).click();
-      for (let attempt = 0; attempt < 200 && fake.running; attempt++) await Bun.sleep(25);
+      await stopTurn(page);
       await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
     });
 
     await check("listbox keyboard, pointer, ime, focus, and placement", async () => {
       await field(page).fill("/st");
       const listbox = page.getByRole("listbox", { name: "command suggestions" });
-      await listbox.waitFor();
+      await step(page, "typing /st opens the list", () => listbox.waitFor());
       const option = page.getByRole("option", { name: /\/status/ });
       const box = await listbox.boundingBox();
       const composer = await page.locator('[data-part="composer-field"]').boundingBox();
       if (!box || !composer || box.y + box.height > composer.y + 1) throw new Error("listbox overlaps the composer field");
       await field(page).press("ArrowDown"); await field(page).press("ArrowUp"); await field(page).press("Tab");
       if (await field(page).inputValue() !== "/status ") throw new Error("tab did not accept the active option");
-      await field(page).fill("/st"); await listbox.waitFor();
+      await field(page).fill("/st"); await step(page, "retyping /st after tab acceptance reopens the list", () => listbox.waitFor());
       await option.click();
       await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
       const pointerValue = await field(page).inputValue();
       const pointerFocus = await field(page).evaluate((node) => node === document.activeElement);
       if (pointerValue !== "/status " || !pointerFocus) throw new Error(`pointer acceptance has value ${JSON.stringify(pointerValue)} and focus ${pointerFocus}`);
       await page.setViewportSize({ width: 390, height: 844 });
-      await field(page).fill("/"); await listbox.waitFor();
+      await field(page).fill("/"); await step(page, "typing / at 390px opens the list", () => listbox.waitFor());
       const mobile = await listbox.locator('[role="option"]').evaluateAll((nodes) => nodes.map((node) => {
         const row = node.getBoundingClientRect();
         const description = node.querySelector<HTMLElement>(".command-description")!;
@@ -265,13 +487,57 @@ try {
       }).sort((a, b) => Number(b.clipped) - Number(a.clipped))[0]);
       if (!mobile || mobile.height > 56 || !mobile.clipped || mobile.ellipsis !== "ellipsis" || !mobile.label?.includes(mobile.description)) throw new Error(`mobile command row is not one accessible row: ${JSON.stringify(mobile)}`);
       await page.setViewportSize({ width: 1440, height: 900 });
-      await field(page).fill("/st"); await listbox.waitFor();
+      await field(page).fill("/st"); await step(page, "typing /st at 1440px opens the list for the ime check", () => listbox.waitFor());
       const imeRequests = fake.requests.length;
       await field(page).evaluate((node) => node.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true })));
       await field(page).dispatchEvent("keydown", { key: "Enter", code: "Enter", isComposing: true });
       if (await field(page).inputValue() !== "/st" || fake.requests.length !== imeRequests) throw new Error("ime enter accepted or submitted a completion");
       await field(page).evaluate((node) => node.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true })));
       await field(page).press("Escape");
+    });
+
+    await check("desktop command list sits apart from the field, shows whole rows, and marks rows beyond its edge", () => listGeometry(page));
+    await check("chromium edge shades stay visible over the active and the hovered edge row", () => listShades(page, "chromium"));
+    await check("chromium free wheel scrolling rests on whole rows", () => listWheel(page, "chromium"));
+    await check("without round() support the command list stays bounded", async () => {
+      await field(page).fill("/");
+      const listbox = page.getByRole("listbox", { name: "command suggestions" });
+      await listbox.waitFor();
+      // An engine without round() skips the @supports block, and a max-height that uses round() with var() computes to none.
+      const unsupported = await listbox.evaluate((node) => {
+        const strip = (rules: CSSRuleList) => {
+          for (let index = rules.length - 1; index >= 0; index--) {
+            const rule = rules[index]!;
+            if (rule instanceof CSSSupportsRule && rule.conditionText.includes("round(")) { (rule.parentRule as CSSGroupingRule | null ?? rule.parentStyleSheet!).deleteRule(index); continue; }
+            if (rule instanceof CSSStyleRule && rule.style.maxHeight.includes("round(")) rule.style.removeProperty("max-height");
+            if ("cssRules" in rule) strip((rule as CSSGroupingRule).cssRules);
+          }
+        };
+        for (const sheet of document.styleSheets) { try { strip(sheet.cssRules); } catch {} }
+        const row = node.querySelector('[role="option"]')!.getBoundingClientRect().height;
+        return { height: node.clientHeight, row, maxHeight: getComputedStyle(node).maxHeight };
+      });
+      await field(page).press("Escape");
+      await field(page).fill("");
+      const since = fake.requests.length;
+      await page.reload();
+      await waitRunCommands(page, since, "reload restores the stylesheets");
+      if (unsupported.maxHeight === "none" || unsupported.height > 6 * unsupported.row + 1) throw new Error(`without round() the command list grows unbounded: ${JSON.stringify(unsupported)}`);
+    });
+
+    await check("a command typed while the run attaches opens its list once the run attaches", async () => {
+      // Zeta's status reply is what attaches a reloaded run (run-state.ts STATUS); holding it opens the window a slow load hits.
+      fake.delayNext("status", 1_500);
+      const since = fake.requests.length;
+      await page.reload();
+      await waitReady(page);
+      await field(page).fill("/st");
+      const status = () => fake.requests.slice(since).find((request) => request.method === "status");
+      if (status()?.replied !== undefined) throw new Error("the run attached before /st was typed, so this check missed the attach window");
+      await step(page, "the attach reply arrives", () => until(() => status()?.replied !== undefined, 10_000));
+      await step(page, "/st typed before the attach opens the list after it", () => page.getByRole("listbox", { name: "command suggestions" }).waitFor({ timeout: 10_000 }));
+      await field(page).press("Escape");
+      await field(page).fill("");
     });
 
     await check("one escape closes the menu after one-shot input; modified tab and enter never accept", async () => {
@@ -417,7 +683,7 @@ try {
       await page.getByRole("button", { name: "stop" }).waitFor({ timeout: 15_000 });
     });
 
-    if (await page.getByRole("button", { name: "stop" }).count()) await page.getByRole("button", { name: "stop" }).click();
+    await stopTurn(page);
     await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
     await page.waitForTimeout(300);
     await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
@@ -436,7 +702,7 @@ try {
       if (await page.locator('[data-part="attachment"]').count() !== 1) throw new Error("opaque input cleared its attachment");
       await page.getByRole("button", { name: "stop" }).waitFor({ timeout: 10_000 }).catch(() => { throw new Error("opaque attachment turn did not stay active"); });
     });
-    if (await page.getByRole("button", { name: "stop" }).count()) await page.getByRole("button", { name: "stop" }).click();
+    await stopTurn(page);
     await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
     await page.getByLabel("remove opaque.png").click();
 
@@ -448,7 +714,7 @@ try {
       if (calls.filter((request) => request.method === "send" && request.params.text === "$review").length !== 1 || calls.some((request) => request.method === "slash_run" || request.method === "input_prepare")) throw new Error(`dollar text took command preparation: ${calls.map((call) => call.method).join(",")}`);
       await page.getByRole("button", { name: "stop" }).waitFor();
     });
-    await page.getByRole("button", { name: "stop" }).click();
+    await stopTurn(page);
     await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
 
     await check("retry after a failed opaque turn restores the command instead of sending its text", async () => {
@@ -508,7 +774,13 @@ try {
       await field(page).fill("/plan");
       await field(page).press("Escape");
       await field(page).press("Enter");
-      await page.locator(".command-receipt-text", { hasText: "commands wait until this turn ends" }).waitFor({ timeout: 5_000 }).catch(async () => { throw new Error(`active command receipt missing; url=${page.url()}; value=${JSON.stringify(await field(page).inputValue())}; requests=${fake.requests.slice(-8).map((request) => request.method).join(",")}; body=${await page.locator("body").innerText()}; html=${(await page.locator("body").innerHTML()).slice(0, 5000)}`); });
+      await page.locator(".command-receipt-text", { hasText: "until this turn ends" }).waitFor({ timeout: 5_000 }).catch(async () => { throw new Error(`active command receipt missing; url=${page.url()}; value=${JSON.stringify(await field(page).inputValue())}; requests=${fake.requests.slice(-8).map((request) => request.method).join(",")}; body=${await page.locator("body").innerText()}; html=${(await page.locator("body").innerHTML()).slice(0, 5000)}`); });
+      const composerMessage = page.locator('[data-part="composer-message"]');
+      for (let attempt = 0; attempt < 80 && /^(steering|sending)$/.test(await composerMessage.innerText()); attempt++) await Bun.sleep(25);
+      const shown = { receipts: await page.locator(".command-receipt-text").allInnerTexts(), composer: await composerMessage.innerText() };
+      if (shown.receipts.length !== 1 || shown.composer.trim()) throw new Error(`one busy refusal showed two messages: ${JSON.stringify(shown)}`);
+      const busy = page.locator(".command-receipt");
+      if (!shown.receipts[0]!.startsWith("/plan waits until this turn ends; your draft is kept") || await busy.getAttribute("data-tone") !== "quiet") throw new Error(`busy refusal does not name the command as a quiet wait: ${JSON.stringify({ text: shown.receipts[0], tone: await busy.getAttribute("data-tone") })}`);
       if (requests("slash_run").length !== before.slash + 1 || requests("send").length !== before.send || requests("steer").length !== before.steer) throw new Error("active plan did not stop at slash_run");
       if (requests("session_settings").length !== settingsBefore) throw new Error("busy plan refreshed settings");
       if ((await field(page).inputValue()).trim() !== "/plan") throw new Error("active turn lost the slash draft");
@@ -523,11 +795,65 @@ try {
       if ((await field(page).inputValue()).trim() !== "/review") throw new Error("active opaque command lost its draft");
     });
 
-    if (await page.getByRole("button", { name: "stop" }).count()) await page.getByRole("button", { name: "stop" }).click();
-    for (let attempt = 0; attempt < 200 && fake.running; attempt++) await Bun.sleep(25);
+    await stopTurn(page);
     await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
     if (await page.getByLabel("remove busy-plan.png").count()) await page.getByLabel("remove busy-plan.png").click();
     await field(page).fill("");
+
+    await check("an active turn offers only commands it can run", async () => {
+      try {
+        await submit(page, "hold this turn");
+        await page.getByPlaceholder("steer the running turn").waitFor({ timeout: 10_000 });
+        const listbox = page.getByRole("listbox", { name: "command suggestions" });
+        // Zeta ee6a82d6 server/slash_commands.py:516-536 refuses skills and prompt macros while a turn runs; "/g" matches only the greet skill.
+        await field(page).fill("/g");
+        await page.waitForTimeout(300);
+        if (await listbox.count() || await field(page).getAttribute("aria-expanded") !== "false") throw new Error("an active turn opened a menu whose every choice is refused");
+        if (await field(page).inputValue() !== "/g") throw new Error("the refused-only menu changed the draft");
+        await field(page).fill("/h");
+        await listbox.waitFor({ timeout: 5_000 });
+        const offered = await listbox.locator(".command-name").allInnerTexts();
+        if (offered.join(",") !== "/help") throw new Error(`an active turn offered ${offered.join(",")}`);
+        await field(page).press("Escape");
+        await field(page).fill("");
+        await page.getByRole("button", { name: "stop" }).click();
+        for (let attempt = 0; attempt < 200 && fake.running; attempt++) await Bun.sleep(25);
+        await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
+        await field(page).fill("/g");
+        await listbox.waitFor({ timeout: 5_000 }).catch(() => { throw new Error("an idle run no longer offers the greet skill"); });
+        await field(page).press("Escape");
+      } finally {
+        await stopTurn(page);
+        await field(page).fill("");
+      }
+    });
+
+    await check("a stopped turn has a neutral shell while a failed turn keeps the danger rail", async () => {
+      await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
+      await submit(page, "fail this turn");
+      await page.locator('[data-part="timeline"] [data-kind="error"]').last().waitFor({ timeout: 10_000 });
+      for (let attempt = 0; attempt < 200 && fake.running; attempt++) await Bun.sleep(25);
+      await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
+      const stopped = await page.locator('[data-part="timeline"] [data-kind="stopped"]').count();
+      await submit(page, "then stop this turn");
+      await page.getByRole("button", { name: "stop" }).click({ timeout: 10_000 });
+      for (let attempt = 0; attempt < 200 && await page.locator('[data-part="timeline"] [data-kind="stopped"]').count() === stopped; attempt++) await Bun.sleep(25);
+      await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
+      await page.screenshot({ path: join(shots, "stopped-and-failed-1440.png") });
+      const shells = await page.evaluate(() => {
+        const probe = document.createElement("span");
+        probe.style.color = "var(--fulcrum-danger)";
+        document.querySelector('[data-part="timeline"]')!.append(probe);
+        const danger = getComputedStyle(probe).color;
+        probe.remove();
+        const shell = (kind: string) => { const row = [...document.querySelectorAll(`[data-part="timeline"] [data-kind="${kind}"]`)].at(-1); if (!row) return null; const style = getComputedStyle(row.parentElement!); return { top: style.borderTopColor, left: style.borderLeftColor, text: getComputedStyle(row).color }; };
+        return { danger, stopped: shell("stopped"), error: shell("error") };
+      });
+      if (!shells.stopped || !shells.error) throw new Error(`missing rows: ${JSON.stringify(shells)}`);
+      if (shells.error.left !== shells.danger) throw new Error(`a failed turn lost its danger rail: ${JSON.stringify(shells)}`);
+      if ([shells.stopped.top, shells.stopped.left, shells.stopped.text].includes(shells.danger)) throw new Error(`a stopped turn uses the danger color: ${JSON.stringify(shells)}`);
+    });
+
     await check("unknown and malformed commands are dismissible error receipts", async () => {
       await submit(page, "/does-not-exist");
       await page.getByText("unknown command: /does-not-exist", { exact: true }).waitFor();
@@ -540,14 +866,16 @@ try {
 
     await check("missing model input feature blocks slash_run", async () => {
       fake.setModelInputIds(false);
-      await page.reload();
-      await waitReady(page);
-      const start = fake.requests.length;
-      await submit(page, "/review");
-      await page.getByText("not available in this server version", { exact: true }).waitFor();
-      if (fake.requests.slice(start).some((request) => request.method === "slash_run" || request.method === "send")) throw new Error("downgrade path reached slash_run or send");
-      if ((await field(page).inputValue()).trim() !== "/review") throw new Error("downgrade path lost its draft");
-      fake.setModelInputIds(true);
+      try {
+        const since = fake.requests.length;
+        await page.reload();
+        await waitRunCommands(page, since, "reload without model_input_ids");
+        const start = fake.requests.length;
+        await submit(page, "/review");
+        await step(page, "/review without model_input_ids shows the unavailable receipt", () => page.getByText("not available in this server version", { exact: true }).waitFor());
+        if (fake.requests.slice(start).some((request) => request.method === "slash_run" || request.method === "send")) throw new Error("downgrade path reached slash_run or send");
+        if ((await field(page).inputValue()).trim() !== "/review") throw new Error("downgrade path lost its draft");
+      } finally { fake.setModelInputIds(true); }
     });
 
     await check("approve always reaches zeta with persistence", async () => {
@@ -556,11 +884,12 @@ try {
       await page.getByText("approved", { exact: true }).waitFor({ timeout: 10_000 }).catch(async () => { throw new Error(`ordinary approval wording missing; body=${await page.locator("body").innerText()}`); });
       if (await page.getByText("always allowed for this session", { exact: true }).count()) throw new Error("ordinary approval used the session-wide wording");
       fake.setLive(true);
+      const since = fake.requests.length;
       await page.goto(`${origin}/?run=${ACTIVE}`);
-      await waitReady(page);
-      await page.getByRole("button", { name: "always allow", exact: true }).waitFor({ timeout: 15_000 });
+      await waitRunCommands(page, since, "open the live approval run");
+      await step(page, "the live approval shows always allow", () => page.getByRole("button", { name: "always allow", exact: true }).waitFor({ timeout: 15_000 }));
       await submit(page, "/always approval-1");
-      await page.getByText("approval · always allowed", { exact: false }).waitFor({ timeout: 10_000 });
+      await step(page, "/always approval-1 shows its receipt", () => page.getByText("approval · always allowed", { exact: false }).waitFor({ timeout: 10_000 }));
       await page.waitForFunction(() => document.querySelector('[data-part="approval-actions"]') === null, undefined, { timeout: 10_000 }).catch(() => {});
       await page.getByText("always allowed for this session", { exact: true }).waitFor({ timeout: 5_000 }).catch(async () => { throw new Error(`always-allowed decided wording missing; approval=${await page.locator(".gamma-approval").evaluateAll((nodes) => nodes.map((node) => node.outerHTML).join(" | "))}`); });
       const decision = fake.decisions.at(-1);
@@ -570,7 +899,7 @@ try {
     await check("new opens an immediate draft run", async () => {
       const before = page.url();
       await submit(page, "/new");
-      await page.waitForURL((url) => url.toString() !== before && url.searchParams.get("run")?.startsWith("draft:"), { timeout: 10_000 });
+      await step(page, "/new moves to a draft run url", () => page.waitForURL((url) => url.toString() !== before && url.searchParams.get("run")?.startsWith("draft:"), { timeout: 10_000 }));
       await page.getByPlaceholder("message zeta").waitFor();
     });
 

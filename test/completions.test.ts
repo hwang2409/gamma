@@ -98,3 +98,23 @@ test("a repeated select event keeps the active row", async () => {
   await Promise.resolve();
   expect(model.getSnapshot()).toEqual({ open: true, rows, activeIndex: 1 });
 });
+
+test("a new command source answers the token being typed, but never reopens an Escape-closed menu", async () => {
+  const model = new CompletionModel(controller(async () => []));
+  model.update("/st", 3);
+  await Promise.resolve();
+  expect(model.getSnapshot().open).toBe(false);
+  model.setController(controller());
+  await Promise.resolve();
+  expect(model.getSnapshot()).toEqual({ open: true, rows, activeIndex: 0 });
+
+  expect(model.key("Escape")).toEqual({ handled: true });
+  model.setController(controller());
+  await Promise.resolve();
+  expect(model.getSnapshot().open).toBe(false);
+
+  model.update("", 0);
+  model.setController(controller());
+  await Promise.resolve();
+  expect(model.getSnapshot().open).toBe(false);
+});

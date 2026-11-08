@@ -147,6 +147,7 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
   const statuses = new Map<string, "queued" | "delivered" | "dropped">();
   let aborts = 0;
   let echo = true;
+  let holdTurns = false;
   const withheldEchoes: Array<() => void> = [];
   const withheldHistory: Array<() => void> = [];
   let chat: { session: string; sendDelivery: string | null; steers: string[]; aborted: boolean } | null = null;
@@ -165,6 +166,11 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
       await wait(200);
       e("error", { error: { code: "provider_error", message: "the provider is overloaded (529)" } });
       return finish();
+    }
+    // With holdTurns, a turn runs until the client stops it, so a check of the running state cannot race the scripted reply.
+    if (holdTurns) {
+      while (!turn.aborted) await wait(25);
+      return;
     }
     if (prompt.includes("use a tool")) {
       const call = { id: `chat-tool-${sent.length}`, name: "bash", arguments: { command: "sleep 2" } };
@@ -238,6 +244,7 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
     sent,
     clearSent() { sent.splice(0); },
     setEcho(value: boolean) { echo = value; },
+    setHoldTurns(value: boolean) { holdTurns = value; },
     persistWithheldHistory() { withheldHistory.splice(0).forEach((persist) => persist()); },
     flushEchoes() { this.persistWithheldHistory(); withheldEchoes.splice(0).forEach((send) => send()); },
     get history() { return histories[ACTIVE] ?? []; },
@@ -654,6 +661,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     sent: composer.sent,
     clearSent() { composer.clearSent(); },
     setEcho(value: boolean) { composer.setEcho(value); },
+    /** `true`: every turn except a "fail this turn" prompt runs until it is stopped. */
+    setHoldTurns(value: boolean) { composer.setHoldTurns(value); },
     flushEchoes() { composer.flushEchoes(); },
     get aborts() { return composer.aborts; },
     /** Closes every socket, like a network blip; the server keeps running. */

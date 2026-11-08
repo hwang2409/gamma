@@ -166,6 +166,8 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .status-link::after { content: " ↓"; }
 /* A failed turn: the error row, then its one action. */
 .turn-error { display: grid; justify-items: start; gap: 6px; padding: 8px; border: 1px solid var(--fulcrum-danger); border-left-width: var(--rail); }
+/* The user's own stop is not a failure: fulcrum labels it "stopped" with its square mark, and the shell stays neutral. */
+.turn-error:has(> [data-kind="stopped"]) { border-color: var(--fulcrum-border); border-left-color: var(--fulcrum-muted); }
 .turn-retry { min-height: 30px; padding: 0 10px; font-size: 12px; }
 
 /* Command results are run-local and stay separate from the transcript. */
@@ -173,13 +175,29 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .command-receipt[data-tone="error"] { border-left-color: var(--fulcrum-danger); color: var(--fulcrum-danger); }
 .command-receipt-label { flex: none; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
 .command-receipt-text { flex: 1; min-width: 0; max-height: min(10dvh, 80px); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* The global ring is drawn 2 px inside; on the receipt text it would cover the first glyph column. */
+.command-receipt-text:focus-visible { outline-offset: 2px; }
 .command-receipt .ghost { flex: none; min-width: 40px; min-height: 40px; transition: transform 120ms cubic-bezier(0.2, 0, 0, 1); }
 .command-receipt .ghost:active { transform: scale(0.96); }
 
 /* The composer: fulcrum's parts, plus gamma's tray, footer tools, and vim mode. */
 .dock [data-part="composer"] { position: relative; }
-.command-listbox { display: grid; max-height: min(32dvh, 260px); overflow-y: auto; border-bottom: 1px solid var(--fulcrum-border); background: var(--fulcrum-bg); }
-.dock .command-option { display: grid; grid-template-columns: minmax(10ch, auto) minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 40px; padding: 6px var(--inset); border: 0; background: transparent; color: var(--fulcrum-fg); text-align: left; }
+/* The list shows whole rows only (its height rounds down to the row size, and a free scroll snaps to a row), stands
+   8 px off the field, and shades each edge that has more rows past it. The shades are sticky, zero-height layers above
+   the rows, so an active or hovered edge row cannot hide them, and pointer events pass through to the rows. */
+.command-listbox {
+  --row: 40px;
+  --shade: color-mix(in srgb, var(--fulcrum-fg) 22%, transparent);
+  display: grid; max-height: calc(min(32dvh, 6 * var(--row)) + 1px); margin-bottom: 8px; overflow-y: auto; scroll-snap-type: y proximity; border-bottom: 1px solid var(--fulcrum-border); background: var(--fulcrum-bg);
+}
+@supports (max-height: round(down, 1px, 1px)) {
+  .command-listbox { max-height: calc(min(round(down, 32dvh, var(--row)), 6 * var(--row)) + 1px); }
+}
+.command-listbox::before, .command-listbox::after { content: ""; position: sticky; z-index: 1; height: 10px; pointer-events: none; opacity: 0; }
+.command-listbox::before { top: 0; margin-bottom: -10px; background: linear-gradient(var(--shade), transparent); }
+.command-listbox::after { bottom: 0; margin-top: -10px; background: linear-gradient(transparent, var(--shade)); }
+.command-listbox[data-more-above]::before, .command-listbox[data-more-below]::after { opacity: 1; }
+.dock .command-option { display: grid; grid-template-columns: minmax(10ch, auto) minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: var(--row); padding: 6px var(--inset); border: 0; background: transparent; color: var(--fulcrum-fg); text-align: left; scroll-snap-align: start; }
 /* Hover is a faint fill only; the active row, the one Enter or Tab accepts, has the surface fill, an accent bar, and full-color text. */
 .dock .command-option:hover { background: color-mix(in srgb, var(--fulcrum-surface) 50%, var(--fulcrum-bg)); text-decoration: none; }
 .dock .command-option[aria-selected="true"] { background: var(--fulcrum-surface); box-shadow: inset 4px 0 var(--fulcrum-accent); }
@@ -304,7 +322,8 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .inspector-body pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 600px) {
   .dock .command-receipt .ghost { min-width: 44px; min-height: 44px; }
-  .dock .command-option { grid-template-columns: minmax(8ch, auto) minmax(0, 1fr) auto; min-height: 44px; }
+  .dock .command-option { grid-template-columns: minmax(8ch, auto) minmax(0, 1fr) auto; }
+  .command-listbox { --row: 44px; }
   .command-description { grid-column: auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .inspector-backdrop { padding: 0; }
   .artifacts { padding-inline-start: 8px; }

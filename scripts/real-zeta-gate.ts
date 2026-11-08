@@ -181,7 +181,7 @@ try {
     await field.fill("/plan");
     await field.press("Escape");
     await field.press("Enter");
-    await page.getByText(/commands wait until this turn ends/).waitFor({ timeout: 10_000 });
+    await page.getByText(/\/plan waits until this turn ends; your draft is kept/).waitFor({ timeout: 10_000 });
     if ((await field.inputValue()).trim() !== "/plan") throw new Error("real active-turn refusal lost the plan draft");
     if (frames.filter((frame) => frame.includes('"method":"session_settings"')).length !== busySettings) throw new Error("real busy /plan refreshed settings");
     await page.getByRole("button", { name: "jump to approval", exact: true }).click();
