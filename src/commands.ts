@@ -115,12 +115,16 @@ export function createCommandController(
     features: [...capabilities.features],
   } satisfies CommandClient;
 
-  async function refreshCatalog(): Promise<void> {
+  let loading: Promise<void> | undefined;
+  /** One catalog request at a time: an attach asks from both the mount effect and the pending token, and they share it. */
+  function refreshCatalog(): Promise<void> {
     if (!capabilities.requests.has("slash_list")) {
       catalog = [];
-      return;
+      return Promise.resolve();
     }
-    catalog = (await listSlashCommands(client, sessionId)).commands;
+    return loading ??= listSlashCommands(client, sessionId).then(
+      (result) => { catalog = result.commands; },
+    ).finally(() => { loading = undefined; });
   }
 
   async function completions(valueBeforeCursor: string): Promise<CompletionRow[]> {

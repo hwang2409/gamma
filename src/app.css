@@ -171,13 +171,15 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .turn-retry { min-height: 30px; padding: 0 10px; font-size: 12px; }
 
 /* Command results are run-local and stay separate from the transcript. */
-.command-receipt { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 6px; padding: 8px 10px; border: 1px solid var(--fulcrum-border); border-left: var(--rail) solid var(--fulcrum-muted); background: var(--fulcrum-bg); font-size: 12px; }
+.command-receipt { --receipt-control: 40px; display: flex; align-items: flex-start; gap: 12px; margin-bottom: 6px; padding: 8px 10px; border: 1px solid var(--fulcrum-border); border-left: var(--rail) solid var(--fulcrum-muted); background: var(--fulcrum-bg); font-size: 12px; }
 .command-receipt[data-tone="error"] { border-left-color: var(--fulcrum-danger); color: var(--fulcrum-danger); }
+/* Centered against the buttons while it is shorter than them (one line); a taller body fills the row, so it starts at the top. */
+.command-receipt-body { display: flex; flex: 1; align-self: center; gap: 12px; min-width: 0; }
 .command-receipt-label { flex: none; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
 .command-receipt-text { flex: 1; min-width: 0; max-height: min(10dvh, 80px); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* The global ring is drawn 2 px inside; on the receipt text it would cover the first glyph column. */
 .command-receipt-text:focus-visible { outline-offset: 2px; }
-.command-receipt .ghost { flex: none; min-width: 40px; min-height: 40px; transition: transform 120ms cubic-bezier(0.2, 0, 0, 1); }
+.command-receipt .ghost { flex: none; min-width: var(--receipt-control); min-height: var(--receipt-control); transition: transform 120ms cubic-bezier(0.2, 0, 0, 1); }
 .command-receipt .ghost:active { transform: scale(0.96); }
 
 /* The composer: fulcrum's parts, plus gamma's tray, footer tools, and vim mode. */
@@ -202,6 +204,12 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .dock .command-option:hover { background: color-mix(in srgb, var(--fulcrum-surface) 50%, var(--fulcrum-bg)); text-decoration: none; }
 .dock .command-option[aria-selected="true"] { background: var(--fulcrum-surface); box-shadow: inset 4px 0 var(--fulcrum-accent); }
 .dock .command-option[aria-selected="true"] :is(.command-description, .command-source) { color: var(--fulcrum-fg); }
+/* Forced colors drop the fills and the bar above, so the active row takes the system selection colors, and hover an outline. */
+@media (forced-colors: active) {
+  .dock .command-option:hover { outline: 2px solid CanvasText; outline-offset: -2px; }
+  .dock .command-option[aria-selected="true"] { forced-color-adjust: none; background: Highlight; color: HighlightText; }
+  .dock .command-option[aria-selected="true"] :is(.command-name, .command-description, .command-source) { color: HighlightText; }
+}
 .command-name { font-weight: 700; }
 .gamma-tool { position: relative; }
 .gamma-tool.always-allowed [data-part="tool-status"] { visibility: hidden; }
@@ -321,7 +329,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .inspector-body td { border: 1px solid var(--fulcrum-border); padding: 5px 8px; white-space: pre-wrap; }
 .inspector-body pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 600px) {
-  .dock .command-receipt .ghost { min-width: 44px; min-height: 44px; }
+  .dock .command-receipt { --receipt-control: 44px; }
   .dock .command-option { grid-template-columns: minmax(8ch, auto) minmax(0, 1fr) auto; }
   .command-listbox { --row: 44px; }
   .command-description { grid-column: auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

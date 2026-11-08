@@ -250,7 +250,12 @@ export function GammaComposer({ state, reason, blockedReason, vim: vimOn, comman
   const completion = useSyncExternalStore(completions.subscribe, completions.getSnapshot);
   const submission = useSubmission(state, Boolean(blockedReason), commands, onSubmit, onPreparationFailure, onStop, draft, attachments, store, runId, pending);
   useEffect(() => { if (autoFocus && (!document.activeElement || document.activeElement === document.body)) draft.input.current?.focus({ preventScroll: true }); }, [autoFocus]);
-  useEffect(() => { completions.setController(commands); void commands.refreshCatalog().catch(() => {}); }, [completions, commands]);
+  useEffect(() => {
+    // Read the field, not the model's last input: a submit clears the draft without an input event.
+    const field = draft.input.current;
+    completions.setController(commands, field ? { value: field.value, caret: field.selectionStart } : { value: draft.text, caret: draft.text.length });
+    void commands.refreshCatalog().catch(() => {});
+  }, [completions, commands]);
   useEffect(() => { onFileInput?.(attachments.files.current); return () => onFileInput?.(null); }, [attachments.files, onFileInput]);
   const stopRef = useCallback((button: HTMLButtonElement | null) => {
     if (!button) return;

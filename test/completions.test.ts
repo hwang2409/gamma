@@ -104,17 +104,29 @@ test("a new command source answers the token being typed, but never reopens an E
   model.update("/st", 3);
   await Promise.resolve();
   expect(model.getSnapshot().open).toBe(false);
-  model.setController(controller());
+  model.setController(controller(), { value: "/st", caret: 3 });
   await Promise.resolve();
   expect(model.getSnapshot()).toEqual({ open: true, rows, activeIndex: 0 });
 
   expect(model.key("Escape")).toEqual({ handled: true });
-  model.setController(controller());
+  model.setController(controller(), { value: "/st", caret: 3 });
   await Promise.resolve();
   expect(model.getSnapshot().open).toBe(false);
 
   model.update("", 0);
-  model.setController(controller());
+  model.setController(controller(), { value: "", caret: 0 });
   await Promise.resolve();
   expect(model.getSnapshot().open).toBe(false);
+});
+
+test("a new command source asks about the field's text, not the input before a submit cleared it", async () => {
+  const model = new CompletionModel(controller(async () => []));
+  model.update("/status", 7);
+  await Promise.resolve();
+  // The submit consumed the draft with no input event, so only the field knows it is empty now.
+  const asked: string[] = [];
+  model.setController(controller(async (value) => { asked.push(value); return rows; }), { value: "", caret: 0 });
+  await Promise.resolve();
+  expect(model.getSnapshot().open).toBe(false);
+  expect(asked).toEqual([]);
 });

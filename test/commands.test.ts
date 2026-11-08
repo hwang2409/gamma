@@ -154,6 +154,16 @@ test("a fresh draft runs gamma's own actions and refuses commands that need a ze
   expect(await createUnavailableCommandController().prepareComposerInput("/status")).toEqual({ kind: "receipt", text: "not available in this server version", tone: "error", retain: true });
 });
 
+test("an attach with a pending slash token sends one slash_list, shared by both askers", async () => {
+  const { controller, frames } = fake({ slash_list: slashList });
+  // composer.tsx: the new controller re-asks about the pending token and the mount effect refreshes the catalog.
+  const [rows] = await Promise.all([controller.completions("/st"), controller.refreshCatalog()]);
+  expect(rows.map((row) => row.name)).toEqual(["status", "story"]);
+  expect(frames.filter((frame) => frame.method === "slash_list")).toHaveLength(1);
+  await controller.refreshCatalog();
+  expect(frames.filter((frame) => frame.method === "slash_list")).toHaveLength(2);
+});
+
 test("autocomplete filters and ranks slash and skill rows and exposes source badges", async () => {
   const { controller, frames } = fake({ slash_list: slashList });
   expect(await controller.completions("/st")).toEqual([
