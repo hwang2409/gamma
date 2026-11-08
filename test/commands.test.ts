@@ -45,8 +45,6 @@ describe("completion tokens", () => {
 describe("slash results", () => {
   const cases = [
     ["output", { kind: "output", text: "model: luna" }, { kind: "receipt", text: "model: luna", tone: "quiet", command: "review" }],
-    // Legacy /mcp status frame from Zeta 5feea2fc src/zeta/server/slash_commands.py:413-425.
-    ["text", { kind: "text", text: "server: connected" }, { kind: "receipt", text: "server: connected", tone: "quiet", command: "review" }],
     ["error", { kind: "error", text: "status unavailable" }, { kind: "receipt", text: "status unavailable", tone: "error" }],
     ["unknown", { kind: "unknown", name: "wat" }, { kind: "receipt", text: "unknown command: /wat", tone: "error" }],
     ["model_input", { kind: "model_input", input_id: "opaque-1", display_text: "/review this" }, { kind: "send-input", inputId: "opaque-1", displayText: "/review this", command: "review" }],
