@@ -11,6 +11,6 @@ export function assertPrivateProofHome(home: string | undefined, proofWorktree: 
   const resolved = resolve(home);
   const defaultHome = resolve(homedir(), ".zeta");
   if (resolved === defaultHome || inside(defaultHome, resolved)) throw new Error("real-zeta proof must never use the default ~/.zeta home or a child of it");
-  if (!inside(tmpdir(), resolved) && !inside(proofWorktree, resolved)) throw new Error("real-zeta proof ZETA_HOME must be under the proof worktree or the system temp directory");
+  if (!inside(tmpdir(), resolved) && !inside(resolve("/tmp"), resolved) && !inside(proofWorktree, resolved)) throw new Error("real-zeta proof ZETA_HOME must be under the proof worktree or /tmp");
   return resolved;
 }
