@@ -184,14 +184,14 @@ export function createUnavailableCommandController(message = "not available in t
     async prepareComposerInput(text) {
       if (detached && /^\/permissions(?:\s|$)/.test(text.trim())) return { kind: "receipt", text: "open this run before changing permissions", tone: "error", retain: true };
       if (!isSlashCommandText(text)) return directSend(text);
-      return (detached ? localAction(text.trimStart()) : undefined) ?? { kind: "receipt", text: message, tone: "error", retain: true };
+      return localAction(text.trimStart()) ?? { kind: "receipt", text: message, tone: "error", retain: true };
     },
     async completions() { return []; },
     async refreshCatalog() {},
   };
 }
 
-/** Gamma's own actions, which need no zeta session or feature, for a server that cannot run slash commands. */
+/** Gamma's own actions, which need no zeta session, feature, or connection. */
 function localAction(text: string): ComposerAction | undefined {
   const name = CLIENT_ACTIONS[commandName(text)];
   return name && isLocalAction(name) ? { kind: "client-action", name, args: commandArgs(text) } : undefined;

@@ -1,7 +1,7 @@
 // Compatibility matrix for servers that lack parity features (gate-compat). The invariant: an unsupported action is
 // hidden or answered by a local retained receipt, and a slash-led draft never reaches the model as plain text.
 import { describe, expect, test } from "bun:test";
-import { createCommandController, type CommandCapabilities, type CommandRequest } from "../src/commands";
+import { createCommandController, createUnavailableCommandController, type CommandCapabilities, type CommandRequest } from "../src/commands";
 
 type Frame = { method: string; params: Record<string, unknown> };
 
@@ -102,4 +102,13 @@ describe("gamma's local actions need no zeta feature", () => {
     const theme = controllerFor(capabilities, { slash_run: { kind: "client_only", name: "theme" } });
     expect(await theme.controller.prepareComposerInput("/theme dark")).toEqual({ kind: "client-action", name: "theme", args: "dark" });
   });
+});
+
+test("no client at all (disconnected): /keys and /theme still run locally; zeta commands keep their draft", async () => {
+  // src/app.tsx builds this controller with no arguments while there is no zeta client.
+  const offline = createUnavailableCommandController();
+  expect(await offline.prepareComposerInput("/keys")).toEqual({ kind: "client-action", name: "keys", args: "" });
+  expect(await offline.prepareComposerInput("/theme dracula")).toEqual({ kind: "client-action", name: "theme", args: "dracula" });
+  for (const draft of ["/status", "/review this", "/permissions", "/approve"]) expect(await offline.prepareComposerInput(draft)).toEqual({ kind: "receipt", text: "not available in this server version", tone: "error", retain: true });
+  expect(await offline.prepareComposerInput("hello")).toEqual({ kind: "send", text: "hello" });
 });

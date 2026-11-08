@@ -290,6 +290,28 @@ try {
       assertNoSlashSend(back, true);
     });
 
+    // While there is no client the composer pauses every submit (src/app.tsx dockBlockedReason), so the offline local-action
+    // rule is proven at the controller (test/compatibility.test.ts); here the draft must survive and run once zeta returns.
+    await check("no client at all (zeta stopped): submit pauses with the draft kept, then /keys runs after zeta returns", async () => {
+      resetServer();
+      await openRun(page);
+      await fake.stop();
+      try {
+        await labeled("the composer pauses sending", page.getByText("sending is paused until zeta serve runs again").waitFor({ timeout: 15_000 }));
+        await field(page).fill("/keys");
+        await field(page).press("Escape");
+        await field(page).press("Enter");
+        await Bun.sleep(500);
+        if ((await field(page).inputValue()) !== "/keys") throw new Error("a paused submit lost the draft");
+        if (await receipt(page).count()) throw new Error(`a paused submit showed ${JSON.stringify(await receipt(page).innerText())}`);
+      } finally { await fake.start(); }
+      await labeled("the run is ready again", page.locator('.status-line[data-state="ready"]').waitFor({ timeout: 20_000 }));
+      await field(page).press("Enter");
+      await labeled("/keys answers after zeta returns", receipt(page).waitFor({ timeout: 10_000 }));
+      if (!(await receipt(page).innerText()).includes("browser precedence and terminal-only exclusions")) throw new Error("/keys did not run after zeta returned");
+      await dismiss(page);
+    });
+
     if (errors.length) failures.push(...errors.map((error) => `browser error: ${error}`));
   } finally { await browser.close(); }
 } finally {
