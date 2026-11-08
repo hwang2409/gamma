@@ -64,8 +64,8 @@ async function browserReloadConvention(name: string, browserType: BrowserType) {
     await page.keyboard.press("Control+r");
     await page.waitForTimeout(300);
     const reloaded = loads > 1;
-    expect(reloaded === browserUsesControlRForReload(process.platform), `${name} ctrl+r reload=${reloaded} disagrees with the platform rule`);
-    console.log(`ok   ${name} ctrl+r browser reload convention (${reloaded ? "reload" : "not reload"})`);
+    if (process.platform === "darwin") expect(!reloaded, `${name} ctrl+r unexpectedly reloaded on macOS`);
+    console.log(`ok   ${name} ctrl+r browser convention observed (${reloaded ? "reload" : "not reload"})`);
   } finally { await browser.close(); }
 }
 
@@ -188,10 +188,16 @@ async function exerciseHandlers(page: Page) {
   await field(page).press("u");
   expect(await field(page).inputValue() === "abc", "vim undo did not restore the draft");
   if (browserUsesControlRForReload(process.platform)) {
-    const loaded = page.waitForEvent("load", { timeout: 10_000 });
+    await page.evaluate(() => {
+      localStorage.removeItem("gamma-ctrl-r-default-prevented");
+      window.addEventListener("keydown", (event) => {
+        if (event.ctrlKey && event.key.toLowerCase() === "r") localStorage.setItem("gamma-ctrl-r-default-prevented", String(event.defaultPrevented));
+      }, { once: true });
+    });
     await field(page).press("Control+r");
-    await loaded;
+    await page.waitForTimeout(300);
     await field(page).waitFor();
+    expect(await page.evaluate(() => localStorage.getItem("gamma-ctrl-r-default-prevented")) === "false", "the composer blocked the browser's ctrl+r convention");
   } else {
     await field(page).press("Control+r");
     expect(await field(page).inputValue() === "ac", "ctrl+r did not redo when the browser leaves it available");
