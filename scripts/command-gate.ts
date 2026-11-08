@@ -71,20 +71,24 @@ try {
       await writeFile(image, PIXEL);
       await page.locator('input[type="file"]').setInputFiles(image);
       await page.getByLabel("remove fresh.png").waitFor({ timeout: 5_000 });
-      const start = fake.requests.length;
-      await submit(page, "/status");
-      const receipt = page.locator(".command-receipt-text");
-      await receipt.waitFor({ timeout: 5_000 });
-      const copy = await receipt.innerText();
-      if (copy !== "commands need an open run; send a message first or open a run\nattachments stay queued and send with your next message.") throw new Error(`fresh refusal copy was ${JSON.stringify(copy)}`);
-      if (fake.requests.slice(start).some((request) => ["new_session", "slash_run", "send", "send_images"].includes(request.method))) throw new Error("fresh attached slash reached zeta");
-      if (await page.locator('[data-part="attachment"]').count() !== 1) throw new Error("fresh refusal dropped the attachment");
-      if (!await field(page).evaluate((node) => node === document.activeElement)) throw new Error("fresh refusal moved focus out of the composer");
-      await page.getByRole("button", { name: "dismiss command result" }).click();
-      await page.locator(".command-receipt").waitFor({ state: "detached", timeout: 5_000 });
-      if (await page.locator('[data-part="attachment"]').count() !== 1) throw new Error("dismissing the refusal dropped the attachment");
-      await page.getByLabel("remove fresh.png").click();
-      await field(page).fill("");
+      try {
+        const start = fake.requests.length;
+        await submit(page, "/status");
+        const receipt = page.locator(".command-receipt-text");
+        await receipt.waitFor({ timeout: 5_000 });
+        const copy = await receipt.innerText();
+        if (copy !== "commands need an open run; send a message first or open a run\nattachments stay queued and send with your next message.") throw new Error(`fresh refusal copy was ${JSON.stringify(copy)}`);
+        if (fake.requests.slice(start).some((request) => ["new_session", "slash_run", "send", "send_images"].includes(request.method))) throw new Error("fresh attached slash reached zeta");
+        if (await page.locator('[data-part="attachment"]').count() !== 1) throw new Error("fresh refusal dropped the attachment");
+        if (!await field(page).evaluate((node) => node === document.activeElement)) throw new Error("fresh refusal moved focus out of the composer");
+        await page.getByRole("button", { name: "dismiss command result" }).click();
+        await page.locator(".command-receipt").waitFor({ state: "detached", timeout: 5_000 });
+        if (await page.locator('[data-part="attachment"]').count() !== 1) throw new Error("dismissing the refusal dropped the attachment");
+      } finally {
+        if (await page.getByRole("button", { name: "dismiss command result" }).count()) await page.getByRole("button", { name: "dismiss command result" }).click();
+        if (await page.getByLabel("remove fresh.png").count()) await page.getByLabel("remove fresh.png").click();
+        await field(page).fill("");
+      }
     });
 
     await check("fresh draft blocks slash but double slash starts a direct turn", async () => {
@@ -342,9 +346,9 @@ try {
       if (atEnd.clipped) throw new Error(`the scrolled command list cuts ${atEnd.clipped} row(s)`);
       const endEdge = distance(await pixel(page, atEnd.edge.x, atEnd.edge.y), background);
       if (endEdge > 6) throw new Error(`the command list still marks rows below after the last row (distance ${endEdge})`);
-      await field(page).press("Escape");
-      await field(page).fill("");
     });
+    await field(page).press("Escape");
+    await field(page).fill("");
 
     await check("one escape closes the menu after one-shot input; modified tab and enter never accept", async () => {
       const listbox = page.getByRole("listbox", { name: "command suggestions" });
@@ -601,13 +605,9 @@ try {
     if (await page.getByLabel("remove busy-plan.png").count()) await page.getByLabel("remove busy-plan.png").click();
     await field(page).fill("");
 
-    await check("an active turn offers only commands it can run, and a stopped turn stays neutral", async () => {
+    await check("an active turn offers only commands it can run", async () => {
       const wordDelay = process.env.FAKE_ZETA_WORD_MS;
       try {
-        await submit(page, "fail this turn");
-        await page.locator('[data-part="timeline"] [data-kind="error"]').last().waitFor({ timeout: 10_000 });
-        for (let attempt = 0; attempt < 200 && fake.running; attempt++) await Bun.sleep(25);
-        await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
         process.env.FAKE_ZETA_WORD_MS = "300";
         await submit(page, "hold this turn");
         await page.getByPlaceholder("steer the running turn").waitFor({ timeout: 10_000 });
@@ -626,25 +626,41 @@ try {
         await page.getByRole("button", { name: "stop" }).click();
         for (let attempt = 0; attempt < 200 && fake.running; attempt++) await Bun.sleep(25);
         await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
-        await page.locator('[data-part="timeline"] [data-kind="stopped"]').last().waitFor({ timeout: 5_000 });
-        const shells = await page.evaluate(() => {
-          const probe = document.createElement("span");
-          probe.style.color = "var(--fulcrum-danger)";
-          document.querySelector('[data-part="timeline"]')!.append(probe);
-          const danger = getComputedStyle(probe).color;
-          probe.remove();
-          const shell = (kind: string) => { const row = [...document.querySelectorAll(`[data-part="timeline"] [data-kind="${kind}"]`)].at(-1)!; const style = getComputedStyle(row.parentElement!); return { top: style.borderTopColor, left: style.borderLeftColor, text: getComputedStyle(row).color }; };
-          return { danger, stopped: shell("stopped"), error: shell("error") };
-        });
-        if (shells.error.left !== shells.danger) throw new Error(`a failed turn lost its danger rail: ${JSON.stringify(shells)}`);
-        if ([shells.stopped.top, shells.stopped.left, shells.stopped.text].includes(shells.danger)) throw new Error(`a stopped turn uses the danger color: ${JSON.stringify(shells)}`);
         await field(page).fill("/g");
-        await listbox.waitFor({ timeout: 5_000 });
+        await listbox.waitFor({ timeout: 5_000 }).catch(() => { throw new Error("an idle run no longer offers the greet skill"); });
         await field(page).press("Escape");
-        await field(page).fill("");
       } finally {
         if (wordDelay === undefined) delete process.env.FAKE_ZETA_WORD_MS; else process.env.FAKE_ZETA_WORD_MS = wordDelay;
+        if (await page.getByRole("button", { name: "stop" }).count()) await page.getByRole("button", { name: "stop" }).click();
+        for (let attempt = 0; attempt < 200 && fake.running; attempt++) await Bun.sleep(25);
+        await field(page).fill("");
       }
+    });
+
+    await check("a stopped turn has a neutral shell while a failed turn keeps the danger rail", async () => {
+      await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
+      await submit(page, "fail this turn");
+      await page.locator('[data-part="timeline"] [data-kind="error"]').last().waitFor({ timeout: 10_000 });
+      for (let attempt = 0; attempt < 200 && fake.running; attempt++) await Bun.sleep(25);
+      await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
+      const stopped = await page.locator('[data-part="timeline"] [data-kind="stopped"]').count();
+      await submit(page, "then stop this turn");
+      await page.getByRole("button", { name: "stop" }).click({ timeout: 10_000 });
+      for (let attempt = 0; attempt < 200 && await page.locator('[data-part="timeline"] [data-kind="stopped"]').count() === stopped; attempt++) await Bun.sleep(25);
+      await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
+      await page.screenshot({ path: join(shots, "stopped-and-failed-1440.png") });
+      const shells = await page.evaluate(() => {
+        const probe = document.createElement("span");
+        probe.style.color = "var(--fulcrum-danger)";
+        document.querySelector('[data-part="timeline"]')!.append(probe);
+        const danger = getComputedStyle(probe).color;
+        probe.remove();
+        const shell = (kind: string) => { const row = [...document.querySelectorAll(`[data-part="timeline"] [data-kind="${kind}"]`)].at(-1); if (!row) return null; const style = getComputedStyle(row.parentElement!); return { top: style.borderTopColor, left: style.borderLeftColor, text: getComputedStyle(row).color }; };
+        return { danger, stopped: shell("stopped"), error: shell("error") };
+      });
+      if (!shells.stopped || !shells.error) throw new Error(`missing rows: ${JSON.stringify(shells)}`);
+      if (shells.error.left !== shells.danger) throw new Error(`a failed turn lost its danger rail: ${JSON.stringify(shells)}`);
+      if ([shells.stopped.top, shells.stopped.left, shells.stopped.text].includes(shells.danger)) throw new Error(`a stopped turn uses the danger color: ${JSON.stringify(shells)}`);
     });
 
     await check("unknown and malformed commands are dismissible error receipts", async () => {
