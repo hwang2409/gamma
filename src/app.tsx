@@ -503,14 +503,14 @@ function Dock({ state, view, connection, runs, vim, setVim, theme, setTheme, onN
   const readOnly = blank ? null : dockReadOnlyReason(open?.id ?? null, view.active);
   const blockedReason = starting ? null : pendingDelivery ? "sending waits while the previous message is pending or retrying" : view.active && blank ? `sending waits for the active run ${view.active}` : dockBlockedReason(state, present, open, running);
   const onPreparationFailure = useCallback((error: unknown, images: readonly import("./image-queue").QueuedImage[]) => {
-    const active = running;
+    const active = approvalStore.getState().turn === "running";
     const busy = (error as { code?: unknown }).code === -32004;
     const text = busy ? active
       ? `commands wait until this turn ends${pendingApprovals(approvalStore).length ? "\nuse the approve, always allow, or deny buttons on the approval card" : ""}`
       : "commands wait for pending work to finish: tools, approvals, or background agents"
       : error instanceof Error ? error.message : String(error);
     receipts.set(runState.canonical(runId), { text: images.length ? `${text}\nattachments are still attached and were not sent.` : text, tone: "error", ...(busy && active && pendingApprovals(approvalStore).length ? { action: { label: "jump to approval", run: focusApproval } } : {}) });
-  }, [approvalStore, receipts, runId, runState, running]);
+  }, [approvalStore, receipts, runId, runState]);
   return <div className="dock"><>{problem ? null : <StatusLine phase={phase} />}</><CommandReceiptLine store={receipts} runId={runId} /><DockComposer commands={commands} deliveries={deliveries} readOnly={readOnly} blockedReason={blockedReason} running={running} vim={vim} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onStop={onStop} onImageOpen={onImageOpen} onFileInput={(input) => { fileInput.current = input; }} client={client} sessionId={sessionId} createdWithDefault={record.model.choice === "default"} planMode={record.settings.loaded?.plan_mode === true} runState={runState} runId={runId} /></div>;
 }
 
