@@ -114,6 +114,10 @@ try {
   const field = page.getByRole("combobox", { name: "message" });
   await field.waitFor({ timeout: 20_000 }).catch(async () => { throw new Error(`composer did not open; browser=${errors.join(" | ")}; body=${await page.locator("body").innerText()}; vite=${(logs.get(vite) ?? []).join("").slice(-3000)}; zeta=${(logs.get(python) ?? []).join("").slice(-3000)}`); });
   const submit = async (text: string) => { await field.fill(text); await field.press("Enter"); if ((await field.inputValue()).trim() === text) await field.press("Enter"); };
+  const navigateRun = async (run: string) => page.evaluate((nextRun) => {
+    history.pushState({ run: nextRun }, "", `/?run=${encodeURIComponent(nextRun)}`);
+    dispatchEvent(new PopStateEvent("popstate", { state: { run: nextRun } }));
+  }, run);
 
   for (let attempt = 0; attempt < 200 && !frames.some((frame) => frame.includes('"name":"review"')); attempt++) await Bun.sleep(100);
   const review = page.getByRole("option", { name: /review/ });
@@ -132,12 +136,8 @@ try {
   if (!frames.some((frame) => frame.includes('"name":"review"'))) throw new Error("slash_list omitted the private review skill");
 
   if (planProof) {
-  await page.goto(`${origin}/?run=${discovery.pending_session}`);
-  await field.waitFor({ timeout: 20_000 });
-  await field.fill("/pla");
-  await page.getByRole("option", { name: /plan/ }).first().waitFor({ timeout: 10_000 });
-  await field.fill("");
-  await field.press("Escape");
+  await navigateRun(discovery.pending_session);
+  await page.getByText("pending proof", { exact: true }).waitFor({ timeout: 20_000 });
   const pendingBefore = frames.length;
   await submit("/plan");
   try {
@@ -149,12 +149,8 @@ try {
   const pendingFrames = frames.slice(pendingBefore).map((frame) => { try { return JSON.parse(frame); } catch { return null; } });
   if (!pendingFrames.some((frame) => frame?.method === "slash_run") || pendingFrames.some((frame) => frame?.method === "session_settings")) throw new Error(`pending-work plan used the wrong route: ${JSON.stringify(pendingFrames)}`);
 
-  await page.goto(`${origin}/?run=${created.session.session_id}`);
-  await field.waitFor({ timeout: 20_000 });
-  await field.fill("/pla");
-  await page.getByRole("option", { name: /plan/ }).first().waitFor({ timeout: 10_000 });
-  await field.fill("");
-  await field.press("Escape");
+  await navigateRun(created.session.session_id);
+  await page.getByText("real zeta proof", { exact: true }).waitFor({ timeout: 20_000 });
   for (const [command, output, chip] of [["/plan", "plan mode: on", true], ["/plan off", "plan mode: off", false], ["/plan on", "plan mode: on", true], ["/plan toggle", "plan mode: off", false]] as const) {
     const settingsBefore = frames.filter((frame) => frame.includes('"method":"session_settings"')).length;
     await submit(command);
