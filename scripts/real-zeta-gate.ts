@@ -53,7 +53,7 @@ const waitFile = async (path: string, owner?: ChildProcess) => {
   throw new Error(`timed out waiting for ${path}: ${(owner ? logs.get(owner) : [])?.join("").slice(-4000)}`);
 };
 
-const temp = await mkdtemp(join(tmpdir(), "gamma-parity-g4-real-")); resources.createdTemp(temp);
+const temp = await mkdtemp(join(tmpdir(), "g4-")); resources.createdTemp(temp);
 const zetaHome = assertPrivateProofHome(join(temp, "zeta-home"), requiredWorktree);
 if (await stat(zetaHome).then(() => true, () => false)) throw new Error(`real-zeta proof home was not fresh: ${zetaHome}`);
 const proofEnv = { ...process.env, ZETA_HOME: zetaHome };
