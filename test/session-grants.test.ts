@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { FEATURES } from "../src/connection";
 
-// Zeta 473784f docs/serve-protocol.md:606-660,1114,1517 defines these requests, event, and feature.
+// Zeta 473784f docs/serve-protocol.md:606-660,1123,1527 defines these requests, event, and feature.
 test("gamma negotiates session grants", () => {
   expect(FEATURES).toContain("session_grants");
 });

@@ -13,7 +13,7 @@ const ref = process.env.ZETA_PROOF_REF;
 const requiredRef = "473784f598fe387d3e9db4dabb4d2c0ccceccea5";
 if (ref !== requiredRef) throw new Error(`ZETA_PROOF_REF must be pinned to ${requiredRef}`);
 if (await stat(worktree).then(() => true, () => false)) throw new Error(`proof worktree already exists: ${worktree}`);
-const portText = process.env.WEB_REAL_ZETA_GATE_PORT ?? "4196";
+const portText = process.env.WEB_REAL_ZETA_GATE_PORT ?? "4198";
 if (!/^\d+$/.test(portText)) throw new Error("WEB_REAL_ZETA_GATE_PORT must be an integer");
 const appPort = Number(portText);
 if (appPort < 1 || appPort > 65_535 || appPort === 5190 || appPort === 8765) throw new Error("WEB_REAL_ZETA_GATE_PORT is outside the allowed disposable range");
@@ -117,15 +117,44 @@ try {
   const grantEvents = frames.slice(grantProofStart).filter((frame) => frame.includes('"event":"session_grants_changed"') && frame.includes('"change":"grant"'));
   if (grantEvents.length !== 1) throw new Error(`always-allow plus cancel emitted ${grantEvents.length} grant-change events: ${grantEvents.join("\n")}`);
 
+  const grantReads = frames.slice(grantProofStart).filter((frame) => frame.includes('"method":"session_grants"'));
+  if (!grantReads.length) throw new Error("permissions control listed bash without an observed session_grants read");
+
   await permissionsControl.click();
   const approvalsBeforeReuse = frames.filter((frame) => frame.includes('"event":"approval_request"')).length;
   await field.fill("reuse the grant");
   await page.getByRole("button", { name: "send message", exact: true }).click();
-  await page.getByText("real zeta grant proof complete", { exact: true }).waitFor({ timeout: 30_000 });
+  await page.getByText("reuse grant proof", { exact: true }).waitFor({ timeout: 30_000 });
   const approvalsAfterReuse = frames.filter((frame) => frame.includes('"event":"approval_request"')).length;
   if (approvalsAfterReuse !== approvalsBeforeReuse) throw new Error(`reused bash grant asked again: ${approvalsBeforeReuse} -> ${approvalsAfterReuse}`);
+
+  await permissionsControl.click();
+  const dialog = page.getByRole("dialog", { name: "session permissions" });
+  await dialog.getByRole("code").filter({ hasText: "bash" }).waitFor();
+  const revokeStart = frames.length;
+  await dialog.getByRole("button", { name: "revoke" }).click();
+  const zeroGrantControl = page.getByRole("button", { name: "permissions", exact: true });
+  await zeroGrantControl.waitFor({ timeout: 10_000 });
+  if (await dialog.getByRole("code").filter({ hasText: "bash" }).count()) throw new Error("revoked bash remained in the permissions list");
+  const revokeFrames = frames.slice(revokeStart);
+  const revokeRequests = revokeFrames.filter((frame) => frame.includes('"method":"revoke_session_grants"') && frame.includes('"grant":"bash"'));
+  if (revokeRequests.length !== 1) throw new Error(`expected one revoke_session_grants {grant:"bash"} request, received ${revokeRequests.length}: ${revokeRequests.join("\n")}`);
+  const revokeEvents = revokeFrames.filter((frame) => frame.includes('"event":"session_grants_changed"') && frame.includes('"change":"revoke"') && frame.includes('"changed":["bash"]'));
+  if (revokeEvents.length !== 1) throw new Error(`expected one revoke event for bash, received ${revokeEvents.length}: ${revokeEvents.join("\n")}`);
+  if (!revokeFrames.some((frame) => frame.includes('"removed":["bash"]') && frame.includes('"session_grants":[]'))) throw new Error(`revoke response did not contain an empty grants snapshot: ${revokeFrames.join("\n")}`);
+
+  await zeroGrantControl.click();
+  const approvalsBeforePostRevoke = frames.filter((frame) => frame.includes('"event":"approval_request"')).length;
+  await field.fill("use bash after revoke");
+  await page.getByRole("button", { name: "send message", exact: true }).click();
+  await always.waitFor({ timeout: 30_000 });
+  const approvalsAfterPostRevoke = frames.filter((frame) => frame.includes('"event":"approval_request"')).length;
+  if (approvalsAfterPostRevoke !== approvalsBeforePostRevoke + 1) throw new Error(`post-revoke bash did not ask exactly once: ${approvalsBeforePostRevoke} -> ${approvalsAfterPostRevoke}`);
+  await page.getByRole("button", { name: "stop" }).click();
+  await page.getByPlaceholder("message zeta").waitFor({ timeout: 20_000 });
+
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
-  console.log(`real zeta grants gate passed at ${ref}: always-allow survived cancelled approval, one session_grants_changed event, later bash did not re-ask, private home ${zetaHome}`);
+  console.log(`real zeta grants gate passed at ${ref}: session_grants read observed; always-allow listed bash; one grant event survived cancellation; retained bash did not re-ask; revoke request sent; empty snapshot and one revoke event observed; post-revoke bash asked exactly once; private home ${zetaHome}`);
 } finally {
   await browser?.close().catch(() => {});
   await resources.cleanup(

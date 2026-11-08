@@ -325,11 +325,32 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     const session = [...(grantsBySession.get(sessionId) ?? [])];
     return { session_id: sessionId, default: "ask", precedence: ["deny", "ask", "allow"], rules: { deny: ["dangerous"], ask: ["write"], allow: ["read", ...session] }, session_grants: session };
   };
-  // Zeta 473784f docs/serve-protocol.md:606-660,1114 queues this event before the matching revoke response.
+  // Zeta 473784f docs/serve-protocol.md:606-660,1123 queues this event before the matching revoke response.
   const notifyGrantChange = (change: "grant" | "revoke" | "clear" | "reset", changed: string[], sessionId: string) => {
     const data = { change, changed, grants: grantSnapshot(sessionId) };
     grantChanges.push(data);
     for (const socket of sockets) if (socket.data.features?.includes("session_grants")) socket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: { event: "session_grants_changed", data } }));
+  };
+  const handleGrantRequest = (socket: ServerWebSocket<SocketData>, method: string, params: Json, reply: (body: Json) => void) => {
+    if (method !== "session_grants" && method !== "revoke_session_grants") return false;
+    if (!socket.data.features?.includes("session_grants")) { reply({ error: { code: -32601, message: "method not found" } }); return true; }
+    if (!active) { reply({ error: { code: -32003, message: "no active session" } }); return true; }
+    if (method === "session_grants") {
+      reply(Object.keys(params).length ? { error: { code: -32602, message: "session_grants accepts no parameters", data: { code: "invalid_session_grants_params" } } } : { result: grantSnapshot(active) });
+      return true;
+    }
+    if (socket.data.role === "observer") { reply({ error: { code: -32008, message: "observer is read-only" } }); return true; }
+    const keys = Object.keys(params);
+    const validGrant = keys.length === 1 && keys[0] === "grant" && typeof params.grant === "string";
+    const validClear = keys.length === 1 && keys[0] === "clear" && params.clear === true;
+    if (!validGrant && !validClear) { reply({ error: { code: -32602, message: "use exactly grant or clear", data: { code: "invalid_session_grants_revoke" } } }); return true; }
+    const grants = grantsBySession.get(active) ?? [];
+    const removed = validClear ? [...grants] : grants.filter((grant) => grant === params.grant);
+    if (validGrant && !removed.length) { reply({ error: { code: -32602, message: "session grant not found", data: { code: "session_grant_not_found" } } }); return true; }
+    grantsBySession.set(active, grants.filter((grant) => !removed.includes(grant)));
+    notifyGrantChange(validClear ? "clear" : "revoke", removed, active);
+    reply({ result: { removed, grants: grantSnapshot(active) } });
+    return true;
   };
   let controller: ServerWebSocket<SocketData> | null = null;
   const reconnectControllers = new WeakSet<object>();
@@ -469,25 +490,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           const pending = decide && !approvalAborted ? [{ request_id: approvalRequestId, tool_call: approvalCall, delegated: false }] : [];
           return reply({ result: { session: active ? { ...(sessions.find((session) => session.session_id === active) ?? {}), vim_mode: vimMode, plan_mode: activeSettings().plan_mode } : null, state: running ? (decide ? "tool" : "running") : "idle", explicit_finish: false, pending_approvals: pending, usage: {}, compaction_markers: 0 } });
         }
-        if (method === "session_grants" || method === "revoke_session_grants") {
-          if (!socket.data.features?.includes("session_grants")) return reply({ error: { code: -32601, message: "method not found" } });
-          if (!active) return reply({ error: { code: -32003, message: "no active session" } });
-          if (method === "session_grants") {
-            if (Object.keys(params).length) return reply({ error: { code: -32602, message: "session_grants accepts no parameters", data: { code: "invalid_session_grants_params" } } });
-            return reply({ result: grantSnapshot(active) });
-          }
-          if (socket.data.role === "observer") return reply({ error: { code: -32008, message: "observer is read-only" } });
-          const keys = Object.keys(params);
-          const validGrant = keys.length === 1 && keys[0] === "grant" && typeof params.grant === "string";
-          const validClear = keys.length === 1 && keys[0] === "clear" && params.clear === true;
-          if (!validGrant && !validClear) return reply({ error: { code: -32602, message: "use exactly grant or clear", data: { code: "invalid_session_grants_revoke" } } });
-          const grants = grantsBySession.get(active) ?? [];
-          const removed = validClear ? [...grants] : grants.filter((grant) => grant === params.grant);
-          if (validGrant && !removed.length) return reply({ error: { code: -32602, message: "session grant not found", data: { code: "session_grant_not_found" } } });
-          grantsBySession.set(active, grants.filter((grant) => !removed.includes(grant)));
-          notifyGrantChange(validClear ? "clear" : "revoke", removed, active);
-          return reply({ result: { removed, grants: grantSnapshot(active) } });
-        }
+        if (handleGrantRequest(socket, method, params, reply)) return;
         if (method === "resume") {
           // Zeta 5feea2fc src/zeta/server/server.py:601-626 and src/zeta/server/control.py:160-180 keep the
           // current session while busy and return -32004 before a session swap.
