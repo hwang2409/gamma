@@ -1,10 +1,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { chromium, type Browser } from "playwright";
 import { createClient, webSocketTransport } from "@fulcrum/zeta";
 import { OwnedResources } from "./owned-resources";
+import { assertPrivateProofHome } from "./proof-home";
 
 // This checkout, from the script location, so the gate runs from any gamma worktree or main.
 const gamma = new URL("..", import.meta.url).pathname;
@@ -12,9 +13,11 @@ const zeta = "/Users/henry/me/fun/zeta";
 const requiredWorktree = `${zeta}/.worktrees/parity-g3-proof`;
 const worktree = process.env.ZETA_PROOF_WORKTREE;
 const ref = process.env.ZETA_PROOF_REF;
-const portText = process.env.WEB_REAL_ZETA_GATE_PORT ?? "4189";
+const portText = process.env.WEB_REAL_ZETA_GATE_PORT ?? "4196";
 if (worktree !== requiredWorktree) throw new Error(`ZETA_PROOF_WORKTREE must be ${requiredWorktree}`);
 if (!ref || !/^[0-9a-f]{40}$/.test(ref)) throw new Error("ZETA_PROOF_REF must be an exact 40-character sha");
+const planProof = ref === "3e1f48a39cc5a08e4814b91d0ecaa44dba17e489";
+if (!planProof && ref !== "37622b5eb6716526fb315e766ca33c915ac5ce92") throw new Error("ZETA_PROOF_REF must be the pinned #899 or #900 merge sha");
 if (!/^\d+$/.test(portText)) throw new Error("WEB_REAL_ZETA_GATE_PORT must be an integer");
 const appPort = Number(portText);
 if (appPort < 1 || appPort > 65_535 || appPort === 5190 || appPort === 8765) throw new Error("WEB_REAL_ZETA_GATE_PORT is outside the allowed disposable range");
@@ -50,20 +53,21 @@ const waitFile = async (path: string, owner?: ChildProcess) => {
   throw new Error(`timed out waiting for ${path}: ${(owner ? logs.get(owner) : [])?.join("").slice(-4000)}`);
 };
 
+const temp = await mkdtemp(join(tmpdir(), "gamma-parity-g4-real-")); resources.createdTemp(temp);
+const zetaHome = assertPrivateProofHome(join(temp, "zeta-home"), requiredWorktree);
+if (await stat(zetaHome).then(() => true, () => false)) throw new Error(`real-zeta proof home was not fresh: ${zetaHome}`);
+const proofEnv = { ...process.env, ZETA_HOME: zetaHome };
+
 try {
-  await run("git", ["-C", zeta, "worktree", "add", "--detach", worktree, ref], "git worktree add");
+  await run("git", ["-C", zeta, "worktree", "add", "--detach", worktree, ref], "git worktree add", gamma, proofEnv);
   resources.createdWorktree(worktree);
   const actual = (await Bun.file(join(worktree, ".git")).text()).trim();
   if (!actual) throw new Error("detached proof worktree has no git marker");
-  const actualSha = (await run("git", ["rev-parse", "HEAD"], "verify proof sha", worktree)).trim();
+  const actualSha = (await run("git", ["rev-parse", "HEAD"], "verify proof sha", worktree, proofEnv)).trim();
   if (actualSha !== ref) throw new Error(`proof worktree is ${actualSha}, expected ${ref}`);
-  await run("uv", ["sync", "--frozen"], "uv sync", worktree);
-  await run("uv", ["build"], "uv build", worktree);
+  await run("uv", ["sync", "--frozen"], "uv sync", worktree, proofEnv);
+  await run("uv", ["build"], "uv build", worktree, proofEnv);
 
-  const scratch = join(homedir(), ".zeta", "scratch", "gamma");
-  await mkdir(scratch, { recursive: true });
-  const temp = await mkdtemp(join(scratch, "parity-g3-real-")); resources.createdTemp(temp);
-  const zetaHome = join(temp, "zeta-home");
   const gammaHome = join(temp, "gamma-home");
   const cwd = join(temp, "cwd");
   const control = join(temp, "control.json");
@@ -73,9 +77,9 @@ try {
 
   const python = child("uv", ["run", "--project", worktree, "python", join(gamma, "scripts", "real-zeta-server.py")], {
     cwd: worktree,
-    env: { ...process.env, PYTHONPATH: worktree, ZETA_HOME: zetaHome, ZETA_PROOF_CWD: cwd, ZETA_PROOF_CONTROL: control, ZETA_PROOF_ORIGIN: origin },
+    env: { ...proofEnv, PYTHONPATH: worktree, ZETA_PROOF_WORKTREE: worktree, ZETA_PROOF_CWD: cwd, ZETA_PROOF_CONTROL: control, ZETA_PROOF_ORIGIN: origin },
   });
-  const discovery = JSON.parse(await waitFile(control, python)) as { port: number; token: string };
+  const discovery = JSON.parse(await waitFile(control, python)) as { port: number; token: string; pending_session: string };
   if (python.exitCode !== null) throw new Error(`real zeta exited during startup: ${(logs.get(python) ?? []).join("")}`);
 
   const transport = await webSocketTransport(`ws://127.0.0.1:${discovery.port}/`, ["zeta.v1", `zeta.bearer.${discovery.token}`]);
@@ -87,7 +91,7 @@ try {
 
   const vite = child("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(appPort), "--strictPort"], {
     cwd: gamma,
-    env: { ...process.env, ZETA_HOME: zetaHome, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin },
+    env: { ...proofEnv, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin },
   });
   for (let attempt = 0; attempt < 200; attempt++) {
     if (vite.exitCode !== null) throw new Error(`vite exited during startup: ${(logs.get(vite) ?? []).join("")}`);
@@ -127,6 +131,29 @@ try {
   if (!frames.some((frame) => frame.includes('"model_input_ids"'))) throw new Error("hello did not echo model_input_ids");
   if (!frames.some((frame) => frame.includes('"name":"review"'))) throw new Error("slash_list omitted the private review skill");
 
+  if (planProof) {
+  await page.goto(`${origin}/?run=${discovery.pending_session}`);
+  await field.waitFor({ timeout: 20_000 });
+  const pendingBefore = frames.length;
+  await submit("/plan");
+  await page.getByText("commands wait for pending work to finish: tools, approvals, or background agents", { exact: true }).waitFor({ timeout: 10_000 });
+  if ((await field.inputValue()).trim() !== "/plan") throw new Error("real pending-work refusal lost the plan draft");
+  const pendingFrames = frames.slice(pendingBefore).map((frame) => { try { return JSON.parse(frame); } catch { return null; } });
+  if (!pendingFrames.some((frame) => frame?.method === "slash_run") || pendingFrames.some((frame) => frame?.method === "session_settings")) throw new Error(`pending-work plan used the wrong route: ${JSON.stringify(pendingFrames)}`);
+
+  await page.goto(`${origin}/?run=${created.session.session_id}`);
+  await field.waitFor({ timeout: 20_000 });
+  for (const [command, output, chip] of [["/plan", "plan mode: on", true], ["/plan off", "plan mode: off", false], ["/plan on", "plan mode: on", true], ["/plan toggle", "plan mode: off", false]] as const) {
+    const settingsBefore = frames.filter((frame) => frame.includes('"method":"session_settings"')).length;
+    await submit(command);
+    await page.locator(".command-receipt-text", { hasText: output }).waitFor({ timeout: 10_000 });
+    if ((await page.locator(".plan-chip").count() > 0) !== chip) throw new Error(`${command} left the wrong real-zeta plan chip state`);
+    const settingsAfter = frames.filter((frame) => frame.includes('"method":"session_settings"')).length;
+    if (settingsAfter !== settingsBefore + 1) throw new Error(`${command} did not refresh real settings exactly once`);
+    await page.getByRole("button", { name: "dismiss command result" }).click();
+  }
+  }
+
   await field.fill("");
   const before = frames.length;
   await field.fill("/review real proof");
@@ -142,6 +169,16 @@ try {
   await jump.press("Enter");
   const approval = page.getByRole("button", { name: "always allow" });
   await approval.waitFor({ timeout: 5_000 }).catch(async () => { throw new Error(`approval did not render; body=${await page.locator("body").innerText()}; frames=${frames.slice(before).join("\n").slice(-6000)}; zeta=${(logs.get(python) ?? []).join("").slice(-4000)}`); });
+  if (planProof) {
+    const busySettings = frames.filter((frame) => frame.includes('"method":"session_settings"')).length;
+    await field.fill("/plan");
+    await field.press("Escape");
+    await field.press("Enter");
+    await page.getByText(/commands wait until this turn ends/).waitFor({ timeout: 10_000 });
+    if ((await field.inputValue()).trim() !== "/plan") throw new Error("real active-turn refusal lost the plan draft");
+    if (frames.filter((frame) => frame.includes('"method":"session_settings"')).length !== busySettings) throw new Error("real busy /plan refreshed settings");
+    await page.getByRole("button", { name: "jump to approval" }).click();
+  }
   const proofFrames = frames.slice(before);
   if (proofFrames.some((frame) => frame.includes("REAL_ZETA_HIDDEN_SKILL_TEXT_7d91")) || (await page.locator("body").innerText()).includes("REAL_ZETA_HIDDEN_SKILL_TEXT_7d91")) throw new Error("hidden skill text escaped onto the wire or DOM");
   const sends = proofFrames.map((frame) => { try { return JSON.parse(frame); } catch { return null; } }).filter((frame) => frame?.method === "send");
@@ -153,7 +190,7 @@ try {
   const approvals = frames.map((frame) => { try { return JSON.parse(frame); } catch { return null; } }).filter((frame) => frame?.method === "approve");
   if (approvals.length !== 1 || approvals[0].params?.scope !== "always_tool") throw new Error(`wrong approval scope: ${JSON.stringify(approvals)}`);
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
-  console.log(`real zeta gate passed: ${ref}; model_input_ids, slash_list, /status, opaque send, hidden-text, approval always_tool`);
+  console.log(`real zeta gate passed: ${ref}; private home ${zetaHome}; model_input_ids, slash_list, /status, plan idle/active/pending, opaque send, hidden-text, approval always_tool`);
 } finally {
   await browser?.close().catch(() => {});
   await resources.cleanup(

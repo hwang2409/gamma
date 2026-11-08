@@ -10,7 +10,7 @@ export type ApprovalClient = {
   request(method: ApprovalMethod, params: Record<string, unknown>, options: { timeoutMs: number }): Promise<unknown>;
 };
 
-type ApprovalItem = { type: "approval"; ended: boolean; request: { type: "approval_request"; request_id: string } };
+type ApprovalItem = { type: "approval"; ended: boolean; request: { type: "approval_request"; request_id: string; tool_call?: { id: string; name?: string } } };
 
 export function pendingApprovals(store: ApprovalStore): ApprovalItem[] {
   return store.getState().outline.flatMap(({ id }) => {

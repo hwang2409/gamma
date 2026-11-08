@@ -21,6 +21,7 @@ export type ClientActionDependencies = {
   approvalStore: ApprovalStore;
   approvalDisabledReason?: string;
   decide(method: "approve" | "deny", requestId: string, always?: boolean): Promise<unknown>;
+  markAlways(toolId: string): void;
 };
 
 const quiet = (text: string): ActionReceipt => ({ text, tone: "quiet" });
@@ -37,7 +38,10 @@ export function createClientActions(deps: ClientActionDependencies): Record<Clie
     if (!item) return error("approval · no matching request");
     const id = item.request.request_id;
     const result = await deps.decide(method, id, always) as { grant?: string; tool_name?: string } | undefined;
-    if (always) return quiet(`approval · always allowed ${result?.grant ?? result?.tool_name ?? "tool"} for this session · request ${id}`);
+    if (always) {
+      if (item.request.tool_call?.id) deps.markAlways(item.request.tool_call.id);
+      return quiet(`approval · always allowed ${result?.grant ?? result?.tool_name ?? item.request.tool_call?.name ?? "tool"} for this session · request ${id}`);
+    }
     return quiet(`approval · ${method === "approve" ? "approved" : "denied"} ${id}`);
   };
   const tree = async (args: string) => {

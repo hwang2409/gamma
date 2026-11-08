@@ -3,7 +3,7 @@ import { createApprovalDecider, pendingApprovals } from "../src/approvals";
 import { createClientActions, type ClientActionDependencies } from "../src/client-actions";
 import type { ClientActionName } from "../src/commands";
 
-const approvalItem = (request_id: string, ended = false) => ({ type: "approval" as const, ended, request: { type: "approval_request" as const, request_id } });
+const approvalItem = (request_id: string, ended = false) => ({ type: "approval" as const, ended, request: { type: "approval_request" as const, request_id, tool_call: { id: `tool-${request_id}`, name: "read" } } });
 
 function approvalStore() {
   const items = new Map<string, unknown>([["first", approvalItem("request-1")], ["ended", approvalItem("request-old", true)], ["second", approvalItem("request-2")]]);
@@ -36,6 +36,7 @@ function dependencies(overrides: Partial<ClientActionDependencies> = {}) {
     openFilePicker: () => { state.opened++; },
     approvalStore: approvals.store,
     decide: async () => ({}),
+    markAlways: () => {},
     ...overrides,
   };
   return { actions: createClientActions(deps), calls, state, approvals };
@@ -53,22 +54,27 @@ describe("approval actions", () => {
     const approvals = approvalStore();
     const requests: unknown[] = [];
     const decide = createApprovalDecider({ request: async (method, params, options) => { requests.push({ method, params, options }); return {}; } }, approvals.store);
-    const { actions } = dependencies({ approvalStore: approvals.store, decide });
+    const marked: string[] = [];
+    const { actions } = dependencies({ approvalStore: approvals.store, decide, markAlways: (toolId) => marked.push(toolId) });
     expect(await actions.approve("")).toEqual({ text: "approval · approved request-1", tone: "quiet" });
     expect(requests).toEqual([{ method: "approve", params: { request_id: "request-1" }, options: { timeoutMs: 15_000 } }]);
     expect(approvals.events).toEqual([{ type: "approval_end", request_id: "request-1", data: { decision: "allow" } }]);
+    expect(marked).toEqual([]);
   });
 
   test("an exact key chooses that request and missing or disabled requests do not decide", async () => {
     const decided: unknown[] = [];
-    const { actions } = dependencies({ decide: async (...args) => { decided.push(args); return {}; } });
+    const marked: string[] = [];
+    const { actions } = dependencies({ decide: async (...args) => { decided.push(args); return {}; }, markAlways: (toolId) => marked.push(toolId) });
     expect(await actions.deny("request-2")).toEqual({ text: "approval · denied request-2", tone: "quiet" });
+    expect(await actions.always("request-1")).toEqual({ text: "approval · always allowed read for this session · request request-1", tone: "quiet" });
     expect(await actions.approve("missing")).toEqual({ text: "approval · no matching request", tone: "error" });
-    expect(decided).toEqual([["deny", "request-2", false]]);
+    expect(decided).toEqual([["deny", "request-2", false], ["approve", "request-1", true]]);
+    expect(marked).toEqual(["tool-request-1"]);
 
     const disabled = dependencies({ approvalDisabledReason: "reconnecting — decisions are disabled until the server confirms this run", decide: async (...args) => { decided.push(args); } });
     expect(await disabled.actions.approve("")).toEqual({ text: "reconnecting — decisions are disabled until the server confirms this run", tone: "error", retain: true });
-    expect(decided).toHaveLength(1);
+    expect(decided).toHaveLength(2);
   });
 
   test("expired decisions use the card error and pending order ignores ended rows", async () => {

@@ -9,7 +9,7 @@ import { createPortal } from "react-dom";
 import { commandRequests, createConnection, serveCommand, type Connection, type ConnectionState } from "./connection";
 import { createDeliveryManager, stopTurn, type DeliveryManager } from "./delivery";
 import { createSessionManager, sessionTitle, type OpenRun, type RunState, type SessionManager, type SessionMeta } from "./session";
-import { ThemePicker, useTheme } from "./theme";
+import { themeChoices, ThemePicker, useTheme, type ThemeChoice } from "./theme";
 import { GammaComposer, type Submit } from "./composer";
 import { nextRunModel, RunSettings, SettingsMenu, useVimSetting, VimToggle } from "./controls";
 import { activeRun, createRunStateStore, hasPendingDelivery, workspaceRunState, type DraftRunId, type EntryId, type RunId, type RunStateStore } from "./run-state";
@@ -19,7 +19,7 @@ import { createCommandController, createUnavailableCommandController, isSlashCom
 import { createReceiptStore, type ReceiptStore } from "./receipts";
 import { createApprovalDecider, pendingApprovals } from "./approvals";
 import { createClientActions } from "./client-actions";
-import { themeChoices, type ThemeChoice } from "./theme";
+import { alwaysAllowed as getAlwaysAllowed, markAlwaysAllowed, subscribeAlwaysAllowed } from "./always-allowed";
 
 const highlight = createHighlighter();
 addEventListener("pagehide", () => highlight.dispose(), { once: true });
@@ -455,7 +455,7 @@ function Dock({ state, view, connection, runs, vim, setVim, theme, setTheme, onN
         sessionId, requests, request: (method, params) => client.request(method as never, params as never), newRun: onNewRun,
         refreshStatus: runs.refreshStatus, retrySession: (id) => client.retrySession(id), currentName: () => sessionTitle(present.session) ?? undefined,
         themes: themeChoices, currentTheme: () => theme, setTheme, openFilePicker: () => fileInput.current?.click(), approvalStore,
-        approvalDisabledReason, decide,
+        approvalDisabledReason, decide, markAlways: (toolId) => markAlwaysAllowed(sessionId, toolId),
       });
       try {
         const result = await clientActions[action.name](action.args);
@@ -503,14 +503,14 @@ function Dock({ state, view, connection, runs, vim, setVim, theme, setTheme, onN
   const readOnly = blank ? null : dockReadOnlyReason(open?.id ?? null, view.active);
   const blockedReason = starting ? null : pendingDelivery ? "sending waits while the previous message is pending or retrying" : view.active && blank ? `sending waits for the active run ${view.active}` : dockBlockedReason(state, present, open, running);
   const onPreparationFailure = useCallback((error: unknown, images: readonly import("./image-queue").QueuedImage[]) => {
-    const active = activeRun(runState.getCatalog()) === runState.canonical(runId);
+    const active = running;
     const busy = (error as { code?: unknown }).code === -32004;
     const text = busy ? active
       ? `commands wait until this turn ends${pendingApprovals(approvalStore).length ? "\nuse the approve, always allow, or deny buttons on the approval card" : ""}`
       : "commands wait for pending work to finish: tools, approvals, or background agents"
       : error instanceof Error ? error.message : String(error);
     receipts.set(runState.canonical(runId), { text: images.length ? `${text}\nattachments are still attached and were not sent.` : text, tone: "error", ...(busy && active && pendingApprovals(approvalStore).length ? { action: { label: "jump to approval", run: focusApproval } } : {}) });
-  }, [approvalStore, receipts, runId, runState]);
+  }, [approvalStore, receipts, runId, runState, running]);
   return <div className="dock"><>{problem ? null : <StatusLine phase={phase} />}</><CommandReceiptLine store={receipts} runId={runId} /><DockComposer commands={commands} deliveries={deliveries} readOnly={readOnly} blockedReason={blockedReason} running={running} vim={vim} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onStop={onStop} onImageOpen={onImageOpen} onFileInput={(input) => { fileInput.current = input; }} client={client} sessionId={sessionId} createdWithDefault={record.model.choice === "default"} planMode={record.settings.loaded?.plan_mode === true} runState={runState} runId={runId} /></div>;
 }
 
@@ -550,11 +550,11 @@ function Run({ client, open, readOnly, followRequest }: { client: ZetaClient | n
   const viewerOpener = useRef<HTMLElement | null>(null);
   const openViewer = useCallback((block: any) => { viewerOpener.current = document.activeElement as HTMLElement | null; setViewer(block); }, []);
   const closeViewer = useCallback(() => { setViewer(null); requestAnimationFrame(() => viewerOpener.current?.focus()); }, []);
-  const [alwaysAllowed, setAlwaysAllowed] = useState<ReadonlySet<string>>(() => new Set());
+  const alwaysAllowed = useSyncExternalStore((listener) => subscribeAlwaysAllowed(open.id, listener), () => getAlwaysAllowed(open.id));
   const decisions = useMemo(() => {
     if (!client || open.stale || readOnly) return { disabledReason: readOnly ? "opening the run — decisions are paused" : "reconnecting — decisions are disabled until the server confirms this run" };
     const decide = createApprovalDecider(client, open.lease.store);
-    return { approve: (requestId: string) => decide("approve", requestId), always: (requestId: string) => decide("approve", requestId, true), deny: (requestId: string) => decide("deny", requestId), alwaysAllowed, markAlways: (toolId: string) => setAlwaysAllowed((current) => new Set(current).add(toolId)) };
+    return { approve: (requestId: string) => decide("approve", requestId), always: (requestId: string) => decide("approve", requestId, true), deny: (requestId: string) => decide("deny", requestId), alwaysAllowed, markAlways: (toolId: string) => markAlwaysAllowed(open.id, toolId) };
   }, [alwaysAllowed, client, open.lease.store, open.stale, readOnly]);
   return (
     <Decisions.Provider value={decisions}>

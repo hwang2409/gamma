@@ -2,7 +2,7 @@ import { defineConfig, type Plugin } from "vite";
 import { zetaDiscoveryPlugin } from "@fulcrum/zeta/discovery";
 import { readFile } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 const running = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const gammaHostPlugin = (appOrigin: string): Plugin => {
@@ -43,9 +43,11 @@ const gammaHostPlugin = (appOrigin: string): Plugin => {
 
 export default defineConfig(({ command }) => {
   const appOrigin = process.env.GAMMA_APP_ORIGIN ?? "http://localhost:5190";
+  const root = new URL(".", import.meta.url).pathname;
+  const dependencies = root.includes("/.worktrees/") ? resolve(root, "../..", "node_modules") : join(root, "node_modules");
   return {
     plugins: [zetaDiscoveryPlugin(), ...(command === "serve" ? [gammaHostPlugin(appOrigin)] : [])],
-    server: { port: 5180, strictPort: true, cors: false },
+    server: { port: 5180, strictPort: true, cors: false, fs: { allow: [root, dependencies] } },
     preview: { port: 5180, strictPort: true },
   };
 });

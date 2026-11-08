@@ -1,5 +1,5 @@
-// Mirrors Zeta 2ff56774 tests/fixtures/serve_slash_wire_pin.jsonl list-default/list-complete.
-// Keep this wire fixture aligned with src/zeta/core/slash.py and src/zeta/server/slash_commands.py.
+// Mirrors Zeta 3e1f48a39cc5a08e4814b91d0ecaa44dba17e489 tests/fixtures/serve_slash_wire_pin.jsonl.
+// Source: src/zeta/core/slash.py:926-1127 and src/zeta/server/slash_commands.py:487-555.
 export type FakeSlashCommand = { name: string; description: string; kind: string; source: string; client_only: boolean; unavailable: string | null };
 
 export const completeSlashCatalog: readonly FakeSlashCommand[] = [
@@ -48,16 +48,16 @@ export const completeSlashCatalog: readonly FakeSlashCommand[] = [
     "description": "show or change plan mode",
     "kind": "builtin",
     "source": "builtin",
-    "client_only": true,
-    "unavailable": "requires_tui"
+    "client_only": false,
+    "unavailable": null
   },
   {
     "name": "implement",
     "description": "implement the proposed plan",
     "kind": "builtin",
     "source": "builtin",
-    "client_only": true,
-    "unavailable": "requires_tui"
+    "client_only": false,
+    "unavailable": null
   },
   {
     "name": "project-instructions",
@@ -174,6 +174,14 @@ export const completeSlashCatalog: readonly FakeSlashCommand[] = [
   {
     "name": "memory",
     "description": "show, retry, or undo automatic memory updates",
+    "kind": "builtin",
+    "source": "builtin",
+    "client_only": false,
+    "unavailable": null
+  },
+  {
+    "name": "repair-transcript",
+    "description": "repair one corrupt transcript: /repair-transcript <session> confirm",
     "kind": "builtin",
     "source": "builtin",
     "client_only": false,
@@ -351,6 +359,22 @@ export const defaultSlashCatalog: readonly FakeSlashCommand[] = [
     "unavailable": null
   },
   {
+    "name": "plan",
+    "description": "show or change plan mode",
+    "kind": "builtin",
+    "source": "builtin",
+    "client_only": false,
+    "unavailable": null
+  },
+  {
+    "name": "implement",
+    "description": "implement the proposed plan",
+    "kind": "builtin",
+    "source": "builtin",
+    "client_only": false,
+    "unavailable": null
+  },
+  {
     "name": "project-instructions",
     "description": "open or create private project instructions in your editor",
     "kind": "builtin",
@@ -393,6 +417,14 @@ export const defaultSlashCatalog: readonly FakeSlashCommand[] = [
   {
     "name": "memory",
     "description": "show, retry, or undo automatic memory updates",
+    "kind": "builtin",
+    "source": "builtin",
+    "client_only": false,
+    "unavailable": null
+  },
+  {
+    "name": "repair-transcript",
+    "description": "repair one corrupt transcript: /repair-transcript <session> confirm",
     "kind": "builtin",
     "source": "builtin",
     "client_only": false,

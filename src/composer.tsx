@@ -162,6 +162,10 @@ function useAttachments(input: RefObject<HTMLTextAreaElement | null>, images: re
   return { files, images, current: imagesRef, attachError, dragging, setDragging, addFiles, remove, onPaste };
 }
 
+export function canSubmitComposer(blocked: boolean, text: string, imageCount: number, sending: boolean, steer: boolean) {
+  return !blocked && (text.trim() !== "" || imageCount > 0) && !sending && !(steer && imageCount > 0 && !text.trimStart().startsWith("/"));
+}
+
 function useSubmission(state: ComposerState, blocked: boolean, commands: CommandController, onSubmit: Submit, onPreparationFailure: ((error: unknown, images: readonly QueuedImage[]) => void) | undefined, onStop: (() => Promise<unknown>) | undefined, draft: ReturnType<typeof useComposerDraft>, attachments: ReturnType<typeof useAttachments>, store: RunStateStore, runId: string, pending: boolean) {
   const [stopping, setStopping] = useState(false);
   const [preparing, setPreparing] = useState(false);
@@ -171,7 +175,7 @@ function useSubmission(state: ComposerState, blocked: boolean, commands: Command
   runIdRef.current = runId;
   const steer = state === "steerable";
   const sending = pending || preparing;
-  const canSubmit = !blocked && (draft.text.trim() !== "" || attachments.images.length > 0) && !sending && !(steer && attachments.images.length > 0);
+  const canSubmit = canSubmitComposer(blocked, draft.text, attachments.images.length, sending, steer);
   const submit = () => {
     if (inFlight.current.submit || !canSubmit || state === "read-only") return;
     inFlight.current.submit = true;
