@@ -221,6 +221,35 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .dock .model-picker [role="option"][aria-selected="true"] { font-weight: 700; }
 .dock .model-picker [role="option"][data-active] { border-left: var(--rail) solid var(--fulcrum-accent); background: var(--fulcrum-surface); box-shadow: inset 3px 0 var(--fulcrum-accent); }
 .dock .model-picker [role="option"]:hover, .dock .model-picker [role="option"]:focus-visible { background: var(--fulcrum-surface); }
+.permissions-control { position: relative; }
+.dock [data-part="composer"] .permissions-trigger { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; transition: transform 120ms cubic-bezier(0.2, 0, 0, 1); }
+.dock [data-part="composer"] .permissions-trigger:active { transform: scale(0.96); }
+.permissions-count { display: inline-grid; min-width: 20px; height: 20px; place-items: center; padding-inline: 5px; background: var(--fulcrum-accent); color: var(--fulcrum-bg); font-size: 11px; font-variant-numeric: tabular-nums; font-weight: 800; line-height: 1; }
+.permissions-popover { position: absolute; z-index: 7; right: 0; bottom: calc(100% + 6px); width: min(420px, calc(100vw - 24px)); max-height: min(68dvh, 620px); overflow: auto; background: var(--fulcrum-bg); box-shadow: 0 0 0 1px var(--fulcrum-fg), 0 16px 40px color-mix(in srgb, var(--fulcrum-fg) 18%, transparent); color: var(--fulcrum-fg); }
+.permissions-popover > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 14px 16px 12px; box-shadow: inset 0 -1px var(--fulcrum-border); }
+.permissions-popover h2, .permissions-popover h3, .permissions-popover p { margin: 0; }
+.permissions-popover h2 { font-size: 15px; line-height: 1.3; text-wrap: balance; }
+.permissions-popover header p { margin-top: 2px; color: var(--fulcrum-muted); font-size: 12px; text-wrap: pretty; }
+.dock .permissions-close { flex: none; min-width: 48px; min-height: 40px; }
+.permission-grants, .effective-rules { padding: 14px 16px; }
+.permission-grants { box-shadow: inset 0 -1px var(--fulcrum-border); }
+.permissions-section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.permissions-section-heading h3, .effective-rules h3 { font-size: 12px; }
+.permissions-section-heading span { color: var(--fulcrum-muted); font-size: 11px; }
+.permission-grants ul { display: grid; gap: 4px; margin: 10px 0 0; padding: 0; list-style: none; }
+.permission-grant { display: flex; min-height: 40px; align-items: center; justify-content: space-between; gap: 12px; padding-left: 10px; background: var(--fulcrum-surface); box-shadow: inset var(--rail) 0 var(--fulcrum-accent); }
+.permission-grant code { min-width: 0; overflow-wrap: anywhere; }
+.dock .permission-grant .ghost { flex: none; min-width: 64px; min-height: 40px; }
+.permissions-empty { margin-top: 10px !important; color: var(--fulcrum-muted); font-size: 12px; }
+.permissions-note { margin-top: 12px !important; color: var(--fulcrum-muted); font-size: 11px; line-height: 1.45; text-wrap: pretty; }
+.dock .permissions-clear { min-height: 40px; margin-top: 12px; padding-inline: 12px; background: transparent; color: var(--fulcrum-fg); }
+.dock .permissions-clear.confirm { border-color: var(--fulcrum-danger); color: var(--fulcrum-danger); font-weight: 700; }
+.effective-rules dl { display: grid; gap: 7px; margin: 10px 0 0; }
+.permission-rule { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px; font-size: 11px; line-height: 1.45; }
+.permission-rule dt { color: var(--fulcrum-muted); }
+.permission-rule dd { margin: 0; overflow-wrap: anywhere; }
+.permissions-status, .permissions-error { padding: 14px 16px; font-size: 12px; }
+.permissions-error { color: var(--fulcrum-danger); }
 .model-empty { max-width: 32ch; margin: 0; padding: 6px 12px; color: var(--fulcrum-muted); font-size: 12px; }
 .model-deferred, .settings-error { flex-basis: 100%; font-size: 12px; overflow-wrap: anywhere; }
 .model-deferred { position: absolute; right: var(--inset); bottom: calc(100% + 6px); z-index: 2; padding: 4px 7px; border: 1px solid var(--fulcrum-border); background: var(--fulcrum-bg); color: var(--fulcrum-muted); }
@@ -305,6 +334,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
   .topbar .run-title { order: 2; flex: 1 1 0; }
   .topbar-yolo { order: 2; }
   .settings-popover { position: fixed; top: 56px; right: 12px; left: 12px; width: auto; }
+  .permissions-popover { position: fixed; right: 12px; bottom: 72px; left: 12px; width: auto; max-height: calc(100dvh - 92px); }
   .dock .composer-tools { flex-wrap: wrap; justify-content: flex-start; }
   .dock .composer-tools > .model-picker { flex-basis: 100%; }
   .dock .model-picker > button { width: 100%; max-width: 100%; }

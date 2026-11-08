@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore, 
 import type { RunStateStore } from "./run-state";
 import type { DeliveryManager } from "./delivery";
 import { catalogModels, catalogProviders } from "./settings";
+import type { SessionGrantsModel } from "./session-grants";
 
 const CATALOG = "gamma-catalog";
 const MODEL = "gamma-model";
@@ -132,6 +133,72 @@ export function RunSettings({ available, deliveries, sessionId, createdWithDefau
       </div> : null}
     </>
   );
+}
+
+const RuleList = ({ label, rules }: { label: string; rules: readonly string[] }) => <div className="permission-rule"><dt>{label}</dt><dd>{rules.length ? rules.join(", ") : "none"}</dd></div>;
+
+export function PermissionsControl({ model, openRequest }: { model: SessionGrantsModel; openRequest: number }) {
+  const state = useSyncExternalStore(model.subscribe, () => model.state, () => model.state);
+  const [open, setOpen] = useState(openRequest > 0);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [actionError, setActionError] = useState<string>();
+  const root = useRef<HTMLDivElement>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const previousRequest = useRef(openRequest);
+  const snapshot = state.snapshot;
+  const grants = snapshot?.session_grants ?? [];
+  const close = useCallback(() => { setOpen(false); setConfirmClear(false); setActionError(undefined); button.current?.focus(); }, []);
+  useDismiss(open, root, close);
+  const focusInside = useCallback(() => requestAnimationFrame(() => {
+    const next = root.current?.querySelector<HTMLButtonElement>(".permission-grant button:not(:disabled)");
+    if (next) next.focus(); else heading.current?.focus();
+  }), []);
+  const show = useCallback(() => {
+    setOpen(true);
+    setConfirmClear(false);
+    setActionError(undefined);
+    void model.load().catch(() => {});
+  }, [model]);
+  useEffect(() => {
+    if (openRequest === previousRequest.current) return;
+    previousRequest.current = openRequest;
+    show();
+  }, [openRequest, show]);
+  useEffect(() => { if (open) requestAnimationFrame(() => heading.current?.focus()); }, [open]);
+  const revoke = async (grant: string) => {
+    setActionError(undefined);
+    try {
+      const result = await model.revoke(grant);
+      if (!result) setActionError("that grant was already removed");
+      focusInside();
+    } catch (error) { setActionError(error instanceof Error ? error.message : String(error)); focusInside(); }
+  };
+  const clear = async () => {
+    if (!confirmClear) { setConfirmClear(true); return; }
+    setActionError(undefined);
+    try { await model.clear(); setConfirmClear(false); focusInside(); }
+    catch (error) { setActionError(error instanceof Error ? error.message : String(error)); focusInside(); }
+  };
+  return <div className="permissions-control" ref={root}>
+    <button ref={button} type="button" className="composer-tool permissions-trigger" aria-haspopup="dialog" aria-expanded={open} aria-label={`permissions${grants.length ? `: ${grants.length} session grant${grants.length === 1 ? "" : "s"}` : ""}`} onClick={() => open ? close() : show()}>
+      permissions{grants.length ? <span className="permissions-count" aria-hidden="true">{grants.length}</span> : null}
+    </button>
+    {open ? <section className="permissions-popover" role="dialog" aria-label="session permissions">
+      <header><div><h2 ref={heading} tabIndex={-1}>session permissions</h2><p>what this agent may run without asking</p></div><button type="button" className="ghost permissions-close" aria-label="close permissions" onClick={close}>close</button></header>
+      {state.status === "loading" && !snapshot ? <p className="permissions-status" role="status">loading permissions…</p> : null}
+      {state.error || actionError ? <p className="permissions-error" role="alert">{actionError ?? state.error}</p> : null}
+      {snapshot ? <>
+        <div className="permission-grants">
+          <div className="permissions-section-heading"><h3>session grants</h3>{state.readOnly ? <span>read-only observer</span> : null}</div>
+          {grants.length ? <ul>{grants.map((grant) => <li className="permission-grant" key={grant}><code>{grant}</code>{state.readOnly ? null : <button type="button" className="ghost" onClick={() => void revoke(grant)}>revoke</button>}</li>)}</ul> : <p className="permissions-empty">no removable session grants</p>}
+          <p className="permissions-note">revoking affects future calls only; pending and already allowed calls are unchanged; other allow rules can still permit a call</p>
+          {!state.readOnly && grants.length >= 2 ? <button type="button" className={confirmClear ? "permissions-clear confirm" : "permissions-clear"} onClick={() => void clear()}>{confirmClear ? "confirm clear" : "clear all"}</button> : null}
+        </div>
+        <div className="effective-rules"><h3>effective rules</h3><dl><RuleList label="default" rules={[snapshot.default]} /><RuleList label="precedence" rules={snapshot.precedence} /><RuleList label="deny" rules={snapshot.rules.deny} /><RuleList label="ask" rules={snapshot.rules.ask} /><RuleList label="allow" rules={snapshot.rules.allow} /></dl></div>
+      </> : null}
+    </section> : null}
+  </div>;
 }
 
 export function SettingsMenu({ children }: { children: ReactNode }) {

@@ -76,7 +76,7 @@ export type Connection = {
   stop(): void;
 };
 
-export const FEATURES = ["list_sessions_paging", "approval_history", "approval_reconnect", "delivery_id", "user_message_event", "user_message_delivery_id", "session_replay_seq", "session_host_commands", "new_session_settings", "model_input_ids"];
+export const FEATURES = ["list_sessions_paging", "approval_history", "approval_reconnect", "delivery_id", "user_message_event", "user_message_delivery_id", "session_replay_seq", "session_host_commands", "new_session_settings", "model_input_ids", "session_grants"];
 
 const negotiatedRequests = new WeakMap<ZetaClient, ReadonlySet<string>>();
 export const commandRequests = (client: ZetaClient) => negotiatedRequests.get(client) ?? new Set<string>();

@@ -70,7 +70,7 @@ const histories: Record<string, Json[]> = {
 };
 
 /** The live turn that runs when the active session opens: prose, code, a shell call, an approval, then a summary. */
-const liveTurn = (send: (event: Json) => void, ask: () => Promise<"approve" | "deny" | "abort">, wait: (ms: number) => Promise<void>, done: () => void, historyMode: HistoryMode) => async () => {
+const liveTurn = (send: (event: Json) => void, ask: () => Promise<"approve" | "deny" | "abort">, wait: (ms: number) => Promise<void>, done: () => void, historyMode: HistoryMode, grantProof = false, setPending: (requestId: string, call: Json) => void = () => {}) => async () => {
   // Committed rows also land in history, as in zeta, so a reconnect rebuilds what the live stream showed.
   const history = histories[ACTIVE]!;
   const row = (id: string, role: string, content: Json[], toolResult: Json | null = null) => history.push({ id, role, content, tool_result: toolResult });
@@ -93,6 +93,7 @@ const liveTurn = (send: (event: Json) => void, ask: () => Promise<"approve" | "d
   e("tool_end", { tool_call: loop, tool_result: result("live-1", "run 1: 5 pass, 0 fail\nrun 2: 5 pass, 0 fail\nrun 3: 5 pass, 0 fail\n", { structured_content: { exit_code: 0, stdout: "run 1: 5 pass, 0 fail\nrun 2: 5 pass, 0 fail\nrun 3: 5 pass, 0 fail\n", stderr: "" } }), data: {} });
   const clean = { id: "live-2", name: "bash", arguments: { command: "rm -rf packages/zeta/dist && bun run build" } };
   row("r3", "assistant", [toolUse("live-2", "bash")]);
+  setPending("approval-1", clean);
   const approval = ask();
   e("approval_request", { request_id: "approval-1", tool_call: clean, delegated: false });
   if (historyMode === "new") history.push({ id: "approval-request-1", role: "system", event: "approval_request", request_id: "approval-1", tool_call: clean, delegated: false });
@@ -106,6 +107,20 @@ const liveTurn = (send: (event: Json) => void, ask: () => Promise<"approve" | "d
     e("tool_start", { tool_call: clean, data: {} });
     row("r4", "tool_result", [text("")], result("live-2", "built 9 packages in 2.1s\n"));
     e("tool_end", { tool_call: clean, tool_result: result("live-2", "built 9 packages in 2.1s\n", { structured_content: { exit_code: 0, stdout: "built 9 packages in 2.1s\n", stderr: "" } }), data: {} });
+  }
+  if (grantProof && decision === "approve") {
+    const write = { id: "live-3", name: "write", arguments: { path: "cancel-proof.txt", content: "cancel me" } };
+    setPending("approval-2", write);
+    const pending = ask();
+    e("approval_request", { request_id: "approval-2", tool_call: write, delegated: false });
+    const next = await pending;
+    if (next === "abort") {
+      e("approval_end", { request_id: "approval-2", data: { decision: "abort", reason: "user_stop" } });
+      e("turn_aborted", { data: { reason: "abort" } });
+      done();
+      e("agent_end");
+      return;
+    }
   }
   const summary = decision === "approve" ? "Fixed: **20 of 20** runs pass, and the new test failed before the change." : "Skipped the rebuild. The fix is in place; run `bun run build` when ready.";
   row("r5", "assistant", [text(summary)]);
@@ -253,7 +268,7 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
   };
 }
 
-export async function startFakeZeta({ origins, port = 0, live = true, historyMode = process.env.FAKE_ZETA_HISTORY_MODE === "old" ? "old" : "new", approvalHistoryMode = (process.env.FAKE_ZETA_APPROVAL_HISTORY_MODE as ApprovalHistoryMode | undefined) ?? "not-advertised-with-rows", approvalReconnect = true, approvalReconnectGraceMs = 90_000, newSessionSettings = true, helloDelay = 60_000, serialDelays }: { origins: string[]; port?: number; live?: boolean; historyMode?: HistoryMode; approvalHistoryMode?: ApprovalHistoryMode; approvalReconnect?: boolean; approvalReconnectGraceMs?: number; newSessionSettings?: boolean; helloDelay?: number; serialDelays?: Readonly<Record<string, number | readonly number[]>> }) {
+export async function startFakeZeta({ origins, port = 0, live = true, historyMode = process.env.FAKE_ZETA_HISTORY_MODE === "old" ? "old" : "new", approvalHistoryMode = (process.env.FAKE_ZETA_APPROVAL_HISTORY_MODE as ApprovalHistoryMode | undefined) ?? "not-advertised-with-rows", approvalReconnect = true, approvalReconnectGraceMs = 90_000, newSessionSettings = true, sessionGrants = true, grantProof = false, helloDelay = 60_000, serialDelays }: { origins: string[]; port?: number; live?: boolean; historyMode?: HistoryMode; approvalHistoryMode?: ApprovalHistoryMode; approvalReconnect?: boolean; approvalReconnectGraceMs?: number; newSessionSettings?: boolean; sessionGrants?: boolean; grantProof?: boolean; helloDelay?: number; serialDelays?: Readonly<Record<string, number | readonly number[]>> }) {
   const home = await mkdtemp(join(tmpdir(), "fulcrum-web-zeta-"));
   await mkdir(join(home, "run"), { recursive: true });
   const discovery = join(home, "run", "serve.ws.json");
@@ -293,13 +308,26 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   const transientBusy = new Map<string, number>();
   const imageSends: Json[] = [];
   const decisions: Json[] = [];
+  const grantsBySession = new Map<string, string[]>();
+  const grantChanges: Json[] = [];
   const requests: Array<{ method: string; params: Json; running: boolean; received: number; started: number; replied?: number }> = [];
-  type SocketData = { role: "controller" | "observer" };
+  type SocketData = { role: "controller" | "observer"; features?: string[] };
   const sockets = new Set<ServerWebSocket<SocketData>>();
+  const grantSnapshot = (sessionId: string) => {
+    const session = [...(grantsBySession.get(sessionId) ?? [])];
+    return { session_id: sessionId, default: "ask", precedence: ["deny", "ask", "allow"], rules: { deny: ["dangerous"], ask: ["write"], allow: ["read", ...session] }, session_grants: session };
+  };
+  // Zeta 473784f docs/serve-protocol.md:606-660,1114 queues this event before the matching revoke response.
+  const notifyGrantChange = (change: "grant" | "revoke" | "clear" | "reset", changed: string[], sessionId: string) => {
+    const data = { change, changed, grants: grantSnapshot(sessionId) };
+    grantChanges.push(data);
+    for (const socket of sockets) if (socket.data.features?.includes("session_grants")) socket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: { event: "session_grants_changed", data } }));
+  };
   let controller: ServerWebSocket<SocketData> | null = null;
   const reconnectControllers = new WeakSet<object>();
   let approvalExpiry: ReturnType<typeof setTimeout> | null = null;
-  const approvalCall = { id: "live-2", name: "bash", arguments: { command: "rm -rf packages/zeta/dist && bun run build" } };
+  let approvalRequestId = "approval-1";
+  let approvalCall: { id: string; name: string; arguments: Json } = { id: "live-2", name: "bash", arguments: { command: "rm -rf packages/zeta/dist && bun run build" } };
   const expireApproval = () => {
     if (!decide || approvalAborted) return;
     approvalAborted = true;
@@ -386,10 +414,11 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           if (mode === "slow") await wait(helloDelay);
           if (!sockets.has(socket)) return;
           if (socket.data.role === "controller") controller = socket;
-          const features = (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (name === "model_input_ids" && modelInputIds) || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings)) ?? [];
+          const features = (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (name === "model_input_ids" && modelInputIds) || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings) || (name === "session_grants" && sessionGrants)) ?? [];
+          socket.data.features = features;
           const reconnect = features.includes("approval_reconnect");
           if (reconnect) reconnectControllers.add(socket as object);
-          reply({ result: { protocol_version: "1.2", server: "fake-zeta", capabilities: { features, requests: ["status", "approve", "deny", "rename_session", "session_tree", "switch_branch", "slash_list", "slash_run", ...(settingsEnabled ? ["model_catalog", "session_settings", "set_settings", "send_images", ...(advertiseNewSessionSettings ? ["new_session_settings"] : [])] : [])] } } });
+          reply({ result: { protocol_version: "1.2", server: "fake-zeta", capabilities: { features, requests: ["status", "approve", "deny", "rename_session", "session_tree", "switch_branch", "slash_list", "slash_run", ...(sessionGrants ? ["session_grants", "revoke_session_grants"] : []), ...(settingsEnabled ? ["model_catalog", "session_settings", "set_settings", "send_images", ...(advertiseNewSessionSettings ? ["new_session_settings"] : [])] : [])] } } });
           if (decide && !approvalAborted) {
             if (!reconnect) expireApproval();
             else {
@@ -429,8 +458,27 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           } finally { catalogBusy = false; }
         }
         if (method === "status") {
-          const pending = decide && !approvalAborted ? [{ request_id: "approval-1", tool_call: { id: "live-2", name: "bash", arguments: { command: "rm -rf packages/zeta/dist && bun run build" } }, delegated: false }] : [];
+          const pending = decide && !approvalAborted ? [{ request_id: approvalRequestId, tool_call: approvalCall, delegated: false }] : [];
           return reply({ result: { session: active ? { ...(sessions.find((session) => session.session_id === active) ?? {}), vim_mode: vimMode, plan_mode: activeSettings().plan_mode } : null, state: running ? (decide ? "tool" : "running") : "idle", explicit_finish: false, pending_approvals: pending, usage: {}, compaction_markers: 0 } });
+        }
+        if (method === "session_grants" || method === "revoke_session_grants") {
+          if (!socket.data.features?.includes("session_grants")) return reply({ error: { code: -32601, message: "method not found" } });
+          if (!active) return reply({ error: { code: -32003, message: "no active session" } });
+          if (method === "session_grants") {
+            if (Object.keys(params).length) return reply({ error: { code: -32602, message: "session_grants accepts no parameters", data: { code: "invalid_session_grants_params" } } });
+            return reply({ result: grantSnapshot(active) });
+          }
+          if (socket.data.role === "observer") return reply({ error: { code: -32008, message: "observer is read-only" } });
+          const keys = Object.keys(params);
+          const validGrant = keys.length === 1 && keys[0] === "grant" && typeof params.grant === "string";
+          const validClear = keys.length === 1 && keys[0] === "clear" && params.clear === true;
+          if (!validGrant && !validClear) return reply({ error: { code: -32602, message: "use exactly grant or clear", data: { code: "invalid_session_grants_revoke" } } });
+          const grants = grantsBySession.get(active) ?? [];
+          const removed = validClear ? [...grants] : grants.filter((grant) => grant === params.grant);
+          if (validGrant && !removed.length) return reply({ error: { code: -32602, message: "session grant not found", data: { code: "session_grant_not_found" } } });
+          grantsBySession.set(active, grants.filter((grant) => !removed.includes(grant)));
+          notifyGrantChange(validClear ? "clear" : "revoke", removed, active);
+          return reply({ result: { removed, grants: grantSnapshot(active) } });
         }
         if (method === "resume") {
           // Zeta 5feea2fc src/zeta/server/server.py:601-626 and src/zeta/server/control.py:160-180 keep the
@@ -470,7 +518,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
               approvalAborted = false;
               decide = (decision) => { decide = null; resolve(decision); };
             });
-            setTimeout(() => void liveTurn(send, ask, wait, () => { composer.finishExternalTurn(ACTIVE); running = false; }, currentHistoryMode)(), 300);
+            setTimeout(() => void liveTurn(send, ask, wait, () => { composer.finishExternalTurn(ACTIVE); running = false; }, currentHistoryMode, grantProof, (requestId, call) => { approvalRequestId = requestId; approvalCall = call as typeof approvalCall; })(), 300);
           }
           return;
         }
@@ -541,11 +589,26 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         }
         if (method === "approve" || method === "deny") {
           decisions.push({ method, ...params });
-          if (!decide || params.request_id !== "approval-1") return reply({ error: { code: -32006, message: "approval request is missing or already resolved" } });
-          reply({ result: { accepted: true, request_id: params.request_id, decision: method } });
+          if (!decide || params.request_id !== approvalRequestId) return reply({ error: { code: -32006, message: "approval request is missing or already resolved" } });
+          if (method === "approve" && params.scope === "always_tool" && active) {
+            const grants = grantsBySession.get(active) ?? [];
+            if (!grants.includes(approvalCall.name)) {
+              grantsBySession.set(active, [...grants, approvalCall.name]);
+              notifyGrantChange("grant", [approvalCall.name], active);
+            }
+          }
+          reply({ result: { accepted: true, request_id: params.request_id, decision: method, ...(params.scope === "always_tool" ? { grant: approvalCall.name } : {}) } });
           if (approvalExpiry) clearTimeout(approvalExpiry);
           approvalExpiry = null;
           return decide(method);
+        }
+        if (method === "abort" && decide && !approvalAborted) {
+          approvalAborted = true;
+          const resolve = decide;
+          decide = null;
+          running = false;
+          resolve("abort");
+          return reply({ result: { aborted: true } });
         }
         const handled = composer.handle(method, params, active, send);
         if (handled) return reply(handled);
@@ -561,11 +624,19 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     home,
     port: server.port,
     decisions,
+    grantChanges,
     requests,
     imageSends,
     get settings() { return activeSettings(); },
     settingsFor(sessionId: string) { return settingsBySession.get(sessionId); },
     setSettings(sessionId: string, settings: Omit<Settings, "plan_mode"> & { plan_mode?: boolean }) { settingsBySession.set(sessionId, { ...settings, plan_mode: settings.plan_mode ?? false }); },
+    setSessionGrantsEnabled(enabled: boolean) { sessionGrants = enabled; },
+    sessionGrants(sessionId = active ?? "") { return [...(grantsBySession.get(sessionId) ?? [])]; },
+    changeSessionGrants(sessionId: string, grants: string[], change: "grant" | "revoke" | "clear" | "reset" = "reset") {
+      const before = grantsBySession.get(sessionId) ?? [];
+      grantsBySession.set(sessionId, [...grants]);
+      notifyGrantChange(change, change === "grant" ? grants.filter((grant) => !before.includes(grant)) : before.filter((grant) => !grants.includes(grant)), sessionId);
+    },
     failNext(method: string, message: string) { failures.set(method, [...(failures.get(method) ?? []), message]); },
     busyNext(method: "resume" | "new_session", count = 1) { transientBusy.set(method, count); },
     get running() { return running; },

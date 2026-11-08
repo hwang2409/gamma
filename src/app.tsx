@@ -3,7 +3,7 @@ import { Markdown, type Fences, type MarkdownProps } from "@fulcrum/markdown/rea
 import { MermaidFence } from "@fulcrum/mermaid";
 import { Approval, Code, Fallback, FileBlock, HighlightContext, ImageBlock, Message, RunProvider, Timeline, ToolCall, useItemSelector, useRun, useRunStore, useTimeline, type Renderers } from "@fulcrum/react";
 import { createRunStore } from "@fulcrum/core";
-import type { ZetaClient } from "@fulcrum/zeta";
+import { SESSION_GRANTS_FEATURE, type ZetaClient } from "@fulcrum/zeta";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { createPortal } from "react-dom";
 import { commandRequests, createConnection, serveCommand, type Connection, type ConnectionState } from "./connection";
@@ -11,7 +11,7 @@ import { createDeliveryManager, stopTurn, type DeliveryManager } from "./deliver
 import { createSessionManager, sessionTitle, type OpenRun, type RunState, type SessionManager, type SessionMeta } from "./session";
 import { themeChoices, ThemePicker, useTheme, type ThemeChoice } from "./theme";
 import { GammaComposer, type Submit } from "./composer";
-import { nextRunModel, RunSettings, SettingsMenu, useVimSetting, VimToggle } from "./controls";
+import { nextRunModel, PermissionsControl, RunSettings, SettingsMenu, useVimSetting, VimToggle } from "./controls";
 import { activeRun, createRunStateStore, hasPendingDelivery, workspaceRunState, type DraftRunId, type EntryId, type RunId, type RunStateStore } from "./run-state";
 import { artifactContentUrl, hostBindings, useArtifacts } from "./host-client";
 import type { Artifact } from "./host/types";
@@ -20,6 +20,7 @@ import { createReceiptStore, type ReceiptStore } from "./receipts";
 import { createApprovalDecider, pendingApprovals } from "./approvals";
 import { createClientActions } from "./client-actions";
 import { alwaysAllowed as getAlwaysAllowed, markAlwaysAllowed, subscribeAlwaysAllowed } from "./always-allowed";
+import { createSessionGrantsModel, type SessionGrantsModel } from "./session-grants";
 
 const highlight = createHighlighter();
 addEventListener("pagehide", () => highlight.dispose(), { once: true });
@@ -369,9 +370,10 @@ function dockPhase(state: ConnectionState, present: RunState, open: OpenRun | nu
   return { kind: "ready" };
 }
 
-function DockComposer({ readOnly, blockedReason, running, vim, commands, onSubmit, onPreparationFailure, onStop, onImageOpen, onFileInput, client, deliveries, sessionId, runState, runId, createdWithDefault, planMode }: { readOnly: string | null; blockedReason: string | null; running: boolean; vim: boolean; commands: ReturnType<typeof createUnavailableCommandController>; onSubmit: Submit; onPreparationFailure(error: unknown, images: readonly import("./image-queue").QueuedImage[]): void; onStop(): Promise<unknown>; onImageOpen(block: any): void; onFileInput(input: HTMLInputElement | null): void; client: ZetaClient | null; deliveries: DeliveryManager; sessionId: string | null; runState: RunStateStore; runId: string; createdWithDefault: boolean; planMode: boolean }) {
-  if (readOnly !== null) return <GammaComposer state="read-only" reason={readOnly} vim={vim} commands={commands} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onImageOpen={onImageOpen} onFileInput={onFileInput} store={runState} runId={runId} />;
-  return <GammaComposer state={running ? "steerable" : "idle"} blockedReason={blockedReason ?? undefined} vim={vim} commands={commands} autoFocus onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onStop={running ? onStop : undefined} onImageOpen={onImageOpen} onFileInput={onFileInput} store={runState} runId={runId} footer={<>{planMode ? <span className="plan-chip" aria-label="plan mode: on">plan</span> : null}<RunSettings available={Boolean(client)} deliveries={deliveries} sessionId={sessionId} createdWithDefault={createdWithDefault} running={running} store={runState} runId={runId} /></>} />;
+function DockComposer({ readOnly, blockedReason, running, vim, commands, onSubmit, onPreparationFailure, onStop, onImageOpen, onFileInput, client, deliveries, sessionId, runState, runId, createdWithDefault, planMode, grants, permissionsOpenRequest }: { readOnly: string | null; blockedReason: string | null; running: boolean; vim: boolean; commands: ReturnType<typeof createUnavailableCommandController>; onSubmit: Submit; onPreparationFailure(error: unknown, images: readonly import("./image-queue").QueuedImage[]): void; onStop(): Promise<unknown>; onImageOpen(block: any): void; onFileInput(input: HTMLInputElement | null): void; client: ZetaClient | null; deliveries: DeliveryManager; sessionId: string | null; runState: RunStateStore; runId: string; createdWithDefault: boolean; planMode: boolean; grants: SessionGrantsModel | null; permissionsOpenRequest: number }) {
+  const permissions = grants ? <PermissionsControl model={grants} openRequest={permissionsOpenRequest} /> : null;
+  if (readOnly !== null) return <GammaComposer state="read-only" reason={readOnly} vim={vim} commands={commands} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onImageOpen={onImageOpen} onFileInput={onFileInput} store={runState} runId={runId} footer={permissions} />;
+  return <GammaComposer state={running ? "steerable" : "idle"} blockedReason={blockedReason ?? undefined} vim={vim} commands={commands} autoFocus onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onStop={running ? onStop : undefined} onImageOpen={onImageOpen} onFileInput={onFileInput} store={runState} runId={runId} footer={<>{planMode ? <span className="plan-chip" aria-label="plan mode: on">plan</span> : null}<RunSettings available={Boolean(client)} deliveries={deliveries} sessionId={sessionId} createdWithDefault={createdWithDefault} running={running} store={runState} runId={runId} />{permissions}</>} />;
 }
 
 
@@ -424,10 +426,17 @@ function Dock({ state, view, connection, runs, vim, setVim, theme, setTheme, onN
   const starting = record.lifecycle.kind === "creating";
   const pendingDelivery = hasPendingDelivery(record);
   const sessionId = blank || starting || view.attached !== open?.id ? null : open.id;
+  const grants = useMemo(() => client && sessionId && client.features.includes(SESSION_GRANTS_FEATURE) ? createSessionGrantsModel(client, sessionId) : null, [client, sessionId]);
+  const [permissionsOpenRequest, setPermissionsOpenRequest] = useState(0);
+  useEffect(() => {
+    if (!grants) return;
+    void grants.load().catch(() => {});
+    return () => grants.stop();
+  }, [grants]);
   const requests = client ? commandRequests(client) : new Set<string>();
   const commands = useMemo(() => client && sessionId
     ? createCommandController(sessionId, (method, params) => client.request(method, params), { features: new Set(client.features), requests: commandRequests(client) })
-    : createUnavailableCommandController(client ? "commands need an open run; send a message first or open a run" : undefined), [client, sessionId]);
+    : createUnavailableCommandController(client ? "commands need an open run; send a message first or open a run" : undefined, Boolean(client && !sessionId)), [client, sessionId]);
   const approvalDisabledReason = !client ? "reconnecting — decisions are disabled until the server confirms this run" : open?.stale ? "reconnecting — decisions are disabled until the server confirms this run" : present.openError ? "opening the run — decisions are paused" : undefined;
 
   const onSubmit: Submit = useCallback(async (action, images, { steer, deliveryId, sourceText }) => {
@@ -456,12 +465,18 @@ function Dock({ state, view, connection, runs, vim, setVim, theme, setTheme, onN
         refreshStatus: runs.refreshStatus, retrySession: (id) => client.retrySession(id), currentName: () => sessionTitle(present.session) ?? undefined,
         themes: themeChoices, currentTheme: () => theme, setTheme, openFilePicker: () => fileInput.current?.click(), approvalStore,
         approvalDisabledReason, decide, markAlways: (toolId) => markAlwaysAllowed(sessionId, toolId),
+        ...(grants ? { permissions: {
+          get grants() { return grants.state.snapshot?.session_grants ?? []; },
+          open: () => setPermissionsOpenRequest((request) => request + 1),
+          revoke: (grant) => grants.revoke(grant),
+          clear: () => grants.clear(),
+        } } : {}),
       });
       try {
         const result = await clientActions[action.name](action.args);
         if (result) setReceipt(result.text, result.tone);
         if (!result?.retain) consume();
-        if (action.name !== "new_session" && action.name !== "paste") requestAnimationFrame(focusComposer);
+        if (action.name !== "new_session" && action.name !== "paste" && action.name !== "permissions") requestAnimationFrame(focusComposer);
       } catch (error) { setReceipt(error instanceof Error ? error.message : String(error), "error"); }
       return;
     }
@@ -491,7 +506,7 @@ function Dock({ state, view, connection, runs, vim, setVim, theme, setTheme, onN
       setReceipt(error instanceof Error ? error.message : String(error), "error");
       throw error;
     }
-  }, [approvalDisabledReason, approvalStore, client, connection, deliveries, onAccepted, onCreated, onNewRun, present.session, receipts, record.model, requests, runId, runState, runs, sessionId, setTheme, setVim, theme, yolo]);
+  }, [approvalDisabledReason, approvalStore, client, connection, deliveries, grants, onAccepted, onCreated, onNewRun, present.session, receipts, record.model, requests, runId, runState, runs, sessionId, setTheme, setVim, theme, yolo]);
   const onStop = useCallback(async () => { await deliveries.stop(runId); await runs.refreshStatus(); }, [deliveries, runId, runs]);
   const lastPrompt = useLastPrompt();
 
@@ -512,7 +527,7 @@ function Dock({ state, view, connection, runs, vim, setVim, theme, setTheme, onN
       : error instanceof Error ? error.message : String(error);
     receipts.set(runState.canonical(runId), { text: images.length ? `${text}\nattachments are still attached and were not sent.` : text, tone: "error", ...(busy && active && pendingApprovals(approvalStore).length ? { action: { label: "jump to approval", run: focusApproval } } : {}) });
   }, [approvalStore, receipts, runId, runState]);
-  return <div className="dock"><>{problem ? null : <StatusLine phase={phase} />}</><CommandReceiptLine store={receipts} runId={runId} /><DockComposer commands={commands} deliveries={deliveries} readOnly={readOnly} blockedReason={blockedReason} running={running} vim={vim} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onStop={onStop} onImageOpen={onImageOpen} onFileInput={(input) => { fileInput.current = input; }} client={client} sessionId={sessionId} createdWithDefault={record.model.choice === "default"} planMode={record.settings.loaded?.plan_mode === true} runState={runState} runId={runId} /></div>;
+  return <div className="dock"><>{problem ? null : <StatusLine phase={phase} />}</><CommandReceiptLine store={receipts} runId={runId} /><DockComposer commands={commands} deliveries={deliveries} readOnly={readOnly} blockedReason={blockedReason} running={running} vim={vim} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onStop={onStop} onImageOpen={onImageOpen} onFileInput={(input) => { fileInput.current = input; }} client={client} sessionId={sessionId} createdWithDefault={record.model.choice === "default"} planMode={record.settings.loaded?.plan_mode === true} runState={runState} runId={runId} grants={grants} permissionsOpenRequest={permissionsOpenRequest} /></div>;
 }
 
 /** The last prompt the user sent, so a failed turn can be retried with it. */
