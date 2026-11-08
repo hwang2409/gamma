@@ -125,6 +125,7 @@ try {
   await field.fill("reuse the grant");
   await page.getByRole("button", { name: "send message", exact: true }).click();
   await page.getByText("reuse grant proof", { exact: true }).waitFor({ timeout: 30_000 });
+  await page.getByPlaceholder("message zeta").waitFor({ timeout: 20_000 });
   const approvalsAfterReuse = frames.filter((frame) => frame.includes('"event":"approval_request"')).length;
   if (approvalsAfterReuse !== approvalsBeforeReuse) throw new Error(`reused bash grant asked again: ${approvalsBeforeReuse} -> ${approvalsAfterReuse}`);
 
@@ -147,7 +148,7 @@ try {
   const approvalsBeforePostRevoke = frames.filter((frame) => frame.includes('"event":"approval_request"')).length;
   await field.fill("use bash after revoke");
   await page.getByRole("button", { name: "send message", exact: true }).click();
-  await always.waitFor({ timeout: 30_000 });
+  await always.waitFor({ timeout: 30_000 }).catch(async () => { throw new Error(`post-revoke approval missing; body=${(await page.locator("body").innerText()).slice(-4000)}; frames=${frames.slice(-40).join("\n")}; zeta=${(logs.get(server) ?? []).join("").slice(-4000)}`); });
   const approvalsAfterPostRevoke = frames.filter((frame) => frame.includes('"event":"approval_request"')).length;
   if (approvalsAfterPostRevoke !== approvalsBeforePostRevoke + 1) throw new Error(`post-revoke bash did not ask exactly once: ${approvalsBeforePostRevoke} -> ${approvalsAfterPostRevoke}`);
   await page.getByRole("button", { name: "stop" }).click();
