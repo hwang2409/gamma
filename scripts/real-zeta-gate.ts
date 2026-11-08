@@ -180,7 +180,7 @@ try {
     await page.getByText(/commands wait until this turn ends/).waitFor({ timeout: 10_000 });
     if ((await field.inputValue()).trim() !== "/plan") throw new Error("real active-turn refusal lost the plan draft");
     if (frames.filter((frame) => frame.includes('"method":"session_settings"')).length !== busySettings) throw new Error("real busy /plan refreshed settings");
-    await page.getByRole("button", { name: "jump to approval" }).click();
+    await page.getByRole("button", { name: "jump to approval", exact: true }).click();
   }
   const proofFrames = frames.slice(before);
   if (proofFrames.some((frame) => frame.includes("REAL_ZETA_HIDDEN_SKILL_TEXT_7d91")) || (await page.locator("body").innerText()).includes("REAL_ZETA_HIDDEN_SKILL_TEXT_7d91")) throw new Error("hidden skill text escaped onto the wire or DOM");
