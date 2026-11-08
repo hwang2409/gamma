@@ -362,9 +362,9 @@ async function submitRun({ text, images, steer, deliveryId, connection, runs, de
   return await runs.sendImages(id, deliveryId, text, images);
 }
 
-function dockPhase(state: ConnectionState, present: RunState, open: OpenRun | null, agent: ReturnType<typeof useAgentPhase>, starting: boolean): RunPhase {
+function dockPhase(state: ConnectionState, opening: boolean, open: OpenRun | null, agent: ReturnType<typeof useAgentPhase>, starting: boolean): RunPhase {
   if (state.phase === "connecting" || state.phase === "dropped") return { kind: state.phase === "connecting" && !state.lost ? "connecting" : "reconnecting" };
-  if ((present.opening || open?.stale) && !starting) return { kind: open?.stale ? "reconnecting" : "opening" };
+  if ((opening || open?.stale) && !starting) return { kind: open?.stale ? "reconnecting" : "opening" };
   if (agent.kind === "approval") return { kind: "approval" };
   if (agent.kind === "running") return { kind: "running", tool: agent.tool };
   if (agent.kind === "thinking") return { kind: "thinking" };
@@ -521,7 +521,7 @@ function Dock({ state, view, connection, runs, vim, setVim, theme, setTheme, onN
 
   const failure = present.openError;
   const problem = (state.phase !== "connected" && state.phase !== "connecting" && state.phase !== "dropped") || Boolean(failure);
-  const phase = dockPhase(state, present, open, agent, starting);
+  const phase = dockPhase(state, Boolean(present.opening) || input.block === "opening", open, agent, starting);
   const readOnly = blank ? null : dockReadOnlyReason(open?.id ?? null, view.active);
   const blockedReason = starting ? null : input.block === "pending" || input.block === "waits-for-active" ? inputBlockText(input.block, view.active) : connectionBlockedReason(state) ?? inputBlockText(input.block, view.active);
   const onPreparationFailure = useCallback((error: unknown, images: readonly import("./image-queue").QueuedImage[], text: string) => {

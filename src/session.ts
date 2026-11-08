@@ -75,6 +75,7 @@ export async function openSession(
   signal?: AbortSignal,
   knownStatus?: ServerStatus,
   registration?: Registration,
+  onReplay?: () => void,
 ): Promise<OpenResult> {
   if (client.features.includes("session_replay_seq")) throw new Error("session_replay_seq needs the sequence replay coordinator");
   const approvalReconnect = client.features.includes("approval_reconnect");
@@ -146,6 +147,19 @@ export async function openSession(
     return status;
   };
 
+  // Attach before the replay: fulcrum's replay disposes the session's old store first, so a busy or failed resume
+  // leaves the last transcript readable.
+  const before = knownStatus ?? await getStatus(client, signal);
+  if (registration) {
+    const resumed = await client.request("resume", { session_id: id, host_commands: [registration.command] }, { timeoutMs: 30_000, signal }) as { session?: SessionMeta };
+    initialStatus = before.session?.session_id === id ? before : { session: resumed.session ?? null, state: "idle", pending_approvals: [] };
+  } else if (before.session?.session_id === id) initialStatus = before;
+  else {
+    const resumed = await client.request("resume", { session_id: id }, { timeoutMs: 30_000, signal }) as { session?: SessionMeta };
+    initialStatus = { session: resumed.session ?? null, state: "idle", pending_approvals: [] };
+  }
+  if (signal?.aborted) throw Object.assign(new Error("request aborted"), { name: "AbortError" });
+  onReplay?.();
   let firstLoad = true;
   const lease = await client.replay(id, async (replaySignal) => {
     activeSignal = combinedSignal(replaySignal);
@@ -154,15 +168,6 @@ export async function openSession(
       return snapshotEvents(id, allRows(), await getStatus(client, activeSignal), true, approvalReconnect);
     }
     firstLoad = false;
-    const before = knownStatus ?? await getStatus(client, activeSignal);
-    if (registration) {
-      const resumed = await client.request("resume", { session_id: id, host_commands: [registration.command] }, { timeoutMs: 30_000, signal: activeSignal }) as { session?: SessionMeta };
-      initialStatus = before.session?.session_id === id ? before : { session: resumed.session ?? null, state: "idle", pending_approvals: [] };
-    } else if (before.session?.session_id === id) initialStatus = before;
-    else {
-      const resumed = await client.request("resume", { session_id: id }, { timeoutMs: 30_000, signal: activeSignal }) as { session?: SessionMeta };
-      initialStatus = { session: resumed.session ?? null, state: "idle", pending_approvals: [] };
-    }
     pages = [await historyPage(0, activeSignal)];
     progress?.(allRows().length, pages[0]!.nextOffset === null);
     return snapshotEvents(id, allRows(), initialStatus, pages[0]!.nextOffset === null, approvalReconnect);
@@ -284,14 +289,16 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
     const abort = new AbortController();
     openAbort = abort;
     openOperation = { runId: effect.runId, operationId: effect.operationId };
-    // The reducer already dropped a live open when this one began; the lease it held is still ours to release.
-    const previous = leases.get(effect.runId);
-    if (previous) {
+    // The previous lease stays readable until this open's replay replaces its store.
+    const replaced = () => {
+      const previous = leases.get(effect.runId);
+      runs.dispatch({ type: "OPEN_EVICTED", runId: effect.runId, operationId: effect.operationId });
+      if (!previous) return;
       leaseSubscriptions.get(effect.runId)?.();
       leaseSubscriptions.delete(effect.runId);
       leases.delete(effect.runId);
       previous.lease.release();
-    }
+    };
     try {
       let history = { messages: 0, complete: false };
       const registration = await register(target, effect.runId);
@@ -303,7 +310,7 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
       const attempt = openSession(target, effect.runId, (messages, complete) => {
         history = { messages, complete };
         runs.dispatch({ type: "OPEN_PROGRESS", runId: effect.runId, operationId: effect.operationId, messages });
-      }, abort.signal, initialStatus, registration);
+      }, abort.signal, initialStatus, registration, replaced);
       const settled = attempt.then(() => {}, () => {}).finally(() => { if (replays.get(effect.runId) === settled) replays.delete(effect.runId); });
       replays.set(effect.runId, settled);
       const opened = await attempt;

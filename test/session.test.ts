@@ -187,7 +187,7 @@ test("a failed replacement shows only the requested run error", async () => {
   expect(present(view).opening).toBeNull();
 });
 
-test("a busy resume shows the busy error for the URL-selected run, never its evicted store, and forward restores the active run", async () => {
+test("a busy resume displays the URL-selected cached run and forward restores the active run", async () => {
   let current = "a";
   let blockA = false;
   const fake = await server(handlers("a", {
@@ -207,8 +207,7 @@ test("a busy resume shows the busy error for the URL-selected run, never its evi
   blockA = true;
   view.select("a");
   for (let attempt = 0; attempt < 400 && !present(view).openError; attempt++) await tick();
-  // The reopen's replay evicted A's old store, so it is not shown as if it were open.
-  expect(present(view).open).toBeNull();
+  expect(present(view).open?.id).toBe("a");
   expect(view.state.session?.session_id).toBe("a");
   expect(present(view).openError).toMatchObject({ id: "a", busy: true });
   view.select("b"); await tick();

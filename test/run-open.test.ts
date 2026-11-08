@@ -285,16 +285,55 @@ const table: Row[] = [
       const h = await openA();
       try {
         h.newRun();
-        const status = h.fake.hold("status");
-        h.select("a"); await status.reached;
+        // The reopen's replay disposes the old store before its first history page.
+        const page = h.fake.hold("session_history");
+        h.select("a"); await page.reached;
         expect(h.view.open).toBeNull();
         expect(h.view.opening).not.toBeNull();
         expect(h.owner()).toMatchObject({ accept: false, block: "opening" });
-        status.release(); await h.live("a");
+        page.release(); await h.live("a");
         h.deliveries.bind("a", h.view.open!.lease.store);
         h.type("after back"); expect(await h.enter()).toEqual({ ok: true });
         expect(h.zeta.turns).toHaveLength(1);
         expect(h.text()).toBe("");
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "12b busy reopen: the last transcript stays readable, input is blocked, nothing is sent",
+    async run() {
+      let busy = false;
+      const h = await openA({ handlers: (zeta) => ({ resume: (params) => { if (busy && params.session_id === "a") throw { code: -32004, message: "a turn is already running" }; zeta.attached = params.session_id as string; return { session: meta(zeta.attached, "x") }; } }) });
+      try {
+        h.select("b"); await h.live("b");
+        busy = true;
+        h.select("a");
+        await waitFor(() => Boolean(h.view.openError), 4_000);
+        expect(h.view.openError?.busy).toBe(true);
+        expect(h.view.open?.id).toBe("a");
+        expect(h.view.open!.lease.store.getOutline().length).toBeGreaterThan(0);
+        h.type("not while busy", "a");
+        expect((await h.enter("a")).ok).toBe(false);
+        expect(h.sends()).toEqual([]);
+        expect(h.text("a")).toBe("not while busy");
+        expect(h.owner()).toMatchObject({ accept: false, block: "open-failed" });
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "12c round10 flow: a run selected while another turn runs opens once a later status says the turn ended",
+    async run() {
+      let running = true;
+      const h = await world({ attached: "a", selected: "a", handlers: (zeta) => ({ status: () => ({ session: zeta.attached ? meta(zeta.attached, "x") : null, state: running ? "running" : "idle", pending_approvals: [] }) }) });
+      try {
+        h.start(); await waitFor(() => h.store.getCatalog().attachment.kind === "attached", 2_000);
+        h.select("b");
+        await waitFor(() => Boolean(h.view.openError?.busy), 2_000);
+        running = false;
+        await h.manager.refreshStatus();
+        await h.live("b");
+        expect(h.view.openError).toBeNull();
+        expect(h.owner()).toMatchObject({ accept: true });
       } finally { h.dispose(); }
     },
   },

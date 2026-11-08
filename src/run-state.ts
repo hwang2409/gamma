@@ -42,6 +42,8 @@ export type RunRecord = {
   readonly settings: RunSettingsState;
   readonly openOperation?: OperationId;
   readonly open?: OpenRun;
+  /** The operation that published `open`; a different `openOperation` means a reopen is in flight. */
+  readonly openedBy?: OperationId;
   readonly openingMessages?: number;
   readonly openError?: OpenFailure;
   readonly session?: SessionMeta;
@@ -97,6 +99,7 @@ export type WorkspaceEvent =
   | { type: "STATUS"; sessionId?: SessionId; session?: SessionMeta; turn: "idle" | "running" | "tool" | "approval"; operationId?: OperationId }
   | { type: "OPEN_REQUEST"; runId: SessionId; operationId: OperationId }
   | { type: "OPEN_PROGRESS"; runId: SessionId; operationId: OperationId; messages: number }
+  | { type: "OPEN_EVICTED"; runId: SessionId; operationId: OperationId }
   | { type: "OPEN_OK"; runId: SessionId; operationId: OperationId; open: OpenRun; session?: SessionMeta }
   | { type: "OPEN_COMPLETE"; runId: SessionId; operationId: OperationId; open: OpenRun }
   | { type: "OPEN_FAIL"; runId: SessionId; operationId: OperationId; error: string; busy: boolean }
@@ -153,8 +156,7 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     const owner = activeOwner();
     update(runId, (record) => owner && owner !== runId
       ? { ...record, openError: { id: runId, message: `${owner} has the active turn`, busy: true } }
-      // A reopen replays into a fresh store and evicts the old one, so the old open stops being the open run now.
-      : { ...record, lifecycle: { kind: "opening", operationId }, openOperation: operationId, openingMessages: 0, openError: undefined, ...(record.open && !record.open.stale ? { open: undefined } : {}) });
+      : { ...record, lifecycle: { kind: "opening", operationId }, openOperation: operationId, openingMessages: 0, openError: undefined });
     if (!owner || owner === runId) effects.push({ type: "open-session", runId, operationId });
   };
   switch (event.type) {
@@ -193,6 +195,8 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     }
     case "STATUS": {
       attachment = event.sessionId ? { kind: "attached", sessionId: event.sessionId, turn: event.turn } : { kind: "detached" };
+      // A busy open is a wait, not a failure: fresh status lets the post-step try again (it stays busy if the turn runs).
+      if (runs.get(canonical({ ...state, aliases }, entry.run))?.openError?.busy) update(entry.run, (record) => ({ ...record, openError: undefined }));
       if (event.sessionId) {
         update(event.sessionId, (record) => ({ ...record, session: event.session ?? record.session }));
         for (const intentId of runs.get(event.sessionId)?.deliveries.keys() ?? []) effects.push({ type: "delivery-status", runId: event.sessionId, operationId: crypto.randomUUID() as OperationId, intentId });
@@ -200,8 +204,10 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
       break;
     }
     case "OPEN_REQUEST": if (!openingOwner()) beginOpen(event.runId, event.operationId); break;
+    // The reopen's replay is about to dispose the old store: stop showing it. A busy or failed resume never gets here.
+    case "OPEN_EVICTED": update(event.runId, (record) => record.openOperation === event.operationId && record.open && !record.open.stale ? { ...record, open: undefined } : record); break;
     case "OPEN_PROGRESS": update(event.runId, (record) => record.openOperation === event.operationId ? { ...record, openingMessages: event.messages } : record); break;
-    case "OPEN_OK": update(event.runId, (record) => record.openOperation === event.operationId ? { ...record, lifecycle: { kind: "open", lease: event.open.lease }, open: event.open, openingMessages: undefined, openError: undefined, session: event.session ?? record.session } : record); break;
+    case "OPEN_OK": update(event.runId, (record) => record.openOperation === event.operationId ? { ...record, lifecycle: { kind: "open", lease: event.open.lease }, open: event.open, openedBy: event.operationId, openingMessages: undefined, openError: undefined, session: event.session ?? record.session } : record); break;
     case "OPEN_COMPLETE": update(event.runId, (record) => record.openOperation === event.operationId ? { ...record, lifecycle: { kind: "open", lease: event.open.lease }, open: event.open, openingMessages: undefined } : record); break;
     case "OPEN_FAIL": update(event.runId, (record) => record.openOperation === event.operationId ? { ...record, lifecycle: record.open ? record.lifecycle : { kind: "failed", error: event.error }, openOperation: undefined, openingMessages: undefined, openError: { id: event.runId, message: event.error, busy: event.busy } } : record); break;
     case "OPEN_DISMISS": update(event.runId, (record) => ({ ...record, openError: undefined })); break;
@@ -255,8 +261,8 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
   // The one place that recovers an open: whenever the selected run is not live and nothing blocks it, open it.
   const selected = canonical({ ...state, aliases }, entry.run);
   const record = runs.get(selected);
-  const inFlight = record?.openOperation && (!record.open || record.open.stale);
-  const live = attachment.kind === "attached" && attachment.sessionId === selected && record?.open && !record.open.stale;
+  const inFlight = Boolean(record?.openOperation) && record?.openOperation !== record?.openedBy;
+  const live = attachment.kind === "attached" && attachment.sessionId === selected && record?.open && !record.open.stale && !inFlight;
   if (connected && attachment.kind !== "disconnected" && !selected.startsWith("draft:") && record && !live && !inFlight && !record.openError && !openingOwner())
     beginOpen(selected as SessionId, crypto.randomUUID() as OperationId);
   return { state: { ...state, entry, runs, aliases, attachment, connected, ...(notice ? { notice } : { notice: undefined }) }, effects };
@@ -277,6 +283,7 @@ export const runInput = (state: WorkspaceState, runId: RunId = state.entry.run):
   const record = state.runs.get(run);
   const open = record?.open ?? null;
   const attached = state.attachment.kind === "attached" && state.attachment.sessionId === run ? state.attachment : null;
+  const reopening = Boolean(record?.openOperation) && record?.openOperation !== record?.openedBy;
   const draft = run.startsWith("draft:");
   const active = activeRun(state);
   const opening = !draft && !open && !record?.openError ? { messages: record?.openingMessages ?? 0 } : null;
@@ -286,7 +293,7 @@ export const runInput = (state: WorkspaceState, runId: RunId = state.entry.run):
     : open?.stale ? "reconnecting"
     : record?.openError ? "open-failed"
     : draft ? null
-    : !open || !attached ? "opening"
+    : !open || !attached || reopening ? "opening"
     : open.syncing && attached.turn === "idle" ? "syncing"
     : null;
   return { run, open, accept: block === null, block, opening };
