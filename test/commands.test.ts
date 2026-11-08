@@ -148,13 +148,7 @@ test("a fresh draft runs gamma's own actions and refuses commands that need a ze
   expect(await fresh.prepareComposerInput("/keys")).toEqual({ kind: "client-action", name: "keys", args: "" });
   expect(await fresh.prepareComposerInput("/theme dracula")).toEqual({ kind: "client-action", name: "theme", args: "dracula" });
   for (const text of ["/tree", "/name x", "/approve", "/status"]) expect(await fresh.prepareComposerInput(text)).toEqual(refusal);
-});
-
-test("with no client at all, gamma's own actions still run and zeta commands still refuse", async () => {
-  const disconnected = createUnavailableCommandController();
-  expect(await disconnected.prepareComposerInput("/keys")).toEqual({ kind: "client-action", name: "keys", args: "" });
-  expect(await disconnected.prepareComposerInput("/theme dracula")).toEqual({ kind: "client-action", name: "theme", args: "dracula" });
-  expect(await disconnected.prepareComposerInput("/status")).toEqual({ kind: "receipt", text: "not available in this server version", tone: "error", retain: true });
+  expect(await createUnavailableCommandController().prepareComposerInput("/keys")).toEqual({ kind: "receipt", text: "not available in this server version", tone: "error", retain: true });
 });
 
 test("an attach with a pending slash token sends one slash_list, shared by both askers", async () => {

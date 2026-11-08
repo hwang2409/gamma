@@ -3,7 +3,7 @@ import { addImage, readImage, type QueuedImage } from "./image-queue";
 import { hasPendingDelivery, type RunStateStore } from "./run-state";
 import { escape, normalKey, startVim, type Draft, type Step, type Vim } from "./vim";
 import { CompletionModel, type CompletionSnapshot } from "./completions";
-import { isLocalCommandText, type CommandController, type ComposerAction } from "./commands";
+import type { CommandController, ComposerAction } from "./commands";
 import { browserUsesControlRForReload, composerHint } from "./keys";
 
 // gamma's composer. It keeps @fulcrum/react's composer parts (data-part names, so the shipped styles apply) and adds what
@@ -177,8 +177,7 @@ function useAttachments(input: RefObject<HTMLTextAreaElement | null>, images: re
 }
 
 export function canSubmitComposer(blocked: boolean, text: string, imageCount: number, sending: boolean, steer: boolean) {
-  // gamma's own commands (/keys, /theme, ...) need no zeta, so they run while sending is paused.
-  return (!blocked || isLocalCommandText(text)) && (text.trim() !== "" || imageCount > 0) && !sending && !(steer && imageCount > 0 && !text.trimStart().startsWith("/"));
+  return !blocked && (text.trim() !== "" || imageCount > 0) && !sending && !(steer && imageCount > 0 && !text.trimStart().startsWith("/"));
 }
 
 function useSubmission(state: ComposerState, blocked: boolean, commands: CommandController, onSubmit: Submit, onPreparationFailure: ((error: unknown, images: readonly QueuedImage[], text: string) => void) | undefined, onStop: (() => Promise<unknown>) | undefined, draft: ReturnType<typeof useComposerDraft>, attachments: ReturnType<typeof useAttachments>, store: RunStateStore, runId: string, pending: boolean) {
