@@ -195,6 +195,56 @@ async function listWheel(page: Page, name: string) {
   } finally { await closeList(page); }
 }
 
+/** The receipt's first text line, its dismiss button, and its box, so alignment can be compared in CSS pixels. */
+const measureReceipt = (page: Page) => page.locator(".command-receipt").evaluate((node) => {
+  const text = node.querySelector(".command-receipt-text")!;
+  const range = document.createRange();
+  range.selectNodeContents(text);
+  const line = range.getClientRects()[0]!;
+  const button = node.querySelector('[aria-label="dismiss command result"]')!.getBoundingClientRect();
+  const box = node.getBoundingClientRect();
+  return { lineCenter: line.top + line.height / 2, buttonCenter: button.top + button.height / 2, buttonTop: button.top - box.top, padding: parseFloat(getComputedStyle(node).paddingTop) + node.clientTop, scrolls: text.scrollHeight > text.clientHeight + 1 };
+});
+/** A one-line receipt reads on the dismiss button's center line; a long one keeps the button at the top and scrolls. */
+async function receiptAlignment(page: Page, name: string) {
+  const dismiss = () => page.locator(".command-receipt").getByRole("button", { name: "dismiss command result" }).click({ timeout: 5_000 });
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+    await submit(page, "/restart");
+    await step(page, `${name} ${width} /restart shows its one-line receipt`, () => page.locator(".command-receipt-text", { hasText: "/restart restarts" }).waitFor({ timeout: 5_000 }));
+    const one = await measureReceipt(page);
+    await page.screenshot({ path: join(shots, `${name}-receipt-one-line-${width}.png`), clip: await page.locator(".command-receipt").boundingBox() ?? undefined });
+    await dismiss();
+    if (Math.abs(one.lineCenter - one.buttonCenter) > 2) throw new Error(`${name} ${width}: one-line receipt text sits ${(one.buttonCenter - one.lineCenter).toFixed(1)} px off the dismiss button's center: ${JSON.stringify(one)}`);
+    await submit(page, "/keys");
+    await step(page, `${name} ${width} /keys shows its long receipt`, () => page.locator(".command-receipt-text", { hasText: "enter" }).waitFor({ timeout: 5_000 }));
+    const long = await measureReceipt(page);
+    await dismiss();
+    if (!long.scrolls || long.buttonTop > long.padding + 1) throw new Error(`${name} ${width}: a long receipt must scroll with its dismiss button at the top: ${JSON.stringify(long)}`);
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await field(page).fill("");
+}
+/** In forced colors the theme's fills and the accent bar are gone; the active and the hovered rows must still differ. */
+async function forcedColorsRows(page: Page) {
+  try {
+    await openList(page);
+    await field(page).press("ArrowDown");
+    await field(page).press("ArrowDown");
+    await settle(page);
+    const rows = await page.getByRole("option").evaluateAll((nodes) => nodes.slice(0, 4).map((node) => { const box = node.getBoundingClientRect(); return { left: box.left, right: box.right, mid: box.top + box.height / 2 }; }));
+    const sample = (row: typeof rows[number]) => pixel(page, Math.floor(row.right) - 3, Math.floor(row.mid));
+    const active = distance(await sample(rows[2]!), await sample(rows[1]!));
+    await page.screenshot({ path: join(shots, "forced-colors-active-row.png"), clip: await page.getByRole("listbox", { name: "command suggestions" }).boundingBox() ?? undefined });
+    if (active < 60) throw new Error(`forced colors: the active row matches its neighbour (distance ${active})`);
+    await page.mouse.move(rows[0]!.left + 40, rows[0]!.mid);
+    await settle(page);
+    const edge = (row: typeof rows[number]) => pixel(page, Math.ceil(row.left) + 1, Math.floor(row.mid));
+    const hovered = distance(await edge(rows[0]!), await edge(rows[3]!));
+    if (hovered < 60) throw new Error(`forced colors: the hovered row matches a plain row (distance ${hovered})`);
+  } finally { await closeList(page); }
+}
+
 try {
   for (let attempt = 0; attempt < 300; attempt++) {
     if (vite.exitCode !== null) throw new Error(`vite exited ${vite.exitCode}`);
@@ -213,11 +263,24 @@ try {
       await waitRunCommands(other, since, "webkit opens the active run");
       await check("webkit edge shades stay visible over the active and the hovered edge row", () => listShades(other, "webkit"));
       await check("webkit free wheel scrolling rests on whole rows", () => listWheel(other, "webkit"));
+      await check("webkit receipt text lines up with its dismiss button", () => receiptAlignment(other, "webkit"));
     } finally { await safari.close(); }
   }
 
   const browser = await chromium.launch();
   try {
+    // Playwright emulates forced colors in chromium only.
+    const contrast = await browser.newContext({ viewport: { width: 1440, height: 900 }, forcedColors: "active" });
+    try {
+      const page = await contrast.newPage();
+      page.on("pageerror", (error) => errors.push(`forced colors: ${error.message}`));
+      statePage = page;
+      const since = fake.requests.length;
+      await page.goto(`${origin}/?run=${ACTIVE}`);
+      await waitRunCommands(page, since, "forced colors opens the active run");
+      await check("forced colors mark the active and the hovered command rows", () => forcedColorsRows(page));
+    } finally { await contrast.close(); }
+
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     // GATE_CPU_THROTTLE=20 runs chromium's main thread 20x slower, the way a loaded machine does, to reproduce timing races.
     if (process.env.GATE_CPU_THROTTLE) await (await page.context().newCDPSession(page)).send("Emulation.setCPUThrottlingRate", { rate: Number(process.env.GATE_CPU_THROTTLE) });
@@ -536,9 +599,41 @@ try {
       if (status()?.replied !== undefined) throw new Error("the run attached before /st was typed, so this check missed the attach window");
       await step(page, "the attach reply arrives", () => until(() => status()?.replied !== undefined, 10_000));
       await step(page, "/st typed before the attach opens the list after it", () => page.getByRole("listbox", { name: "command suggestions" }).waitFor({ timeout: 10_000 }));
+      // The new command source re-asks about /st and its mount refreshes the catalog: both must share one request.
+      await page.waitForTimeout(300);
+      const lists = fake.requests.slice(since).filter((request) => request.method === "slash_list").length;
+      if (lists !== 1) throw new Error(`one attach sent ${lists} slash_list requests, expected 1`);
       await field(page).press("Escape");
       await field(page).fill("");
     });
+
+    await check("enter on a command while the run attaches keeps the draft quietly, then runs once the run attaches", async () => {
+      fake.delayNext("status", 1_500);
+      const since = fake.requests.length;
+      await page.reload();
+      await waitReady(page);
+      await field(page).fill("/status");
+      await field(page).press("Enter");
+      const status = () => fake.requests.slice(since).find((request) => request.method === "status");
+      await page.waitForTimeout(200);
+      if (status()?.replied !== undefined) throw new Error("the run attached before Enter, so this check missed the attach window");
+      const early = await page.locator(".command-receipt-text").allInnerTexts();
+      if (early.length) throw new Error(`enter during the attach showed a receipt: ${JSON.stringify(early)}`);
+      if (await field(page).inputValue() !== "/status") throw new Error("enter during the attach dropped the draft");
+      await step(page, "the composer says sending waits for the run", () => page.locator('[data-part="composer-message"]', { hasText: "sending is paused until the run opens" }).waitFor({ timeout: 2_000 }));
+      await step(page, "the dock status says the run is opening", () => page.locator(".dock").getByText("opening the run…", { exact: true }).waitFor({ timeout: 2_000 }));
+      await step(page, "the attach reply arrives", () => until(() => status()?.replied !== undefined, 10_000));
+      await step(page, "the attached run asks for its command catalog", () => until(() => fake.requests.slice(since).some((request) => request.method === "slash_list" && request.replied !== undefined), 10_000));
+      const late = await page.locator(".command-receipt-text").allInnerTexts();
+      if (late.length) throw new Error(`a receipt from the attach window stayed after the attach: ${JSON.stringify(late)}`);
+      const runs = fake.requests.length;
+      await submit(page, "/status");
+      await step(page, "/status runs after the attach", () => until(() => fake.requests.slice(runs).some((request) => request.method === "slash_run"), 10_000));
+      await page.locator(".command-receipt").getByRole("button", { name: "dismiss command result" }).click({ timeout: 5_000 });
+      await field(page).fill("");
+    });
+
+    await check("receipt text lines up with its dismiss button", () => receiptAlignment(page, "chromium"));
 
     await check("one escape closes the menu after one-shot input; modified tab and enter never accept", async () => {
       const listbox = page.getByRole("listbox", { name: "command suggestions" });

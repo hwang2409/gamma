@@ -115,12 +115,16 @@ export function createCommandController(
     features: [...capabilities.features],
   } satisfies CommandClient;
 
-  async function refreshCatalog(): Promise<void> {
+  let loading: Promise<void> | undefined;
+  /** One catalog request at a time: an attach asks from both the mount effect and the pending token, and they share it. */
+  function refreshCatalog(): Promise<void> {
     if (!capabilities.requests.has("slash_list")) {
       catalog = [];
-      return;
+      return Promise.resolve();
     }
-    catalog = (await listSlashCommands(client, sessionId)).commands;
+    return loading ??= listSlashCommands(client, sessionId).then(
+      (result) => { catalog = result.commands; },
+    ).finally(() => { loading = undefined; });
   }
 
   async function completions(valueBeforeCursor: string): Promise<CompletionRow[]> {
@@ -181,14 +185,21 @@ export function createUnavailableCommandController(message = "not available in t
   return {
     async prepareComposerInput(text) {
       if (detached && /^\/permissions(?:\s|$)/.test(text.trim())) return { kind: "receipt", text: "open this run before changing permissions", tone: "error", retain: true };
-      const local = detached && isSlashCommandText(text) ? CLIENT_ACTIONS[commandName(text.trimStart())] : undefined;
-      if (local && isLocalAction(local)) return { kind: "client-action", name: local, args: commandArgs(text.trimStart()) };
+      const local = localCommand(text);
+      if (local) return { kind: "client-action", name: local, args: commandArgs(text.trimStart()) };
       return isSlashCommandText(text) ? { kind: "receipt", text: message, tone: "error", retain: true } : directSend(text);
     },
     async completions() { return []; },
     async refreshCatalog() {},
   };
 }
+
+/** gamma's own action for slash text, if it names one: it needs no zeta session and no connection. */
+function localCommand(text: string): LocalActionName | undefined {
+  const name = isSlashCommandText(text) ? CLIENT_ACTIONS[commandName(text.trimStart())] : undefined;
+  return name && isLocalAction(name) ? name : undefined;
+}
+export const isLocalCommandText = (text: string) => localCommand(text) !== undefined;
 
 function commandLine(text: string): string {
   return text.split("\n", 1)[0].slice(1).trimStart();

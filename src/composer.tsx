@@ -3,7 +3,7 @@ import { addImage, readImage, type QueuedImage } from "./image-queue";
 import { hasPendingDelivery, type RunStateStore } from "./run-state";
 import { escape, normalKey, startVim, type Draft, type Step, type Vim } from "./vim";
 import { CompletionModel, type CompletionSnapshot } from "./completions";
-import type { CommandController, ComposerAction } from "./commands";
+import { isLocalCommandText, type CommandController, type ComposerAction } from "./commands";
 import { browserUsesControlRForReload, composerHint } from "./keys";
 
 // gamma's composer. It keeps @fulcrum/react's composer parts (data-part names, so the shipped styles apply) and adds what
@@ -177,7 +177,8 @@ function useAttachments(input: RefObject<HTMLTextAreaElement | null>, images: re
 }
 
 export function canSubmitComposer(blocked: boolean, text: string, imageCount: number, sending: boolean, steer: boolean) {
-  return !blocked && (text.trim() !== "" || imageCount > 0) && !sending && !(steer && imageCount > 0 && !text.trimStart().startsWith("/"));
+  // gamma's own commands (/keys, /theme, ...) need no zeta, so they run while sending is paused.
+  return (!blocked || isLocalCommandText(text)) && (text.trim() !== "" || imageCount > 0) && !sending && !(steer && imageCount > 0 && !text.trimStart().startsWith("/"));
 }
 
 function useSubmission(state: ComposerState, blocked: boolean, commands: CommandController, onSubmit: Submit, onPreparationFailure: ((error: unknown, images: readonly QueuedImage[], text: string) => void) | undefined, onStop: (() => Promise<unknown>) | undefined, draft: ReturnType<typeof useComposerDraft>, attachments: ReturnType<typeof useAttachments>, store: RunStateStore, runId: string, pending: boolean) {
@@ -250,7 +251,12 @@ export function GammaComposer({ state, reason, blockedReason, vim: vimOn, comman
   const completion = useSyncExternalStore(completions.subscribe, completions.getSnapshot);
   const submission = useSubmission(state, Boolean(blockedReason), commands, onSubmit, onPreparationFailure, onStop, draft, attachments, store, runId, pending);
   useEffect(() => { if (autoFocus && (!document.activeElement || document.activeElement === document.body)) draft.input.current?.focus({ preventScroll: true }); }, [autoFocus]);
-  useEffect(() => { completions.setController(commands); void commands.refreshCatalog().catch(() => {}); }, [completions, commands]);
+  useEffect(() => {
+    // Read the field, not the model's last input: a submit clears the draft without an input event.
+    const field = draft.input.current;
+    completions.setController(commands, field ? { value: field.value, caret: field.selectionStart } : { value: draft.text, caret: draft.text.length });
+    void commands.refreshCatalog().catch(() => {});
+  }, [completions, commands]);
   useEffect(() => { onFileInput?.(attachments.files.current); return () => onFileInput?.(null); }, [attachments.files, onFileInput]);
   const stopRef = useCallback((button: HTMLButtonElement | null) => {
     if (!button) return;

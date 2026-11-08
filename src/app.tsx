@@ -15,10 +15,10 @@ import { nextRunModel, PermissionsControl, RunSettings, SettingsMenu, useVimSett
 import { activeRun, createRunStateStore, hasPendingDelivery, workspaceRunState, type DraftRunId, type EntryId, type RunId, type RunStateStore } from "./run-state";
 import { artifactContentUrl, hostBindings, useArtifacts } from "./host-client";
 import type { Artifact } from "./host/types";
-import { createCommandController, createUnavailableCommandController, isLocalAction, isSlashCommandText, type ComposerAction } from "./commands";
+import { createCommandController, createUnavailableCommandController, isSlashCommandText, type ClientActionName, type ComposerAction } from "./commands";
 import { createReceiptStore, type ReceiptStore } from "./receipts";
 import { createApprovalDecider, pendingApprovals } from "./approvals";
-import { createClientActions, createLocalActions } from "./client-actions";
+import { createClientActions, createLocalActions, type ActionReceipt } from "./client-actions";
 import { alwaysAllowed as getAlwaysAllowed, markAlwaysAllowed, subscribeAlwaysAllowed } from "./always-allowed";
 import { createSessionGrantsModel, type SessionGrantsModel } from "./session-grants";
 
@@ -364,7 +364,7 @@ async function submitRun({ text, images, steer, deliveryId, connection, runs, de
 
 function dockPhase(state: ConnectionState, present: RunState, open: OpenRun | null, agent: ReturnType<typeof useAgentPhase>, starting: boolean): RunPhase {
   if (state.phase === "connecting" || state.phase === "dropped") return { kind: state.phase === "connecting" && !state.lost ? "connecting" : "reconnecting" };
-  if ((present.opening || open?.stale) && !starting) return { kind: open?.stale ? "reconnecting" : "opening" };
+  if ((runOpening(present, open) || open?.stale) && !starting) return { kind: open?.stale ? "reconnecting" : "opening" };
   if (agent.kind === "approval") return { kind: "approval" };
   if (agent.kind === "running") return { kind: "running", tool: agent.tool };
   if (agent.kind === "thinking") return { kind: "thinking" };
@@ -408,8 +408,11 @@ function dockBlockedReason(state: ConnectionState, present: RunState, open: Open
   if (state.phase === "not_running") return "sending is paused until zeta serve runs again";
   if (state.phase !== "connected") return "sending is paused until zeta reconnects";
   if (present.openError) return "sending is paused until the run opens";
-  return present.opening || open?.stale || (open?.syncing && !running) ? "sending is paused until the run opens" : null;
+  return runOpening(present, open) || open?.stale || (open?.syncing && !running) ? "sending is paused until the run opens" : null;
 }
+
+/** A run is selected but has no lease yet: from before zeta's status reply attaches it until its history opens. */
+const runOpening = (present: RunState, open: OpenRun | null) => Boolean(present.selected) && !open;
 
 function Dock({ state, view, connection, runs, vim, setVim, theme, setTheme, onNewRun, onRetryTurn, onImageOpen, runState, runId, onCreated, onAccepted, deliveries, receipts }: {
   state: ConnectionState; view: RunState; connection: Connection; runs: SessionManager; vim: boolean; setVim(value: boolean): void; theme: ThemeChoice; setTheme(value: ThemeChoice): void; onNewRun(): void; onRetryTurn: Dispatch<SetStateAction<RetryAction | null>>; onImageOpen(block: any): void; runState: RunStateStore; runId: string; onCreated(from: string, sessionId: string): void; onAccepted(): void; deliveries: DeliveryManager; receipts: ReceiptStore;
@@ -464,7 +467,8 @@ function Dock({ state, view, connection, runs, vim, setVim, theme, setTheme, onN
     }
     if (action.kind === "client-action") {
       const local = { newRun: onNewRun, themes: themeChoices, currentTheme: () => theme, setTheme, openFilePicker: () => fileInput.current?.click() };
-      const run = client && sessionId ? createClientActions({
+      // Resolve the action table first (zeta-backed for an open run, gamma's own otherwise), then index it.
+      const actions: Partial<Record<ClientActionName, (args: string) => Promise<ActionReceipt | void>>> = client && sessionId ? createClientActions({
         ...local, sessionId, requests, request: (method, params) => client.request(method as never, params as never),
         refreshStatus: runs.refreshStatus, retrySession: (id) => client.retrySession(id), currentName: () => sessionTitle(present.session) ?? undefined,
         approvalStore, approvalDisabledReason, decide: createApprovalDecider(client, open!.lease.store), markAlways: (toolId) => markAlwaysAllowed(sessionId, toolId),
@@ -474,7 +478,8 @@ function Dock({ state, view, connection, runs, vim, setVim, theme, setTheme, onN
           revoke: (grant) => grants.revoke(grant),
           clear: () => grants.clear(),
         } } : {}),
-      })[action.name] : isLocalAction(action.name) ? createLocalActions(local)[action.name] : null;
+      }) : createLocalActions(local);
+      const run = actions[action.name];
       if (!run) { setReceipt(NEEDS_OPEN_RUN, "error"); return; }
       try {
         const result = await run(action.args);

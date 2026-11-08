@@ -27,11 +27,11 @@ export class CompletionModel {
 
   constructor(private controller: CommandController) {}
 
-  /** The run's command source changed (the run attached, reconnected, or reopened): ask the new one about the token being typed. */
-  setController(controller: CommandController) {
+  /** The run's command source changed (the run attached, reconnected, or reopened): ask the new one about the token still in the field. */
+  setController(controller: CommandController, field: { value: string; caret: number }) {
     if (controller === this.controller) return;
     this.controller = controller;
-    if (this.input !== undefined && this.token && !this.dismissed) this.update(this.value, this.caret);
+    if (this.input !== undefined && this.token && !this.dismissed) this.update(field.value, field.caret);
   }
 
   readonly getSnapshot = (): CompletionSnapshot => this.state;
