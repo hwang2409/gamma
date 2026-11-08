@@ -9,14 +9,17 @@ import { createPortal } from "react-dom";
 import { commandRequests, createConnection, serveCommand, type Connection, type ConnectionState } from "./connection";
 import { createDeliveryManager, stopTurn, type DeliveryManager } from "./delivery";
 import { createSessionManager, sessionTitle, type OpenRun, type RunState, type SessionManager, type SessionMeta } from "./session";
-import { ThemePicker, useTheme } from "./theme";
+import { themeChoices, ThemePicker, useTheme, type ThemeChoice } from "./theme";
 import { GammaComposer, type Submit } from "./composer";
 import { nextRunModel, RunSettings, SettingsMenu, useVimSetting, VimToggle } from "./controls";
-import { createRunStateStore, hasPendingDelivery, workspaceRunState, type DraftRunId, type EntryId, type RunId, type RunStateStore } from "./run-state";
+import { activeRun, createRunStateStore, hasPendingDelivery, workspaceRunState, type DraftRunId, type EntryId, type RunId, type RunStateStore } from "./run-state";
 import { artifactContentUrl, hostBindings, useArtifacts } from "./host-client";
 import type { Artifact } from "./host/types";
-import { createCommandController, createUnavailableCommandController, isSlashCommandText, type ClientActionName, type ComposerAction } from "./commands";
+import { createCommandController, createUnavailableCommandController, isSlashCommandText, type ComposerAction } from "./commands";
 import { createReceiptStore, type ReceiptStore } from "./receipts";
+import { createApprovalDecider, pendingApprovals } from "./approvals";
+import { createClientActions } from "./client-actions";
+import { alwaysAllowed as getAlwaysAllowed, markAlwaysAllowed, subscribeAlwaysAllowed } from "./always-allowed";
 
 const highlight = createHighlighter();
 addEventListener("pagehide", () => highlight.dispose(), { once: true });
@@ -238,7 +241,7 @@ export function App() {
               <main className="main">
                 {landedNotice ? <div className="landed-notice" role="status">your message started run {landedNotice.runId} <button type="button" className="ghost" onClick={() => { runState.dismissNotice(); selectRun(landedNotice.runId); }}>open</button><button type="button" className="ghost" onClick={() => runState.dismissNotice()}>dismiss</button></div> : null}
                 <Body state={state} view={view} connection={connection} runs={runs} onNewRun={newRun} onSelectRun={selectRun} followRequest={followRequest} />
-                <Dock key={browserEntry.run} runId={browserEntry.run} runState={runState} onCreated={onCreated} onAccepted={() => setFollowRequest((request) => request + 1)} deliveries={deliveries} receipts={receipts} state={state} view={view} connection={connection} runs={runs} vim={vim} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />
+                <Dock key={browserEntry.run} runId={browserEntry.run} runState={runState} onCreated={onCreated} onAccepted={() => setFollowRequest((request) => request + 1)} deliveries={deliveries} receipts={receipts} state={state} view={view} connection={connection} runs={runs} vim={vim} setVim={setVim} theme={theme} setTheme={setTheme} onNewRun={newRun} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />
                 {viewer ? <Inspector value={viewer} onClose={closeViewer} /> : null}
               </main>
             </div>
@@ -337,7 +340,7 @@ function CommandReceiptLine({ store, runId }: { store: ReceiptStore; runId: stri
   const text = useRef<HTMLSpanElement>(null);
   useEffect(() => { if (receipt) text.current?.scrollTo(0, 0); }, [receipt]);
   if (!receipt) return null;
-  return <div className="command-receipt" data-tone={receipt.tone}>{receipt.tone === "error" ? <span className="command-receipt-label">error</span> : null}<span ref={text} className="command-receipt-text" role={receipt.tone === "error" ? "alert" : "status"}>{receipt.text}</span><button type="button" className="ghost" aria-label="dismiss command result" onClick={() => { store.dismiss(runId); focusComposer(); }}>dismiss</button></div>;
+  return <div className="command-receipt" data-tone={receipt.tone}>{receipt.tone === "error" ? <span className="command-receipt-label">error</span> : null}<span ref={text} className="command-receipt-text" role={receipt.tone === "error" ? "alert" : "status"}>{receipt.text}</span>{receipt.action ? <button type="button" className="ghost receipt-action" onClick={receipt.action.run}>{receipt.action.label}</button> : null}<button type="button" className="ghost" aria-label="dismiss command result" onClick={() => { store.dismiss(runId); focusComposer(); }}>dismiss</button></div>;
 }
 
 async function submitRun({ text, images, steer, deliveryId, connection, runs, deliveries, choice, yolo, runId, onCreated }: { text: string; images: readonly import("./image-queue").QueuedImage[]; steer: boolean; deliveryId: string; connection: Connection; runs: SessionManager; deliveries: DeliveryManager; choice: { model?: string; provider?: string }; yolo: boolean; runId: string; onCreated(from: string, sessionId: string): void }) {
@@ -366,9 +369,9 @@ function dockPhase(state: ConnectionState, present: RunState, open: OpenRun | nu
   return { kind: "ready" };
 }
 
-function DockComposer({ readOnly, blockedReason, running, vim, commands, onSubmit, onPreparationFailure, onStop, onImageOpen, client, deliveries, sessionId, runState, runId, createdWithDefault }: { readOnly: string | null; blockedReason: string | null; running: boolean; vim: boolean; commands: ReturnType<typeof createUnavailableCommandController>; onSubmit: Submit; onPreparationFailure(error: unknown, images: readonly import("./image-queue").QueuedImage[]): void; onStop(): Promise<unknown>; onImageOpen(block: any): void; client: ZetaClient | null; deliveries: DeliveryManager; sessionId: string | null; runState: RunStateStore; runId: string; createdWithDefault: boolean }) {
-  if (readOnly !== null) return <GammaComposer state="read-only" reason={readOnly} vim={vim} commands={commands} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onImageOpen={onImageOpen} store={runState} runId={runId} />;
-  return <GammaComposer state={running ? "steerable" : "idle"} blockedReason={blockedReason ?? undefined} vim={vim} commands={commands} autoFocus onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onStop={running ? onStop : undefined} onImageOpen={onImageOpen} store={runState} runId={runId} footer={<RunSettings available={Boolean(client)} deliveries={deliveries} sessionId={sessionId} createdWithDefault={createdWithDefault} running={running} store={runState} runId={runId} />} />;
+function DockComposer({ readOnly, blockedReason, running, vim, commands, onSubmit, onPreparationFailure, onStop, onImageOpen, onFileInput, client, deliveries, sessionId, runState, runId, createdWithDefault, planMode }: { readOnly: string | null; blockedReason: string | null; running: boolean; vim: boolean; commands: ReturnType<typeof createUnavailableCommandController>; onSubmit: Submit; onPreparationFailure(error: unknown, images: readonly import("./image-queue").QueuedImage[]): void; onStop(): Promise<unknown>; onImageOpen(block: any): void; onFileInput(input: HTMLInputElement | null): void; client: ZetaClient | null; deliveries: DeliveryManager; sessionId: string | null; runState: RunStateStore; runId: string; createdWithDefault: boolean; planMode: boolean }) {
+  if (readOnly !== null) return <GammaComposer state="read-only" reason={readOnly} vim={vim} commands={commands} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onImageOpen={onImageOpen} onFileInput={onFileInput} store={runState} runId={runId} />;
+  return <GammaComposer state={running ? "steerable" : "idle"} blockedReason={blockedReason ?? undefined} vim={vim} commands={commands} autoFocus onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onStop={running ? onStop : undefined} onImageOpen={onImageOpen} onFileInput={onFileInput} store={runState} runId={runId} footer={<>{planMode ? <span className="plan-chip" aria-label="plan mode: on">plan</span> : null}<RunSettings available={Boolean(client)} deliveries={deliveries} sessionId={sessionId} createdWithDefault={createdWithDefault} running={running} store={runState} runId={runId} /></>} />;
 }
 
 
@@ -403,11 +406,13 @@ function dockBlockedReason(state: ConnectionState, present: RunState, open: Open
   return present.opening || open?.stale || (open?.syncing && !running) ? "sending is paused until the run opens" : null;
 }
 
-function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, runState, runId, onCreated, onAccepted, deliveries, receipts }: {
-  state: ConnectionState; view: RunState; connection: Connection; runs: SessionManager; vim: boolean; onRetryTurn: Dispatch<SetStateAction<RetryAction | null>>; onImageOpen(block: any): void; runState: RunStateStore; runId: string; onCreated(from: string, sessionId: string): void; onAccepted(): void; deliveries: DeliveryManager; receipts: ReceiptStore;
+function Dock({ state, view, connection, runs, vim, setVim, theme, setTheme, onNewRun, onRetryTurn, onImageOpen, runState, runId, onCreated, onAccepted, deliveries, receipts }: {
+  state: ConnectionState; view: RunState; connection: Connection; runs: SessionManager; vim: boolean; setVim(value: boolean): void; theme: ThemeChoice; setTheme(value: ThemeChoice): void; onNewRun(): void; onRetryTurn: Dispatch<SetStateAction<RetryAction | null>>; onImageOpen(block: any): void; runState: RunStateStore; runId: string; onCreated(from: string, sessionId: string): void; onAccepted(): void; deliveries: DeliveryManager; receipts: ReceiptStore;
 }) {
   const present = view;
   const open = present.open;
+  const approvalStore = useRunStore();
+  const fileInput = useRef<HTMLInputElement | null>(null);
   const blank = !present.selected;
   const client = state.phase === "connected" ? connection.client : null;
   const agent = useAgentPhase();
@@ -419,30 +424,56 @@ function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, ru
   const starting = record.lifecycle.kind === "creating";
   const pendingDelivery = hasPendingDelivery(record);
   const sessionId = blank || starting || view.attached !== open?.id ? null : open.id;
+  const requests = client ? commandRequests(client) : new Set<string>();
   const commands = useMemo(() => client && sessionId
     ? createCommandController(sessionId, (method, params) => client.request(method, params), { features: new Set(client.features), requests: commandRequests(client) })
     : createUnavailableCommandController(client ? "commands need an open run; send a message first or open a run" : undefined), [client, sessionId]);
+  const approvalDisabledReason = !client ? "reconnecting — decisions are disabled until the server confirms this run" : open?.stale ? "reconnecting — decisions are disabled until the server confirms this run" : present.openError ? "opening the run — decisions are paused" : undefined;
 
   const onSubmit: Submit = useCallback(async (action, images, { steer, deliveryId, sourceText }) => {
-    const setReceipt = (text: string, tone: "quiet" | "error") => receipts.set(runState.canonical(runId), { text: images.length ? `${text}\nattachments are still attached and were not sent.` : text, tone });
+    const setReceipt = (text: string, tone: "quiet" | "error", extra: Pick<import("./receipts").CommandReceipt, "action"> = {}) => receipts.set(runState.canonical(runId), { text: images.length ? `${text}\nattachments are still attached and were not sent.` : text, tone, ...extra });
     const consume = () => runState.consumeDraft(runId, sourceText);
-    const unavailableClientAction = (name: string) => async () => setReceipt(!sessionId && client ? "commands need an open run; send a message first or open a run" : `/${name} is not available in gamma yet`, "error");
-    const clientActions: Record<ClientActionName, () => Promise<void>> = {
-      new_session: unavailableClientAction("new"), rename_session: unavailableClientAction("name"),
-      approve: unavailableClientAction("approve"), always: unavailableClientAction("always"), deny: unavailableClientAction("deny"),
-      theme: unavailableClientAction("theme"), branch_view: unavailableClientAction("tree"), model: unavailableClientAction("model"),
-      vim: unavailableClientAction("vim"), paste: unavailableClientAction("paste"), accounts: unavailableClientAction("accounts"),
+    const syncResult = async (command: string, text: string) => {
+      if (sessionId && (command === "model" || command === "plan" || command === "implement")) await deliveries.loadSettings(sessionId).catch(() => {});
+      if (command !== "vim" || !client) return text;
+      try {
+        const status = await client.request("status", {} as never) as { session?: { vim_mode?: unknown } };
+        if (typeof status.session?.vim_mode === "boolean") { setVim(status.session.vim_mode); return text; }
+      } catch {}
+      return `${text}\ngamma composer vim unchanged; this server did not report vim mode`;
     };
-    if (action.kind === "receipt") { setReceipt(action.text, action.tone); if (!action.retain) consume(); return; }
+    if (action.kind === "receipt") {
+      const text = action.command ? await syncResult(action.command, action.text) : action.text;
+      setReceipt(text, action.tone);
+      if (!action.retain) consume();
+      return;
+    }
     if (action.kind === "client-action") {
-      try { await clientActions[action.name](); consume(); }
-      catch (error) { setReceipt(error instanceof Error ? error.message : String(error), "error"); }
+      if (!client || !sessionId) { setReceipt("commands need an open run; send a message first or open a run", "error"); return; }
+      const decide = createApprovalDecider(client, open!.lease.store);
+      const clientActions = createClientActions({
+        sessionId, requests, request: (method, params) => client.request(method as never, params as never), newRun: onNewRun,
+        refreshStatus: runs.refreshStatus, retrySession: (id) => client.retrySession(id), currentName: () => sessionTitle(present.session) ?? undefined,
+        themes: themeChoices, currentTheme: () => theme, setTheme, openFilePicker: () => fileInput.current?.click(), approvalStore,
+        approvalDisabledReason, decide, markAlways: (toolId) => markAlwaysAllowed(sessionId, toolId),
+      });
+      try {
+        const result = await clientActions[action.name](action.args);
+        if (result) setReceipt(result.text, result.tone);
+        if (!result?.retain) consume();
+        if (action.name !== "new_session" && action.name !== "paste") requestAnimationFrame(focusComposer);
+      } catch (error) { setReceipt(error instanceof Error ? error.message : String(error), "error"); }
       return;
     }
     if (action.kind === "send-input") {
       const id = runState.canonical(runId);
+      if (action.command === "plan" || action.command === "implement") await deliveries.loadSettings(id).catch(() => {});
+      if (activeRun(runState.getCatalog()) === id) {
+        setReceipt("this command sends a message; it waits until the turn ends", "error");
+        return;
+      }
       const result = await deliveries.submitOpaque(id, action.inputId, action.displayText, sourceText, deliveryId);
-      if (images.length) receipts.set(runState.canonical(id), { text: "attachments are still attached and were not sent.", tone: "quiet" });
+      if (images.length) receipts.set(id, { text: "attachments are still attached and were not sent.", tone: "quiet" });
       onAccepted();
       return result;
     }
@@ -459,8 +490,8 @@ function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, ru
     } catch (error) {
       setReceipt(error instanceof Error ? error.message : String(error), "error");
       throw error;
-    };
-  }, [connection, deliveries, onAccepted, onCreated, receipts, record.model, runId, runState, runs, yolo]);
+    }
+  }, [approvalDisabledReason, approvalStore, client, connection, deliveries, onAccepted, onCreated, onNewRun, present.session, receipts, record.model, requests, runId, runState, runs, sessionId, setTheme, setVim, theme, yolo]);
   const onStop = useCallback(async () => { await deliveries.stop(runId); await runs.refreshStatus(); }, [deliveries, runId, runs]);
   const lastPrompt = useLastPrompt();
 
@@ -472,10 +503,16 @@ function Dock({ state, view, connection, runs, vim, onRetryTurn, onImageOpen, ru
   const readOnly = blank ? null : dockReadOnlyReason(open?.id ?? null, view.active);
   const blockedReason = starting ? null : pendingDelivery ? "sending waits while the previous message is pending or retrying" : view.active && blank ? `sending waits for the active run ${view.active}` : dockBlockedReason(state, present, open, running);
   const onPreparationFailure = useCallback((error: unknown, images: readonly import("./image-queue").QueuedImage[]) => {
-    const text = error instanceof Error ? error.message : String(error);
-    receipts.set(runState.canonical(runId), { text: images.length ? `${text}\nattachments are still attached and were not sent.` : text, tone: "error" });
-  }, [receipts, runId, runState]);
-  return <div className="dock"><>{problem ? null : <StatusLine phase={phase} />}</><CommandReceiptLine store={receipts} runId={runId} /><DockComposer commands={commands} deliveries={deliveries} readOnly={readOnly} blockedReason={blockedReason} running={running} vim={vim} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onStop={onStop} onImageOpen={onImageOpen} client={client} sessionId={sessionId} createdWithDefault={record.model.choice === "default"} runState={runState} runId={runId} /></div>;
+    const attachment = runState.getCatalog().attachment;
+    const active = attachment.kind === "attached" && attachment.sessionId === runState.canonical(runId) && attachment.turn === "running";
+    const busy = (error as { code?: unknown }).code === -32004;
+    const text = busy ? active
+      ? `commands wait until this turn ends${pendingApprovals(approvalStore).length ? "\nuse the approve, always allow, or deny buttons on the approval card" : ""}`
+      : "commands wait for pending work to finish: tools, approvals, or background agents"
+      : error instanceof Error ? error.message : String(error);
+    receipts.set(runState.canonical(runId), { text: images.length ? `${text}\nattachments are still attached and were not sent.` : text, tone: "error", ...(busy && active && pendingApprovals(approvalStore).length ? { action: { label: "jump to approval", run: focusApproval } } : {}) });
+  }, [approvalStore, receipts, runId, runState]);
+  return <div className="dock"><>{problem ? null : <StatusLine phase={phase} />}</><CommandReceiptLine store={receipts} runId={runId} /><DockComposer commands={commands} deliveries={deliveries} readOnly={readOnly} blockedReason={blockedReason} running={running} vim={vim} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onStop={onStop} onImageOpen={onImageOpen} onFileInput={(input) => { fileInput.current = input; }} client={client} sessionId={sessionId} createdWithDefault={record.model.choice === "default"} planMode={record.settings.loaded?.plan_mode === true} runState={runState} runId={runId} /></div>;
 }
 
 /** The last prompt the user sent, so a failed turn can be retried with it. */
@@ -514,22 +551,12 @@ function Run({ client, open, readOnly, followRequest }: { client: ZetaClient | n
   const viewerOpener = useRef<HTMLElement | null>(null);
   const openViewer = useCallback((block: any) => { viewerOpener.current = document.activeElement as HTMLElement | null; setViewer(block); }, []);
   const closeViewer = useCallback(() => { setViewer(null); requestAnimationFrame(() => viewerOpener.current?.focus()); }, []);
-  const [alwaysAllowed, setAlwaysAllowed] = useState<ReadonlySet<string>>(() => new Set());
+  const alwaysAllowed = useSyncExternalStore((listener) => subscribeAlwaysAllowed(open.id, listener), () => getAlwaysAllowed(open.id));
   const decisions = useMemo(() => {
     if (!client || open.stale || readOnly) return { disabledReason: readOnly ? "opening the run — decisions are paused" : "reconnecting — decisions are disabled until the server confirms this run" };
-    const decide = (method: "approve" | "deny", always = false): Decide => async (request_id) => {
-      try {
-        const result = await client.request(method, { request_id, ...(always ? { scope: "always_tool" } : {}) }, { timeoutMs: 15_000 });
-        // The decision response is durable. End the reopened snapshot row even if its live approval_end was quarantined.
-        open.lease.store.dispatch({ type: "approval_end", request_id, data: { decision: method === "approve" ? "allow" : "deny" } });
-        return result;
-      } catch (error) {
-        if ((error as { code?: unknown }).code === -32006) throw new Error("this approval expired while you were disconnected");
-        throw error;
-      }
-    };
-    return { approve: decide("approve"), always: decide("approve", true), deny: decide("deny"), alwaysAllowed, markAlways: (toolId: string) => setAlwaysAllowed((current) => new Set(current).add(toolId)) };
-  }, [alwaysAllowed, client, open.stale, readOnly]);
+    const decide = createApprovalDecider(client, open.lease.store);
+    return { approve: (requestId: string) => decide("approve", requestId), always: (requestId: string) => decide("approve", requestId, true), deny: (requestId: string) => decide("deny", requestId), alwaysAllowed, markAlways: (toolId: string) => markAlwaysAllowed(open.id, toolId) };
+  }, [alwaysAllowed, client, open.lease.store, open.stale, readOnly]);
   return (
     <Decisions.Provider value={decisions}>
       <ImageViewer.Provider value={openViewer}>

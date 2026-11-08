@@ -8,7 +8,7 @@ import { ACTIVE, startFakeZeta } from "./fake-zeta";
 import { completeSlashCatalog, defaultSlashCatalog } from "./fake-slash-catalog";
 
 const root = new URL("..", import.meta.url).pathname;
-const portText = process.env.WEB_COMMAND_GATE_PORT ?? "4187";
+const portText = process.env.WEB_COMMAND_GATE_PORT ?? "4195";
 if (!/^\d+$/.test(portText)) throw new Error("WEB_COMMAND_GATE_PORT must be an integer");
 const port = Number(portText);
 if (port < 1 || port > 65_535 || port === 5190 || port === 8765) throw new Error("WEB_COMMAND_GATE_PORT is outside the allowed disposable range");
@@ -42,7 +42,8 @@ try {
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
-    page.on("console", (message) => { if (message.type() === "error" && !/WebSocket connection/.test(message.text())) errors.push(message.text()); });
+    page.on("console", (message) => { if (message.type() === "error" && !/WebSocket connection|Failed to load resource/.test(message.text())) errors.push(message.text()); });
+    page.on("response", (response) => { if (response.status() >= 400) errors.push(`${response.status()} ${response.url()}`); });
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(origin);
     await waitReady(page);
@@ -102,8 +103,36 @@ try {
       await field(page).fill("");
     });
 
+    await check("model output identity refreshes settings", async () => {
+      if (await page.getByRole("button", { name: "dismiss command result" }).count()) await page.getByRole("button", { name: "dismiss command result" }).click();
+      const modelSettings = requests("session_settings").length;
+      await submit(page, "/model claude-sonnet-5");
+      await page.locator(".command-receipt-text", { hasText: "model: claude-sonnet-5" }).waitFor();
+      if (requests("session_settings").length !== modelSettings + 1) throw new Error("/model output identity did not trigger one settings refresh");
+      await page.getByRole("button", { name: "model: claude-sonnet-5" }).waitFor();
+      await page.getByRole("button", { name: "dismiss command result" }).click();
+      const currentRun = new URL(page.url()).searchParams.get("run");
+      if (!currentRun) throw new Error("model identity check lost the current run id");
+      fake.setSettings(currentRun, { model: "gpt-5.1-codex", approval_mode: "ask", plan_mode: false });
+    });
+
+    await check("vim output identity reads status and synchronizes the composer", async () => {
+      if (await page.getByRole("button", { name: "dismiss command result" }).count()) await page.getByRole("button", { name: "dismiss command result" }).click();
+      const vimStatus = requests("status").length;
+      await submit(page, "/vim on");
+      await page.locator(".command-receipt-text", { hasText: "vim mode: on" }).waitFor();
+      if (requests("status").length !== vimStatus + 1) throw new Error("/vim output identity did not trigger one status read");
+      await page.locator(".vim-mode").waitFor();
+      await page.getByRole("button", { name: "dismiss command result" }).click();
+      await submit(page, "/vim off");
+      await page.locator(".command-receipt-text", { hasText: "vim mode: off" }).waitFor();
+      if (await page.locator(".vim-mode").count()) throw new Error("/vim off identity did not synchronize the composer mode");
+      await page.getByRole("button", { name: "dismiss command result" }).click();
+      await page.locator(".command-receipt").waitFor({ state: "detached" });
+    });
+
     await check("shared registry frames keep runnable and unavailable commands distinct", async () => {
-      if (defaultSlashCatalog.length !== 15 || completeSlashCatalog.length !== 39 || completeSlashCatalog.filter((entry) => entry.unavailable === "requires_tui").length !== 24) throw new Error("fake slash catalogs drifted from Zeta 2ff56774");
+      if (defaultSlashCatalog.length !== 18 || completeSlashCatalog.length !== 40 || completeSlashCatalog.filter((entry) => entry.unavailable === "requires_tui").length !== 22) throw new Error("fake slash catalogs drifted from Zeta 3e1f48a39cc5a08e4814b91d0ecaa44dba17e489");
       if (defaultSlashCatalog.some((entry) => ["approve", "always", "deny", "restart", "permissions"].includes(entry.name))) throw new Error("default catalog exposed TUI-only commands");
       // Each receipt is dismissed before the next command, so an earlier receipt cannot satisfy the next wait.
       const receipt = async (command: string, text: string) => {
@@ -120,18 +149,93 @@ try {
         await field(page).fill(command);
         await field(page).press("Escape");
         await field(page).press("Enter");
-        await page.locator(".command-receipt-text", { hasText: output }).waitFor({ timeout: 10_000 });
+        await page.locator(".command-receipt-text", { hasText: output }).waitFor({ timeout: 10_000 }).catch(async () => { throw new Error(`${command} showed no receipt ${JSON.stringify(output)}; value=${JSON.stringify(await field(page).inputValue())}`); });
         await page.getByRole("button", { name: "dismiss command result" }).click();
         await page.locator(".command-receipt").waitFor({ state: "detached" });
         const calls = fake.requests.slice(start);
         const slash = calls.filter((request) => request.method === "slash_run");
         if (slash.length !== 1 || slash[0]?.params.text !== command) throw new Error(`${command} sent wrong requests: ${JSON.stringify(calls)}`);
       }
-      await receipt("/approve", "/approve is not available in gamma yet");
+      await receipt("/approve", "approval · no matching request");
       await submit(page, "/help");
       const help = page.locator(".command-receipt-text");
-      await help.getByText("built-in commands:", { exact: false }).waitFor();
+      await help.getByText("built-in commands:", { exact: false }).waitFor().catch(async () => { throw new Error(`/help showed no built-in list; receipt=${JSON.stringify(await help.innerText().catch(() => "missing"))}`); });
       if ((await help.innerText()).includes("/approve")) throw new Error("serve help exposed a TUI-only command");
+    });
+
+    await check("client-only actions use gamma controls and protocol requests", async () => {
+      const commandReceipt = async (command: string, text: string) => {
+        await submit(page, command);
+        await page.locator(".command-receipt-text", { hasText: text }).waitFor({ timeout: 10_000 });
+        await page.getByRole("button", { name: "dismiss command result" }).click();
+      };
+      await commandReceipt("/name gamma proof", "session name: gamma proof");
+      if (!requests("rename_session").some((request) => request.params.name === "gamma proof")) throw new Error("/name did not call rename_session");
+      await page.getByRole("heading", { name: "gamma proof" }).waitFor();
+      await commandReceipt("/theme github-light", "theme: github-light");
+      if (await page.evaluate(() => document.documentElement.dataset.fulcrumTheme) !== "github-light") throw new Error("/theme did not change the theme");
+      await commandReceipt("/keys", "enter");
+      const hint = await page.locator('[data-part="composer-hint"]').innerText();
+      if (!hint.includes("enter to send") || !hint.includes("shift+enter for a new line")) throw new Error(`composer hint drifted from /keys: ${hint}`);
+      const chooser = page.waitForEvent("filechooser");
+      await submit(page, "/paste");
+      await chooser;
+      await page.locator(".command-receipt-text", { hasText: "choose images to attach" }).waitFor();
+      await page.getByRole("button", { name: "dismiss command result" }).click();
+      await commandReceipt("/restart", "gamma reconnects on its own");
+      await commandReceipt("/permissions", "session grants view");
+      await commandReceipt("/tree", "experiment");
+      const before = fake.requests.length;
+      await commandReceipt("/tree 2", "switched to branch 2");
+      const branch = fake.requests.slice(before);
+      if (!branch.some((request) => request.method === "switch_branch" && request.params.head_id === "head-experiment") || !branch.some((request) => request.method === "session_history") || !branch.some((request) => request.method === "status")) throw new Error(`tree switch did not resync and replay: ${JSON.stringify(branch)}`);
+    });
+
+    await check("plan output refreshes settings and model input stays opaque", async () => {
+      fake.setSettings(ACTIVE, { model: "gpt-5.1-codex", approval_mode: "ask", plan_mode: false });
+      const settingsBefore = requests("session_settings").length;
+      await submit(page, "/plan");
+      await page.locator(".command-receipt-text", { hasText: "plan mode: on" }).waitFor();
+      if (await page.locator(".plan-chip", { hasText: "plan" }).count() !== 1) throw new Error("/plan output identity did not refresh the plan indicator on");
+      if (requests("session_settings").length !== settingsBefore + 1) throw new Error("/plan output identity did not refresh settings exactly once");
+      await page.getByRole("button", { name: "dismiss command result" }).click();
+      for (const [command, output, chip] of [["/plan off", "plan mode: off", false], ["/plan on", "plan mode: on", true], ["/plan toggle", "plan mode: off", false]] as const) {
+        await submit(page, command);
+        await page.locator(".command-receipt-text", { hasText: output }).waitFor();
+        if ((await page.locator(".plan-chip").count() > 0) !== chip) throw new Error(`${command} left the wrong plan chip state`);
+        await page.getByRole("button", { name: "dismiss command result" }).click();
+      }
+      const before = fake.requests.length;
+      await submit(page, "/plan write a proof");
+      for (let attempt = 0; attempt < 100 && !fake.requests.slice(before).some((request) => request.method === "send"); attempt++) await Bun.sleep(25);
+      const calls = fake.requests.slice(before);
+      const sent = calls.find((request) => request.method === "send");
+      const refreshed = calls.some((request) => request.method === "session_settings");
+      if (await page.getByRole("button", { name: "stop" }).count()) await page.getByRole("button", { name: "stop" }).click();
+      for (let attempt = 0; attempt < 200 && fake.running; attempt++) await Bun.sleep(25);
+      await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
+      if (typeof sent?.params.input_id !== "string" || "text" in (sent?.params ?? {})) throw new Error(`plan prompt was not opaque: ${JSON.stringify(calls)}`);
+      if (!refreshed) throw new Error("plan prompt model-input identity did not refresh settings before delivery");
+    });
+
+    await check("implement model-input identity refreshes the plan indicator off", async () => {
+      if (await page.getByRole("button", { name: "dismiss command result" }).count()) await page.getByRole("button", { name: "dismiss command result" }).click();
+      fake.setSettings(ACTIVE, { model: "gpt-5.1-codex", approval_mode: "ask", plan_mode: false });
+      await submit(page, "/plan on");
+      await page.locator(".command-receipt-text", { hasText: "plan mode: on" }).waitFor();
+      const planWasOn = await page.locator(".plan-chip", { hasText: "plan" }).count() === 1;
+      await page.getByRole("button", { name: "dismiss command result" }).click();
+      const implement = fake.requests.length;
+      const implementSettings = requests("session_settings").length;
+      await submit(page, "/implement");
+      for (let attempt = 0; attempt < 100 && !fake.requests.slice(implement).some((request) => request.method === "send"); attempt++) await Bun.sleep(25);
+      const implementation = fake.requests.slice(implement);
+      if (!implementation.some((request) => request.method === "send" && typeof request.params.input_id === "string") || implementation.some((request) => request.method === "send" && "text" in request.params)) throw new Error("/implement was not opaque");
+      if (planWasOn && await page.locator(".plan-chip").count()) throw new Error("/implement model-input identity did not refresh the plan indicator off");
+      if (requests("session_settings").length !== implementSettings + 1) throw new Error("/implement model-input identity did not refresh settings exactly once");
+      if (await page.getByRole("button", { name: "stop" }).count()) await page.getByRole("button", { name: "stop" }).click();
+      for (let attempt = 0; attempt < 200 && fake.running; attempt++) await Bun.sleep(25);
+      await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
     });
 
     await check("listbox keyboard, pointer, ime, focus, and placement", async () => {
@@ -291,7 +395,9 @@ try {
       await page.setViewportSize({ width: 1440, height: 900 });
       fake.setLongStatus(false);
       await field(page).press("Escape");
-      await page.getByRole("button", { name: "dismiss command result" }).click();
+      const dismiss = page.getByRole("button", { name: "dismiss command result" });
+      await dismiss.focus();
+      await dismiss.press("Enter");
     });
 
     await check("opaque model input sends once without exposing its id", async () => {
@@ -387,21 +493,39 @@ try {
     });
 
     await field(page).waitFor();
-    await check("active turn blocks slash_run and retains the slash draft", async () => {
+    await check("active commands use server busy routing and keep opaque input local", async () => {
       await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 }).catch(async () => { throw new Error(`composer did not become idle; text: ${await page.locator("body").innerText()}`); });
       await submit(page, "start a turn");
       await page.getByPlaceholder("steer the running turn").waitFor({ timeout: 10_000 }).catch(() => { throw new Error(`turn did not start; requests: ${fake.requests.slice(-8).map((request) => request.method).join(",")}`); });
-      await page.waitForTimeout(300);
-      await page.getByPlaceholder("steer the running turn").waitFor({ timeout: 10_000 });
+      const busyImage = join(gammaHome, "busy-plan.png");
+      await writeFile(busyImage, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
+      await page.locator('input[type="file"]').setInputFiles(busyImage);
+      await page.getByLabel("remove busy-plan.png").waitFor();
+      const settingsBefore = requests("session_settings").length;
       const before = { slash: requests("slash_run").length, send: requests("send").length, steer: requests("steer").length };
+      await field(page).fill("/plan");
+      await field(page).press("Escape");
+      await field(page).press("Enter");
+      await page.locator(".command-receipt-text", { hasText: "commands wait until this turn ends" }).waitFor({ timeout: 5_000 }).catch(async () => { throw new Error(`active command receipt missing; url=${page.url()}; value=${JSON.stringify(await field(page).inputValue())}; requests=${fake.requests.slice(-8).map((request) => request.method).join(",")}; body=${await page.locator("body").innerText()}; html=${(await page.locator("body").innerHTML()).slice(0, 5000)}`); });
+      if (requests("slash_run").length !== before.slash + 1 || requests("send").length !== before.send || requests("steer").length !== before.steer) throw new Error("active plan did not stop at slash_run");
+      if (requests("session_settings").length !== settingsBefore) throw new Error("busy plan refreshed settings");
+      if ((await field(page).inputValue()).trim() !== "/plan") throw new Error("active turn lost the slash draft");
+      if (await page.locator('[data-part="attachment"]').count() !== 1) throw new Error("busy plan lost its attachment");
+      await page.locator(".command-receipt-text", { hasText: "attachments are still attached and were not sent." }).waitFor();
+      await field(page).fill("");
+      const opaque = { send: requests("send").length, steer: requests("steer").length };
       await submit(page, "/review");
-      await page.getByText("commands are unavailable while a turn is active", { exact: true }).waitFor({ timeout: 5_000 }).catch(async () => { throw new Error(`active command receipt missing; value=${JSON.stringify(await field(page).inputValue())}; requests=${fake.requests.slice(-8).map((request) => request.method).join(",")}; body=${await page.locator("body").innerText()}`); });
-      if (requests("slash_run").length !== before.slash || requests("send").length !== before.send || requests("steer").length !== before.steer) throw new Error("active command reached zeta");
-      if ((await field(page).inputValue()).trim() !== "/review") throw new Error("active turn lost the slash draft");
+      for (let attempt = 0; attempt < 100 && requests("send").length === opaque.send && requests("steer").length === opaque.steer && !await page.locator(".command-receipt-text", { hasText: "this command sends a message; it waits until the turn ends" }).count(); attempt++) await Bun.sleep(25);
+      if (requests("send").length !== opaque.send || requests("steer").length !== opaque.steer) throw new Error("active opaque command reached send or steer");
+      await page.locator(".command-receipt-text", { hasText: "this command sends a message; it waits until the turn ends" }).waitFor();
+      if ((await field(page).inputValue()).trim() !== "/review") throw new Error("active opaque command lost its draft");
     });
 
     if (await page.getByRole("button", { name: "stop" }).count()) await page.getByRole("button", { name: "stop" }).click();
-    await page.waitForTimeout(100);
+    for (let attempt = 0; attempt < 200 && fake.running; attempt++) await Bun.sleep(25);
+    await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
+    if (await page.getByLabel("remove busy-plan.png").count()) await page.getByLabel("remove busy-plan.png").click();
+    await field(page).fill("");
     await check("unknown and malformed commands are dismissible error receipts", async () => {
       await submit(page, "/does-not-exist");
       await page.getByText("unknown command: /does-not-exist", { exact: true }).waitFor();
@@ -433,11 +557,19 @@ try {
       await page.goto(`${origin}/?run=${ACTIVE}`);
       await waitReady(page);
       await page.getByRole("button", { name: "always allow", exact: true }).waitFor({ timeout: 15_000 });
-      await page.getByRole("button", { name: "always allow", exact: true }).click();
+      await submit(page, "/always approval-1");
+      await page.getByText("approval · always allowed", { exact: false }).waitFor({ timeout: 10_000 });
       await page.waitForFunction(() => document.querySelector('[data-part="approval-actions"]') === null, undefined, { timeout: 10_000 }).catch(() => {});
       await page.getByText("always allowed for this session", { exact: true }).waitFor({ timeout: 5_000 }).catch(async () => { throw new Error(`always-allowed decided wording missing; approval=${await page.locator(".gamma-approval").evaluateAll((nodes) => nodes.map((node) => node.outerHTML).join(" | "))}`); });
       const decision = fake.decisions.at(-1);
       if (decision?.method !== "approve" || decision.scope !== "always_tool" || "always" in decision) throw new Error(`wrong decision: ${JSON.stringify(decision)}`);
+    });
+
+    await check("new opens an immediate draft run", async () => {
+      const before = page.url();
+      await submit(page, "/new");
+      await page.waitForURL((url) => url.toString() !== before && url.searchParams.get("run")?.startsWith("draft:"), { timeout: 10_000 });
+      await page.getByPlaceholder("message zeta").waitFor();
     });
 
     if (errors.length) failures.push(...errors.map((error) => `browser error: ${error}`));

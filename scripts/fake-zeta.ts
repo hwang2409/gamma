@@ -284,9 +284,10 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   let catalogBusy = false;
   let settingsEnabled = true;
   let advertiseNewSessionSettings = newSessionSettings;
-  type Settings = { model: string; approval_mode: "ask" | "allow" | "deny" };
-  const defaultSettings = { model: "gpt-5.1-codex", approval_mode: "ask" as const };
-  const settingsBySession = new Map(sessions.map((session) => [String(session.session_id), { model: String(session.model), approval_mode: session.approval_mode as Settings["approval_mode"] }]));
+  type Settings = { model: string; approval_mode: "ask" | "allow" | "deny"; plan_mode: boolean };
+  const defaultSettings = { model: "gpt-5.1-codex", approval_mode: "ask" as const, plan_mode: false };
+  const settingsBySession = new Map<string, Settings>(sessions.map((session) => [String(session.session_id), { model: String(session.model), approval_mode: session.approval_mode as Settings["approval_mode"], plan_mode: false }]));
+  let vimMode = false;
   const activeSettings = () => settingsBySession.get(active ?? "") ?? defaultSettings;
   const failures = new Map<string, string[]>();
   const transientBusy = new Map<string, number>();
@@ -388,7 +389,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           const features = (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (name === "model_input_ids" && modelInputIds) || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings)) ?? [];
           const reconnect = features.includes("approval_reconnect");
           if (reconnect) reconnectControllers.add(socket as object);
-          reply({ result: { protocol_version: "1.2", server: "fake-zeta", capabilities: { features, requests: ["slash_list", "slash_run", ...(settingsEnabled ? ["model_catalog", "session_settings", "set_settings", "send_images", ...(advertiseNewSessionSettings ? ["new_session_settings"] : [])] : [])] } } });
+          reply({ result: { protocol_version: "1.2", server: "fake-zeta", capabilities: { features, requests: ["status", "approve", "deny", "rename_session", "session_tree", "switch_branch", "slash_list", "slash_run", ...(settingsEnabled ? ["model_catalog", "session_settings", "set_settings", "send_images", ...(advertiseNewSessionSettings ? ["new_session_settings"] : [])] : [])] } } });
           if (decide && !approvalAborted) {
             if (!reconnect) expireApproval();
             else {
@@ -409,7 +410,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           // real zeta requires a concrete model whenever new_session_settings carries approval_mode
           if (typeof params.approval_mode !== "undefined" && typeof params.model !== "string") return reply({ error: { code: -32602, message: "model is required with approval_mode" } });
           if (typeof params.model !== "undefined" && (!validModels.includes(String(params.model)) || (typeof params.approval_mode !== "undefined" && !["ask", "allow", "deny"].includes(String(params.approval_mode))))) return reply({ error: { code: -32602, message: "invalid model or approval_mode" } });
-          const createdSettings: Settings = { model: typeof params.model === "string" ? params.model : defaultSettings.model, approval_mode: typeof params.approval_mode === "string" ? params.approval_mode as Settings["approval_mode"] : defaultSettings.approval_mode };
+          const createdSettings: Settings = { model: typeof params.model === "string" ? params.model : defaultSettings.model, approval_mode: typeof params.approval_mode === "string" ? params.approval_mode as Settings["approval_mode"] : defaultSettings.approval_mode, plan_mode: false };
           const created = meta(`s-new-${sessions.length}`, 0, { created_at: at(0), model: createdSettings.model, approval_mode: createdSettings.approval_mode, cwd: "/Users/dev/me/fun/fulcrum", retained_tail: 8, compaction_budget: 262144, override_audit: [], context_files: [], skill_catalog: [], agent_catalog: [], plan_mode: false, project_id: null, tool_allow: null, tool_deny: [] });
           sessions.unshift(created);
           histories[created.session_id] = [];
@@ -429,7 +430,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         }
         if (method === "status") {
           const pending = decide && !approvalAborted ? [{ request_id: "approval-1", tool_call: { id: "live-2", name: "bash", arguments: { command: "rm -rf packages/zeta/dist && bun run build" } }, delegated: false }] : [];
-          return reply({ result: { session: active ? sessions.find((session) => session.session_id === active) ?? null : null, state: running ? (decide ? "tool" : "running") : "idle", explicit_finish: false, pending_approvals: pending, usage: {}, compaction_markers: 0 } });
+          return reply({ result: { session: active ? { ...(sessions.find((session) => session.session_id === active) ?? {}), vim_mode: vimMode, plan_mode: activeSettings().plan_mode } : null, state: running ? (decide ? "tool" : "running") : "idle", explicit_finish: false, pending_approvals: pending, usage: {}, compaction_markers: 0 } });
         }
         if (method === "resume") {
           // Zeta 5feea2fc src/zeta/server/server.py:601-626 and src/zeta/server/control.py:160-180 keep the
@@ -442,6 +443,14 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           delayedOpen = false;
           return reply({ result: { session: sessions.find((session) => session.session_id === active) } });
         }
+        if (method === "rename_session") {
+          const session = sessions.find((candidate) => candidate.session_id === params.session_id);
+          if (!session || typeof params.name !== "string" || !params.name) return reply({ error: { code: -32602, message: "name must be nonempty" } });
+          session.name = params.name;
+          return reply({ result: { session } });
+        }
+        if (method === "session_tree") return reply({ result: { session_id: params.session_id, branches: [{ id: "head-main", label: "main", seq: 1, current: true }, { id: "head-experiment", label: "experiment", seq: 7, current: false }] } });
+        if (method === "switch_branch") return reply({ result: { session_id: params.session_id, head_id: params.head_id } });
         if (method === "session_history") {
           if (params.session_id !== active) return reply({ error: { code: -32003, message: "no active session" } });
           if (openDelay > 0 && !delayedOpen) {
@@ -476,12 +485,37 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         const failure = failures.get(method)?.shift();
         if (failure) return reply({ error: { code: -32000, message: failure } });
         if (method === "slash_run") {
+          // Zeta 3e1f48a39cc5a08e4814b91d0ecaa44dba17e489: server/slash_commands.py:487-555 and core/commands/plan_commands.py:16-146.
           const command = String(params.text ?? "").trim();
           if (command === "/status") return reply({ result: { kind: "output", text: longStatus ? `fake status\nready\n${Array.from({ length: 80 }, (_, index) => `status detail ${index + 1}`).join("\n")}` : "fake status\nready" } });
-          // Matches zeta origin/main src/zeta/server/slash_commands.py:159-240: these serve commands return output.
+          // The same merge's server/slash_commands.py:535-555 returns display-safe output for these serve commands.
           if (command === "/accounts") return reply({ result: { kind: "output", text: "no accounts" } });
-          if (command === "/model" || command.startsWith("/model ")) return reply({ result: { kind: "output", text: command === "/model" ? `model: ${activeSettings().model} (open Settings to switch)` : `model: ${command.slice("/model ".length).trim()}` } });
-          if (command === "/vim" || command.startsWith("/vim ")) return reply({ result: { kind: "output", text: `vim mode: ${command.endsWith("off") ? "off" : "on"}` } });
+          if (command === "/model" || command.startsWith("/model ")) {
+            if (command.startsWith("/model ")) activeSettings().model = command.slice("/model ".length).trim();
+            return reply({ result: { kind: "output", text: command === "/model" ? `model: ${activeSettings().model} (open Settings to switch)` : `model: ${activeSettings().model}` } });
+          }
+          if (command === "/vim" || command.startsWith("/vim ")) {
+            if (command.endsWith("off")) vimMode = false;
+            else if (command.endsWith("on")) vimMode = true;
+            return reply({ result: { kind: "output", text: `vim mode: ${vimMode ? "on" : "off"}` } });
+          }
+          if (command === "/plan" || command.startsWith("/plan ")) {
+            if (running) return reply({ error: { code: -32004, message: "a turn is already running" } });
+            const argument = command.slice("/plan".length).trim();
+            if (!argument || argument === "toggle" || argument === "on" || argument === "off") {
+              activeSettings().plan_mode = argument === "on" ? true : argument === "off" ? false : !activeSettings().plan_mode;
+              return reply({ result: { kind: "output", text: `plan mode: ${activeSettings().plan_mode ? "on" : "off"}` } });
+            }
+            activeSettings().plan_mode = true;
+            opaqueInputs.set("opaque-plan-input", command);
+            return reply({ result: { kind: "model_input", input_id: "opaque-plan-input", display_text: command } });
+          }
+          if (command === "/implement") {
+            if (running) return reply({ error: { code: -32004, message: "a turn is already running" } });
+            activeSettings().plan_mode = false;
+            opaqueInputs.set("opaque-implement-input", command);
+            return reply({ result: { kind: "model_input", input_id: "opaque-implement-input", display_text: command } });
+          }
           if (command === "/review" || command.startsWith("/review ")) { opaqueInputs.set("opaque-review-input", command); return reply({ result: { kind: "model_input", input_id: "opaque-review-input", display_text: command } }); }
           if (command === "/malformed") return reply({ result: { unexpected: true } });
           if (command === "/legacy-output") return reply({ result: { kind: "text", text: "legacy output" } });
@@ -495,7 +529,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         if (method === "session_settings") return reply({ result: activeSettings() });
         if (method === "set_settings") {
           if (running) return reply({ error: { code: -32004, message: "a turn is already running" } });
-          const settings: Settings = { model: String(params.model), approval_mode: params.approval_mode as Settings["approval_mode"] };
+          const current = activeSettings();
+          const settings: Settings = { model: String(params.model), approval_mode: params.approval_mode as Settings["approval_mode"], plan_mode: current.plan_mode };
           settingsBySession.set(String(active), settings);
           return reply({ result: settings });
         }
@@ -530,7 +565,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     imageSends,
     get settings() { return activeSettings(); },
     settingsFor(sessionId: string) { return settingsBySession.get(sessionId); },
-    setSettings(sessionId: string, settings: Settings) { settingsBySession.set(sessionId, settings); },
+    setSettings(sessionId: string, settings: Omit<Settings, "plan_mode"> & { plan_mode?: boolean }) { settingsBySession.set(sessionId, { ...settings, plan_mode: settings.plan_mode ?? false }); },
     failNext(method: string, message: string) { failures.set(method, [...(failures.get(method) ?? []), message]); },
     busyNext(method: "resume" | "new_session", count = 1) { transientBusy.set(method, count); },
     get running() { return running; },

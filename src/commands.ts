@@ -8,8 +8,8 @@ import {
 
 export type ComposerAction =
   | { kind: "send"; text: string }
-  | { kind: "send-input"; inputId: string; displayText: string }
-  | { kind: "receipt"; text: string; tone: "quiet" | "error"; retain?: boolean }
+  | { kind: "send-input"; inputId: string; displayText: string; command: string }
+  | { kind: "receipt"; text: string; tone: "quiet" | "error"; retain?: boolean; command?: string }
   | { kind: "client-action"; name: ClientActionName; args: string };
 
 export type ClientActionName =
@@ -20,10 +20,10 @@ export type ClientActionName =
   | "deny"
   | "theme"
   | "branch_view"
-  | "model"
-  | "vim"
   | "paste"
-  | "accounts";
+  | "keys"
+  | "restart"
+  | "permissions";
 
 export type CompletionRow = {
   trigger: "/" | "$";
@@ -58,10 +58,10 @@ const CLIENT_ACTIONS: Readonly<Record<string, ClientActionName>> = {
   deny: "deny",
   theme: "theme",
   tree: "branch_view",
-  model: "model",
-  vim: "vim",
   paste: "paste",
-  accounts: "accounts",
+  keys: "keys",
+  restart: "restart",
+  permissions: "permissions",
 };
 const SLASH_COMPLETION = /^\/([A-Za-z0-9_-]*)$/;
 const DOLLAR_COMPLETION = /(?<!\S)\$([A-Za-z0-9_-]*)$/;
@@ -129,9 +129,10 @@ export function createCommandController(
   }
 
   function slashAction(result: ParsedSlashRunResult, text: string): ComposerAction {
+    const command = commandName(text);
     switch (result.kind) {
       case "output":
-        return { kind: "receipt", text: result.text, tone: "quiet" };
+        return { kind: "receipt", text: result.text, tone: "quiet", command };
       case "error":
         return { kind: "receipt", text: result.text, tone: "error" };
       case "unknown":
@@ -142,7 +143,7 @@ export function createCommandController(
       }
       case "model_input":
         return typeof result.input_id === "string"
-          ? { kind: "send-input", inputId: result.input_id, displayText: result.display_text }
+          ? { kind: "send-input", inputId: result.input_id, displayText: result.display_text, command }
           : unavailableReceipt();
       default:
         return mapUnavailableSlashResult(result) ?? invalidResponseReceipt();
@@ -172,10 +173,18 @@ export function createUnavailableCommandController(message = "not available in t
   };
 }
 
+function commandLine(text: string): string {
+  return text.split("\n", 1)[0].slice(1).trimStart();
+}
+
+function commandName(text: string): string {
+  return commandLine(text).split(/\s/, 1)[0].toLowerCase();
+}
+
 function commandArgs(text: string): string {
-  const commandLine = text.split("\n", 1)[0].slice(1).trimStart();
-  const separator = commandLine.search(/\s/);
-  return separator < 0 ? "" : commandLine.slice(separator).trimStart();
+  const line = commandLine(text);
+  const separator = line.search(/\s/);
+  return separator < 0 ? "" : line.slice(separator).trimStart();
 }
 
 export function mapUnavailableSlashResult(result: { kind?: unknown }): ComposerAction | undefined {

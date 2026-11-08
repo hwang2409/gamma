@@ -1,4 +1,4 @@
-export type CommandReceipt = { text: string; tone: "quiet" | "error" };
+export type CommandReceipt = { text: string; tone: "quiet" | "error"; action?: { label: string; run(): void } };
 
 export function createReceiptStore() {
   const receipts = new Map<string, CommandReceipt>();

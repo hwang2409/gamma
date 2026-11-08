@@ -147,7 +147,7 @@ function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: Del
         await target.request("set_settings", { session_id: effect.runId, ...effect.settings, ...(current.model ? { model: current.model } : {}) }, { timeoutMs: 15_000 });
       }
       const value = settingModel(await target.request("session_settings", { session_id: effect.runId }, { timeoutMs: 15_000 }));
-      runs.dispatch({ type: "SETTINGS_OK", runId: effect.runId, operationId: effect.operationId, ...(value.model ? { model: value.model } : {}), ...(value.approval_mode === "ask" || value.approval_mode === "allow" ? { approval_mode: value.approval_mode } : {}) }); finish(effect.operationId);
+      runs.dispatch({ type: "SETTINGS_OK", runId: effect.runId, operationId: effect.operationId, ...(value.model ? { model: value.model } : {}), ...(value.approval_mode === "ask" || value.approval_mode === "allow" ? { approval_mode: value.approval_mode } : {}), ...(typeof value.plan_mode === "boolean" ? { plan_mode: value.plan_mode } : {}) }); finish(effect.operationId);
     } catch (error) { settingsFailure(effect, error); }
   };
   const handleCatalog = async (effect: Extract<WorkspaceEffect, { type: "load-catalog" }>) => {
@@ -191,7 +191,7 @@ export function createDeliveryManager(client: () => ZetaClient | null, runs: Del
     reconcile(runId: string) { runs.reconcileDeliveries(runId); },
     loadCatalog(runId: string | null) { return operation((operationId) => runs.loadCatalog(runId, operationId)); },
     loadSettings(runId: string) { return operation((operationId) => runs.loadSettings(runId, operationId)); },
-    async changeSettings(runId: string, patch: import("./run-state").SessionSettings) {
+    async changeSettings(runId: string, patch: import("./run-state").WritableSessionSettings) {
       runs.desireSettings(runId, patch);
       if (!runs.get(runId).settings.loaded?.model && !runs.get(runId).settings.desired?.model) await this.loadSettings(runId);
       return operation((operationId) => runs.writeSettings(runId, operationId));

@@ -1,5 +1,6 @@
 export type ApprovalMode = "ask" | "allow" | "deny";
-export type SessionSettings = { model?: string; approval_mode?: ApprovalMode };
+export type SessionSettings = { model?: string; approval_mode?: ApprovalMode; plan_mode?: boolean };
+export type WritableSessionSettings = Pick<SessionSettings, "model" | "approval_mode">;
 export type ModelCatalog = { models?: Array<string | { id?: string; name?: string }> };
 
 export function settingModel(value: unknown): SessionSettings {
@@ -8,6 +9,7 @@ export function settingModel(value: unknown): SessionSettings {
   return {
     ...(typeof item.model === "string" ? { model: item.model } : {}),
     ...(item.approval_mode === "ask" || item.approval_mode === "allow" || item.approval_mode === "deny" ? { approval_mode: item.approval_mode } : {}),
+    ...(typeof item.plan_mode === "boolean" ? { plan_mode: item.plan_mode } : {}),
   };
 }
 

@@ -4,6 +4,7 @@ import { hasPendingDelivery, type RunStateStore } from "./run-state";
 import { escape, normalKey, startVim, type Draft, type Step, type Vim } from "./vim";
 import { CompletionModel, type CompletionSnapshot } from "./completions";
 import type { CommandController, ComposerAction } from "./commands";
+import { composerHint } from "./keys";
 
 // gamma's composer. It keeps @fulcrum/react's composer parts (data-part names, so the shipped styles apply) and adds what
 // that component has no seam for yet: attachments, vim keys, and footer controls. Fulcrum follow-up: give Composer slots
@@ -46,7 +47,7 @@ function SubmitStopSlot({ steer, stopping, onStop, stopRef }: { steer: boolean; 
 function hint({ vim, mode, steer, images }: { vim: boolean; mode: Vim["mode"]; steer: boolean; images: boolean }) {
   const send = steer ? "enter to steer" : "enter to send";
   if (steer && images) return "images send when the turn ends · stop it or wait";
-  if (!vim) return steer ? `${send} · esc stop · shift+enter newline` : `${send} · shift+enter newline`;
+  if (!vim) return steer ? `${composerHint(true)} · esc stop` : composerHint(false);
   if (mode === "insert") return `${send} · esc normal · ^c to stop`;
   return `${send} · i type · u undo${steer ? " · ^c stop" : ""}`;
 }
@@ -161,6 +162,10 @@ function useAttachments(input: RefObject<HTMLTextAreaElement | null>, images: re
   return { files, images, current: imagesRef, attachError, dragging, setDragging, addFiles, remove, onPaste };
 }
 
+export function canSubmitComposer(blocked: boolean, text: string, imageCount: number, sending: boolean, steer: boolean) {
+  return !blocked && (text.trim() !== "" || imageCount > 0) && !sending && !(steer && imageCount > 0 && !text.trimStart().startsWith("/"));
+}
+
 function useSubmission(state: ComposerState, blocked: boolean, commands: CommandController, onSubmit: Submit, onPreparationFailure: ((error: unknown, images: readonly QueuedImage[]) => void) | undefined, onStop: (() => Promise<unknown>) | undefined, draft: ReturnType<typeof useComposerDraft>, attachments: ReturnType<typeof useAttachments>, store: RunStateStore, runId: string, pending: boolean) {
   const [stopping, setStopping] = useState(false);
   const [preparing, setPreparing] = useState(false);
@@ -170,7 +175,7 @@ function useSubmission(state: ComposerState, blocked: boolean, commands: Command
   runIdRef.current = runId;
   const steer = state === "steerable";
   const sending = pending || preparing;
-  const canSubmit = !blocked && (draft.text.trim() !== "" || attachments.images.length > 0) && !sending && !(steer && attachments.images.length > 0);
+  const canSubmit = canSubmitComposer(blocked, draft.text, attachments.images.length, sending, steer);
   const submit = () => {
     if (inFlight.current.submit || !canSubmit || state === "read-only") return;
     inFlight.current.submit = true;
@@ -179,10 +184,7 @@ function useSubmission(state: ComposerState, blocked: boolean, commands: Command
     const sent = draft.text;
     const sentImages = attachments.current.current;
     const deliveryId = `web-${crypto.randomUUID()}`;
-    const slashWhileRunning = steer && !sent.startsWith("//") && sent.trimStart().startsWith("/");
-    const prepared = (slashWhileRunning
-      ? Promise.resolve<ComposerAction>({ kind: "receipt", text: "commands are unavailable while a turn is active", tone: "error", retain: true })
-      : commands.prepareComposerInput(sent)).catch((error) => { onPreparationFailure?.(error, sentImages); throw error; });
+    const prepared = commands.prepareComposerInput(sent).catch((error) => { onPreparationFailure?.(error, sentImages); throw error; });
     prepared.then((action) => {
       const imageDelivery = action.kind === "send" && sentImages.length > 0;
       if (imageDelivery) store.beginDelivery(runId, { id: deliveryId, attemptId: deliveryId, method: "send_images", text: sent, images: sentImages });
@@ -204,7 +206,7 @@ function useSubmission(state: ComposerState, blocked: boolean, commands: Command
   return { steer, canSubmit, sending, stopping, error, submit, stop };
 }
 
-export function GammaComposer({ state, reason, blockedReason, vim: vimOn, commands, onSubmit, onPreparationFailure, onStop, footer, autoFocus, onImageOpen, store, runId }: {
+export function GammaComposer({ state, reason, blockedReason, vim: vimOn, commands, onSubmit, onPreparationFailure, onStop, footer, autoFocus, onImageOpen, onFileInput, store, runId }: {
   state: ComposerState;
   reason?: string;
   blockedReason?: string;
@@ -217,6 +219,7 @@ export function GammaComposer({ state, reason, blockedReason, vim: vimOn, comman
   footer?: ReactNode;
   autoFocus?: boolean;
   onImageOpen?(block: { url: string; mediaType: string; alt: string }): void;
+  onFileInput?(input: HTMLInputElement | null): void;
   store: RunStateStore;
   runId: string;
 }) {
@@ -233,6 +236,7 @@ export function GammaComposer({ state, reason, blockedReason, vim: vimOn, comman
   const submission = useSubmission(state, Boolean(blockedReason), commands, onSubmit, onPreparationFailure, onStop, draft, attachments, store, runId, pending);
   useEffect(() => { if (autoFocus && (!document.activeElement || document.activeElement === document.body)) draft.input.current?.focus({ preventScroll: true }); }, [autoFocus]);
   useEffect(() => { void commands.refreshCatalog().catch(() => {}); }, [commands]);
+  useEffect(() => { onFileInput?.(attachments.files.current); return () => onFileInput?.(null); }, [attachments.files, onFileInput]);
   const stopRef = useCallback((button: HTMLButtonElement | null) => {
     if (!button) return;
     return () => { if (document.activeElement === button) draft.input.current?.focus({ preventScroll: true }); };
