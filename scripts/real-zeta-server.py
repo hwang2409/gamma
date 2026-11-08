@@ -61,6 +61,8 @@ def make_server() -> tuple[ZetaServer, Path, str]:
             ScriptedTurn(content=[TextContent("retained grant proof complete")]),
             ScriptedTurn(content=[TextContent("post-revoke grant proof")], tool_calls=[ToolCall("post-revoke-proof-bash", "bash", {"command": "printf post-revoke-proof"})]),
         ]
+    elif os.environ.get("ZETA_IMAGES_PROOF") == "1":
+        turns = [ScriptedTurn(content=[TextContent(f"image proof turn {index}")]) for index in range(1, 9)]
     else:
         turns = [
             *plan_turns,

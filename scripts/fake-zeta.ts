@@ -35,6 +35,64 @@ const seeded = [
   meta("s-untitled", 60 * 24 * 40),
 ];
 
+/**
+ * The params real zeta 169fb144 rejects with -32602, for every request the fake serves after hello. `required` params
+ * must be nonempty strings, `oneOf` needs exactly one of its keys, and a `gated` param needs every listed feature.
+ * Unknown params are accepted, as in zeta: its only unknown-param rejections are session_grants and
+ * revoke_session_grants (server/control.py:1062-1100, owned by `handleGrantRequest` below), backward session_history
+ * (server/ergonomics.py:1073, never negotiated here), content_read (connections.py:1011), and the project methods
+ * (project_requests.py:485, entry_project_views.py:279), which the fake does not serve.
+ * Zeta maps ValueError and ProtocolError(INVALID_PARAMS) to -32602 (server/server.py:439-444).
+ */
+type ParamRule = { required?: readonly string[]; oneOf?: readonly string[]; gated?: Readonly<Record<string, readonly string[]>> };
+export const PARAM_RULES: Readonly<Record<string, ParamRule>> = {
+  // server.py:621-635 (approval_mode, cwd) and :827-831 (host_commands); model with approval_mode is checked inline.
+  new_session: { gated: { approval_mode: ["new_session_settings"], cwd: ["session_cwd"], host_commands: ["session_host_commands"] } },
+  // server.py:661-664 (session_id after host_commands).
+  resume: { required: ["session_id"], gated: { host_commands: ["session_host_commands"] } },
+  // server.py:1077-1084.
+  list_sessions: { gated: { offset: ["list_sessions_paging"], limit: ["list_sessions_paging"], project_id: ["projects"] } },
+  status: {},
+  // delivery.py:55 (_delivery_id, :370-381) and :529-545 (exactly one of text or input_id; input_id needs model_input_ids).
+  send: { oneOf: ["text", "input_id"], gated: { input_id: ["model_input_ids"], delivery_id: ["delivery_id"] } },
+  // delivery.py:228-235.
+  steer: { required: ["text"], gated: { delivery_id: ["delivery_id"] } },
+  // delivery.py:348-353 (the method itself needs delivery_id, protocol.py:301).
+  delivery_status: { required: ["delivery_id"] },
+  // server.py:923 -> ergonomics.py:85-93 (session_id), delivery.py:131-133 (delivery_id needs both features).
+  send_images: { required: ["session_id"], gated: { delivery_id: ["delivery_id", "send_images_delivery_id"] } },
+  // server.py:728-747.
+  approve: { required: ["request_id"] },
+  deny: { required: ["request_id"] },
+  // server.py:748-751 -> abort_scope.py:32-45.
+  abort: { gated: { scope: ["abort_scope"] } },
+  // connections.py:1021-1022 -> ergonomics.py:85-93; ergonomics.py:1114-1119 (backward keys).
+  session_history: { required: ["session_id"], gated: { before: ["session_history_backward"], history_validator: ["session_history_backward"] } },
+  session_tree: { required: ["session_id"] },
+  // server.py:903 (rename), :923 + :973 (switch_branch), :923 + :959-960 (set_settings), :923 (the rest).
+  rename_session: { required: ["session_id"] },
+  switch_branch: { required: ["session_id", "head_id"] },
+  set_settings: { required: ["session_id", "model", "approval_mode"] },
+  session_settings: { required: ["session_id"] },
+  model_catalog: {},
+  slash_list: { required: ["session_id"] },
+  slash_run: { required: ["session_id", "text"] },
+};
+/** The -32602 message real zeta would send for these params, or null when it accepts them. */
+function invalidParams(method: string, params: Json, features: readonly string[]): string | null {
+  const rule = PARAM_RULES[method];
+  if (!rule) return null;
+  for (const name of rule.required ?? []) if (typeof params[name] !== "string" || !params[name]) return `${name} must be a nonempty string`;
+  if (rule.oneOf && rule.oneOf.filter((name) => name in params).length !== 1) return `${method} requires exactly one of ${rule.oneOf.join(" or ")}`;
+  for (const [name, needs] of Object.entries(rule.gated ?? {})) {
+    const missing = needs.find((feature) => !features.includes(feature));
+    if (name in params && missing) return `${name} requires the negotiated ${missing} feature`;
+  }
+  return null;
+}
+
+const SETTINGS_REQUESTS = ["model_catalog", "session_settings", "set_settings", "send_images"];
+
 // Opaque command inputs by id. Zeta echoes an opaque input's display_text, the typed command line, as the user
 // message (zeta dcc4ce9 src/zeta/core/slash.py:767 display_text=value; src/zeta/server/delivery.py:107-108).
 const opaqueInputs = new Map<string, string>();
@@ -273,7 +331,8 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
       if (method === "abort") return abort(send);
       if (method !== "delivery_status") return undefined;
       const status = statuses.get(String(params.delivery_id));
-      return status ? { result: { delivery_id: params.delivery_id, status } } : { error: { code: -32602, message: "unknown delivery_id" } };
+      // zeta 169fb144 src/zeta/server/delivery.py:368 answers an id it never saw with status "unknown".
+      return { result: { delivery_id: params.delivery_id, status: status ?? "unknown" } };
     },
   };
 }
@@ -457,7 +516,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           if (mode === "slow") await wait(helloDelay);
           if (!sockets.has(socket)) return;
           if (socket.data.role === "controller") controller = socket;
-          const features = protocolVersion === "1.0" ? [] : (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (name === "model_input_ids" && modelInputIds) || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings) || (name === "session_grants" && sessionGrants)) ?? [];
+          const features = protocolVersion === "1.0" ? [] : (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "send_images_delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (name === "model_input_ids" && modelInputIds) || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings) || (name === "session_grants" && sessionGrants)) ?? [];
           socket.data.features = features;
           const reconnect = features.includes("approval_reconnect");
           if (reconnect) reconnectControllers.add(socket as object);
@@ -474,7 +533,10 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           }
           return;
         }
-        if (omittedRequests.has(method)) return reply({ error: { code: -32601, message: `method not found: ${method}` } });
+        // zeta lists the settings requests under hello's `requests`; an older zeta does not know them.
+        if (omittedRequests.has(method) || (!settingsEnabled && SETTINGS_REQUESTS.includes(method))) return reply({ error: { code: -32601, message: `method not found: ${method}` } });
+        const invalid = invalidParams(method, params, socket.data.features ?? []);
+        if (invalid) return reply({ error: { code: -32602, message: invalid } });
         const override = resultOverrides.get(method);
         if (override) return reply({ result: override(params) });
         if (method === "new_session") {
@@ -553,12 +615,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           return;
         }
         // As in zeta (server/ergonomics.py `active`): these name the active session or fail.
-        if (["model_catalog", "session_settings", "set_settings", "send_images"].includes(method)) {
-          // zeta lists these under hello's `requests`; an older zeta does not know them.
-          if (!settingsEnabled) return reply({ error: { code: -32601, message: "method not found" } });
-          if (method !== "model_catalog" && (typeof params.session_id !== "string" || !params.session_id)) return reply({ error: { code: -32602, message: "session_id must be a nonempty string" } });
-          if (method !== "model_catalog" && params.session_id !== active) return reply({ error: { code: -32003, message: "session is not active" } });
-        }
+        if (SETTINGS_REQUESTS.includes(method) && method !== "model_catalog" && params.session_id !== active) return reply({ error: { code: -32003, message: "session is not active" } });
         if (method === "slash_list") return reply({ result: { commands: params.include_unavailable === true ? completeSlashCatalog : defaultSlashCatalog, notices: [] } });
         const failure = failures.get(method)?.shift();
         if (failure) return reply({ error: { code: -32000, message: failure } });
