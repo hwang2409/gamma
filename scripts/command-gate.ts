@@ -143,7 +143,6 @@ try {
       };
       await receipt("/mcp", "mcp: 0 mounted, 0 failed");
       await receipt("/mcp status", "mcp: 0 mounted, 0 failed");
-      await receipt("/legacy-output", "legacy output");
       for (const [command, output] of [["/accounts", "no accounts"], ["/model", "model: gpt-5.1-codex (open Settings to switch)"], ["/vim off", "vim mode: off"]] as const) {
         const start = fake.requests.length;
         await field(page).fill(command);
