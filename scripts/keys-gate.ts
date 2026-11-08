@@ -187,8 +187,15 @@ async function exerciseHandlers(page: Page) {
   expect(await field(page).inputValue() === "ac", "delete did not map to vim x");
   await field(page).press("u");
   expect(await field(page).inputValue() === "abc", "vim undo did not restore the draft");
-  await field(page).press("Control+r");
-  expect(await field(page).inputValue() === "ac", "ctrl+r did not redo on macOS");
+  if (browserUsesControlRForReload(process.platform)) {
+    const loaded = page.waitForEvent("load", { timeout: 10_000 });
+    await field(page).press("Control+r");
+    await loaded;
+    await field(page).waitFor();
+  } else {
+    await field(page).press("Control+r");
+    expect(await field(page).inputValue() === "ac", "ctrl+r did not redo when the browser leaves it available");
+  }
   await submit(page, "/vim off");
   await page.locator(".command-receipt-text", { hasText: "vim mode: off" }).waitFor();
   await page.getByRole("button", { name: "dismiss command result" }).click();
