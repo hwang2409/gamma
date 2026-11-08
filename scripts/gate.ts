@@ -1,3 +1,4 @@
+import "./keys-gate";
 // Browser gate for gamma's single run against the fake zeta server (scripts/fake-zeta.ts), at 1440, 1024, and 390 px.
 // Fails on: a console error; a page that scrolls sideways; a button under 36 px (44 px at touch widths) or with no
 // name; a native select/input/textarea (the composer's field is the one textarea, styled by @fulcrum/react); a composer
