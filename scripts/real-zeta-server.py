@@ -58,6 +58,7 @@ def make_server() -> tuple[ZetaServer, Path, str]:
                 ],
             ),
             ScriptedTurn(content=[TextContent("reuse grant proof")], tool_calls=[ToolCall("reuse-proof-bash", "bash", {"command": "printf reuse-proof"})]),
+            ScriptedTurn(content=[TextContent("retained grant proof complete")]),
             ScriptedTurn(content=[TextContent("post-revoke grant proof")], tool_calls=[ToolCall("post-revoke-proof-bash", "bash", {"command": "printf post-revoke-proof"})]),
         ]
     else:

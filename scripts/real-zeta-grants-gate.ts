@@ -124,7 +124,7 @@ try {
   const approvalsBeforeReuse = frames.filter((frame) => frame.includes('"event":"approval_request"')).length;
   await field.fill("reuse the grant");
   await page.getByRole("button", { name: "send message", exact: true }).click();
-  await page.getByText("reuse grant proof", { exact: true }).waitFor({ timeout: 30_000 });
+  await page.getByText("retained grant proof complete", { exact: true }).waitFor({ timeout: 30_000 });
   await page.getByPlaceholder("message zeta").waitFor({ timeout: 20_000 });
   const approvalsAfterReuse = frames.filter((frame) => frame.includes('"event":"approval_request"')).length;
   if (approvalsAfterReuse !== approvalsBeforeReuse) throw new Error(`reused bash grant asked again: ${approvalsBeforeReuse} -> ${approvalsAfterReuse}`);
