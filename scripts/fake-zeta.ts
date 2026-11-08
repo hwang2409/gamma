@@ -42,7 +42,7 @@ const text = (value: string) => ({ type: "text", text: value });
 const toolUse = (id: string, name: string, args: Json = {}) => ({ type: "tool_use", tool_call: { id, name, arguments: args } });
 // History keeps a result's text only; bash's is "stdout:\n" + stdout + "\nstderr:\n" + stderr (zeta src/zeta/tools/bash).
 const result = (id: string, content: string, extra: Json = {}) => ({ tool_call_id: id, content, is_error: false, content_blocks: [], structured_content: null, ...extra });
-const histories: Record<string, Json[]> = {
+const historySeed: Record<string, Json[]> = {
   [ACTIVE]: [
     { id: "h1", role: "user", content: [text("the reconnect test in packages/zeta fails about one run in ten. find out why and fix it.")], tool_result: null },
     { id: "h2", role: "assistant", content: [{ type: "thinking", text: "start with the test and the client close path." }, text("I will read the test first, then run it in a loop."), toolUse("c1", "read")], tool_result: null },
@@ -68,9 +68,12 @@ const histories: Record<string, Json[]> = {
     ? { id: `l${index}`, role: "user", content: [text(`step ${index / 2 + 1}: measure frame ${index}`)], tool_result: null }
     : { id: `l${index}`, role: "assistant", content: [text(`frame ${index} took **${(index % 7) + 3} ms**; \`content-visibility\` skipped ${index * 3} rows.`)], tool_result: null }),
 };
+const createHistories = (): Record<string, Json[]> => Object.fromEntries(
+  Object.entries(historySeed).map(([sessionId, rows]) => [sessionId, [...rows]]),
+);
 
 /** The live turn that runs when the active session opens: prose, code, a shell call, an approval, then a summary. */
-const liveTurn = (send: (event: Json) => void, ask: () => Promise<"approve" | "deny" | "abort">, wait: (ms: number) => Promise<void>, done: () => void, historyMode: HistoryMode, grantProof = false, setPending: (requestId: string, call: Json) => void = () => {}) => async () => {
+const liveTurn = (send: (event: Json) => void, ask: () => Promise<"approve" | "deny" | "abort">, wait: (ms: number) => Promise<void>, done: () => void, histories: Record<string, Json[]>, historyMode: HistoryMode, grantProof = false, setPending: (requestId: string, call: Json) => void = () => {}) => async () => {
   // Committed rows also land in history, as in zeta, so a reconnect rebuilds what the live stream showed.
   const history = histories[ACTIVE]!;
   const row = (id: string, role: string, content: Json[], toolResult: Json | null = null) => history.push({ id, role, content, tool_result: toolResult });
@@ -138,7 +141,7 @@ const liveTurn = (send: (event: Json) => void, ask: () => Promise<"approve" | "d
  * `test_session_abort_marks_accepted_steering_dropped`, `test_disconnect_marks_accepted_steering_dropped`, and
  * `test_tool_less_turn_end_marks_late_steering_dropped` in tests/test_server_delivery.py.
  */
-export function composerMethods(wait: (ms: number) => Promise<void>, running: { get(): boolean; set(value: boolean): void }) {
+function createComposerMethods(wait: (ms: number) => Promise<void>, running: { get(): boolean; set(value: boolean): void }, histories: Record<string, Json[]>) {
   const sent: Json[] = [];
   const deliveries = new Map<string, Json>();
   const statuses = new Map<string, "queued" | "delivered" | "dropped">();
@@ -268,7 +271,12 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
   };
 }
 
+export function composerMethods(wait: (ms: number) => Promise<void>, running: { get(): boolean; set(value: boolean): void }) {
+  return createComposerMethods(wait, running, createHistories());
+}
+
 export async function startFakeZeta({ origins, port = 0, live = true, historyMode = process.env.FAKE_ZETA_HISTORY_MODE === "old" ? "old" : "new", approvalHistoryMode = (process.env.FAKE_ZETA_APPROVAL_HISTORY_MODE as ApprovalHistoryMode | undefined) ?? "not-advertised-with-rows", approvalReconnect = true, approvalReconnectGraceMs = 90_000, newSessionSettings = true, sessionGrants = true, grantProof = false, helloDelay = 60_000, serialDelays }: { origins: string[]; port?: number; live?: boolean; historyMode?: HistoryMode; approvalHistoryMode?: ApprovalHistoryMode; approvalReconnect?: boolean; approvalReconnectGraceMs?: number; newSessionSettings?: boolean; sessionGrants?: boolean; grantProof?: boolean; helloDelay?: number; serialDelays?: Readonly<Record<string, number | readonly number[]>> }) {
+  const histories = createHistories();
   const home = await mkdtemp(join(tmpdir(), "fulcrum-web-zeta-"));
   await mkdir(join(home, "run"), { recursive: true });
   const discovery = join(home, "run", "serve.ws.json");
@@ -339,7 +347,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   };
   const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
   let openDelay = Number(process.env.FAKE_ZETA_OPEN_DELAY_MS ?? 0);
-  const composer = composerMethods(wait, { get: () => running, set: (value) => { running = value; } });
+  const composer = createComposerMethods(wait, { get: () => running, set: (value) => { running = value; } }, histories);
   let serialTail = Promise.resolve<unknown>(undefined);
   const delayCalls = new Map<string, number>();
   const nextDelays = new Map<string, number[]>();
@@ -518,7 +526,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
               approvalAborted = false;
               decide = (decision) => { decide = null; resolve(decision); };
             });
-            setTimeout(() => void liveTurn(send, ask, wait, () => { composer.finishExternalTurn(ACTIVE); running = false; }, currentHistoryMode, grantProof, (requestId, call) => { approvalRequestId = requestId; approvalCall = call as typeof approvalCall; })(), 300);
+            setTimeout(() => void liveTurn(send, ask, wait, () => { composer.finishExternalTurn(ACTIVE); running = false; }, histories, currentHistoryMode, grantProof, (requestId, call) => { approvalRequestId = requestId; approvalCall = call as typeof approvalCall; })(), 300);
           }
           return;
         }
