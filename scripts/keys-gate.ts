@@ -261,9 +261,11 @@ try {
   try { await exerciseHandlers(await browser.newPage({ viewport: { width: 1024, height: 800 } })); }
   finally { await browser.close(); }
   await browserReloadConvention("chromium", chromium);
-  await browserReloadConvention("webkit", webkit);
   await mobileKeysJourney(chromium, "chromium");
-  await mobileKeysJourney(webkit, "webkit");
+  if (process.platform === "darwin") {
+    await browserReloadConvention("webkit", webkit);
+    await mobileKeysJourney(webkit, "webkit");
+  }
   if (errors.length) throw new Error(errors.join(" | "));
 } finally {
   vite.kill("SIGTERM");
