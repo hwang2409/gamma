@@ -136,7 +136,11 @@ try {
   await field.waitFor({ timeout: 20_000 });
   const pendingBefore = frames.length;
   await submit("/plan");
-  await page.getByText("commands wait for pending work to finish: tools, approvals, or background agents", { exact: true }).waitFor({ timeout: 10_000 });
+  try {
+    await page.getByText("commands wait for pending work to finish: tools, approvals, or background agents", { exact: true }).waitFor({ timeout: 10_000 });
+  } catch (error) {
+    throw new Error(`pending command refusal missing; body=${JSON.stringify((await page.locator("body").innerText()).slice(0, 2000))}; cause=${String(error)}`);
+  }
   if ((await field.inputValue()).trim() !== "/plan") throw new Error("real pending-work refusal lost the plan draft");
   const pendingFrames = frames.slice(pendingBefore).map((frame) => { try { return JSON.parse(frame); } catch { return null; } });
   if (!pendingFrames.some((frame) => frame?.method === "slash_run") || pendingFrames.some((frame) => frame?.method === "session_settings")) throw new Error(`pending-work plan used the wrong route: ${JSON.stringify(pendingFrames)}`);

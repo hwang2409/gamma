@@ -503,7 +503,8 @@ function Dock({ state, view, connection, runs, vim, setVim, theme, setTheme, onN
   const readOnly = blank ? null : dockReadOnlyReason(open?.id ?? null, view.active);
   const blockedReason = starting ? null : pendingDelivery ? "sending waits while the previous message is pending or retrying" : view.active && blank ? `sending waits for the active run ${view.active}` : dockBlockedReason(state, present, open, running);
   const onPreparationFailure = useCallback((error: unknown, images: readonly import("./image-queue").QueuedImage[]) => {
-    const active = approvalStore.getState().turn === "running";
+    const attachment = runState.getCatalog().attachment;
+    const active = attachment.kind === "attached" && attachment.sessionId === runState.canonical(runId) && attachment.turn === "running";
     const busy = (error as { code?: unknown }).code === -32004;
     const text = busy ? active
       ? `commands wait until this turn ends${pendingApprovals(approvalStore).length ? "\nuse the approve, always allow, or deny buttons on the approval card" : ""}`
