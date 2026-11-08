@@ -152,6 +152,18 @@ try {
     if (settingsAfter !== settingsBefore + 1) throw new Error(`${command} did not refresh real settings exactly once`);
     await page.getByRole("button", { name: "dismiss command result" }).click();
   }
+  for (const [command, chip] of [["/plan create a proof", true], ["/implement", false]] as const) {
+    const beforeCommand = frames.length;
+    await submit(command);
+    await page.getByRole("button", { name: "stop" }).waitFor({ timeout: 15_000 });
+    const commandFrames = frames.slice(beforeCommand).map((frame) => { try { return JSON.parse(frame); } catch { return null; } });
+    const sends = commandFrames.filter((frame) => frame?.method === "send");
+    const input = sends[0]?.params?.input;
+    if (!commandFrames.some((frame) => frame?.method === "slash_run") || sends.length !== 1 || typeof input?.input_id !== "string" || "expanded_text" in input) throw new Error(`${command} did not use one opaque real-zeta send`);
+    if ((await page.locator(".plan-chip").count() > 0) !== chip) throw new Error(`${command} left the wrong real-zeta plan chip state`);
+    await page.getByRole("button", { name: "stop" }).click();
+    await page.getByPlaceholder("message zeta").waitFor({ timeout: 15_000 });
+  }
   }
 
   await field.fill("");
@@ -190,7 +202,7 @@ try {
   const approvals = frames.map((frame) => { try { return JSON.parse(frame); } catch { return null; } }).filter((frame) => frame?.method === "approve");
   if (approvals.length !== 1 || approvals[0].params?.scope !== "always_tool") throw new Error(`wrong approval scope: ${JSON.stringify(approvals)}`);
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
-  console.log(`real zeta gate passed: ${ref}; private home ${zetaHome}; model_input_ids, slash_list, /status, plan idle/active/pending, opaque send, hidden-text, approval always_tool`);
+  console.log(`real zeta gate passed: ${ref}; private home ${zetaHome}; model_input_ids, slash_list, /status, opaque send, hidden-text, approval always_tool${planProof ? ", plan idle/active/pending" : ""}`);
 } finally {
   await browser?.close().catch(() => {});
   await resources.cleanup(
