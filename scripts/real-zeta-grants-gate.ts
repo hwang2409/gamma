@@ -1,6 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "playwright";
 import { createClient, webSocketTransport } from "@fulcrum/zeta";
@@ -45,7 +44,7 @@ const waitFile = async (path: string, owner: ChildProcess) => {
   throw new Error(`timed out waiting for ${path}`);
 };
 
-const temp = await mkdtemp(join(tmpdir(), "gamma-g4b-real-"));
+const temp = await mkdtemp("/tmp/gamma-g4b-real-");
 resources.createdTemp(temp);
 const zetaHome = assertPrivateProofHome(join(temp, "zeta-home"), worktree);
 const proofEnv = { ...process.env, ZETA_HOME: zetaHome, ZETA_GRANTS_PROOF: "1" };
