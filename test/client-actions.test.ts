@@ -17,7 +17,8 @@ function approvalStore() {
 function dependencies(overrides: Partial<ClientActionDependencies> = {}) {
   const approvals = approvalStore();
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
-  const state = { theme: "auto" as const, opened: 0, newRuns: 0, refreshes: 0, retries: 0 };
+  const state = { theme: "auto" as const, opened: 0, permissionsOpened: 0, newRuns: 0, refreshes: 0, retries: 0 };
+  const permissionCalls: Array<{ method: "revoke" | "clear"; grant?: string }> = [];
   const deps: ClientActionDependencies = {
     sessionId: "session-1",
     requests: new Set(["rename_session", "session_tree", "switch_branch"]),
@@ -37,9 +38,15 @@ function dependencies(overrides: Partial<ClientActionDependencies> = {}) {
     approvalStore: approvals.store,
     decide: async () => ({}),
     markAlways: () => {},
+    permissions: {
+      get grants() { return ["bash", "read"]; },
+      open: () => { state.permissionsOpened++; },
+      revoke: async (grant) => { permissionCalls.push({ method: "revoke", grant }); return { removed: [grant] }; },
+      clear: async () => { permissionCalls.push({ method: "clear" }); return { removed: ["bash", "read"] }; },
+    },
     ...overrides,
   };
-  return { actions: createClientActions(deps), calls, state, approvals };
+  return { actions: createClientActions(deps), calls, state, approvals, permissionCalls };
 }
 
 const actionNames: ClientActionName[] = ["new_session", "rename_session", "approve", "always", "deny", "theme", "branch_view", "paste", "keys", "restart", "permissions"];
@@ -101,7 +108,24 @@ test("new, name, theme, paste, and fixed receipts use their real actions", async
   expect(await actions.paste("")).toEqual({ text: "choose images to attach (paste and drop also work)", tone: "quiet" });
   expect(state.opened).toBe(1);
   expect(await actions.restart("")).toEqual({ text: "/restart restarts the terminal app; gamma reconnects on its own", tone: "quiet" });
-  expect(await actions.permissions("")).toEqual({ text: "/permissions arrives with the session grants view", tone: "quiet" });
+});
+
+test("permissions opens, revokes exact grants, and clears immediately", async () => {
+  const { actions, state, permissionCalls } = dependencies();
+  expect(await actions.permissions("")).toBeUndefined();
+  expect(state.permissionsOpened).toBe(1);
+  expect(await actions.permissions("revoke bash")).toEqual({ text: "permissions · session grant revoked: bash", tone: "quiet" });
+  expect(await actions.permissions("revoke missing")).toEqual({ text: "permissions · no session grant matches 'missing'; use /permissions to list exact grants", tone: "error" });
+  expect(await actions.permissions("clear")).toEqual({ text: "permissions · session grants cleared: bash, read", tone: "quiet" });
+  expect(permissionCalls).toEqual([{ method: "revoke", grant: "bash" }, { method: "clear" }]);
+});
+
+test("permissions reports unsupported servers and validates typed forms", async () => {
+  const unsupported = dependencies({ permissions: undefined });
+  expect(await unsupported.actions.permissions("")).toEqual({ text: "permissions need a newer zeta server", tone: "error", retain: true });
+  const { actions } = dependencies();
+  expect(await actions.permissions("revoke")).toEqual({ text: "usage: /permissions | /permissions revoke <exact grant> | /permissions clear", tone: "error", retain: true });
+  expect(await actions.permissions("anything else")).toEqual({ text: "usage: /permissions | /permissions revoke <exact grant> | /permissions clear", tone: "error", retain: true });
 });
 
 test("tree lists, switches, and resyncs only after a successful switch", async () => {

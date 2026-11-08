@@ -24,8 +24,8 @@ def private_proof_home() -> Path:
     default = (Path.home() / ".zeta").resolve()
     if home == default or home.is_relative_to(default):
         raise RuntimeError("real-zeta proof must never use ~/.zeta or a child of it")
-    if not home.is_relative_to(Path(tempfile.gettempdir()).resolve()) and not home.is_relative_to(Path(worktree).resolve()):
-        raise RuntimeError("real-zeta proof ZETA_HOME must be under tmp or the proof worktree")
+    if not home.is_relative_to(Path(tempfile.gettempdir()).resolve()) and not home.is_relative_to(Path("/tmp").resolve()) and not home.is_relative_to(Path(worktree).resolve()):
+        raise RuntimeError("real-zeta proof ZETA_HOME must be under /tmp or the proof worktree")
     return home
 
 
@@ -48,8 +48,21 @@ def make_server() -> tuple[ZetaServer, Path, str]:
         if os.environ.get("ZETA_PLAN_PROOF") == "1"
         else []
     )
-    backend = FakeBackend(
-        [
+    if os.environ.get("ZETA_GRANTS_PROOF") == "1":
+        turns = [
+            ScriptedTurn(
+                content=[TextContent("grant then cancel proof")],
+                tool_calls=[
+                    ToolCall("grant-proof-bash", "bash", {"command": "printf grant-proof"}),
+                    ToolCall("cancel-proof-write", "write", {"path": str(cwd / "cancel-proof.txt"), "content": "cancel me"}),
+                ],
+            ),
+            ScriptedTurn(content=[TextContent("reuse grant proof")], tool_calls=[ToolCall("reuse-proof-bash", "bash", {"command": "printf reuse-proof"})]),
+            ScriptedTurn(content=[TextContent("retained grant proof complete")]),
+            ScriptedTurn(content=[TextContent("post-revoke grant proof")], tool_calls=[ToolCall("post-revoke-proof-bash", "bash", {"command": "printf post-revoke-proof"})]),
+        ]
+    else:
+        turns = [
             *plan_turns,
             ScriptedTurn(
                 content=[TextContent("\n".join(f"proof context line {index}" for index in range(1, 81)))],
@@ -57,7 +70,7 @@ def make_server() -> tuple[ZetaServer, Path, str]:
             ),
             ScriptedTurn(content=[TextContent("real zeta proof complete")]),
         ]
-    )
+    backend = FakeBackend(turns)
     return (
         ZetaServer(
             home=home,

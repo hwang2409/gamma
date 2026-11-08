@@ -5,6 +5,12 @@ import type { ThemeChoice } from "./theme";
 
 export type ActionReceipt = { text: string; tone: "quiet" | "error"; retain?: boolean };
 type Branch = { id: string; label?: string; seq?: number; current?: boolean };
+type PermissionsAction = {
+  readonly grants: readonly string[];
+  open(): void;
+  revoke(grant: string): Promise<{ removed: string[] } | null>;
+  clear(): Promise<{ removed: string[] }>;
+};
 
 export type ClientActionDependencies = {
   sessionId: string;
@@ -22,6 +28,7 @@ export type ClientActionDependencies = {
   approvalDisabledReason?: string;
   decide(method: "approve" | "deny", requestId: string, always?: boolean): Promise<unknown>;
   markAlways(toolId: string): void;
+  permissions?: PermissionsAction;
 };
 
 const quiet = (text: string): ActionReceipt => ({ text, tone: "quiet" });
@@ -92,6 +99,21 @@ export function createClientActions(deps: ClientActionDependencies): Record<Clie
     },
     async keys() { return quiet(keysReceipt()); },
     async restart() { return quiet("/restart restarts the terminal app; gamma reconnects on its own"); },
-    async permissions() { return quiet("/permissions arrives with the session grants view"); },
+    async permissions(args) {
+      const permissions = deps.permissions;
+      if (!permissions) return error("permissions need a newer zeta server", true);
+      if (!args) { permissions.open(); return; }
+      if (args === "clear") {
+        const { removed } = await permissions.clear();
+        return quiet(removed.length ? `permissions · session grants cleared: ${removed.join(", ")}` : "permissions · no session grants to clear");
+      }
+      if (args.startsWith("revoke ")) {
+        const grant = args.slice("revoke ".length);
+        if (!grant || !permissions.grants.includes(grant)) return error(`permissions · no session grant matches '${grant}'; use /permissions to list exact grants`);
+        const result = await permissions.revoke(grant);
+        return result ? quiet(`permissions · session grant revoked: ${grant}`) : quiet("that grant was already removed");
+      }
+      return error("usage: /permissions | /permissions revoke <exact grant> | /permissions clear", true);
+    },
   };
 }

@@ -139,6 +139,7 @@ test("an old server hides completion and blocks slash text", async () => {
 
 test("the no-capability adapter leaves slash with no listbox rows", async () => {
   expect(await createUnavailableCommandController().completions("/", 1)).toEqual([]);
+  expect(await createUnavailableCommandController("commands need an open run", true).prepareComposerInput("/permissions")).toEqual({ kind: "receipt", text: "open this run before changing permissions", tone: "error", retain: true });
 });
 
 test("autocomplete filters and ranks slash and skill rows and exposes source badges", async () => {

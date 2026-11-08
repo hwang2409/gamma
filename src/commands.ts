@@ -163,9 +163,10 @@ function directSend(text: string): ComposerAction {
   return { kind: "send", text: text.startsWith("//") ? text.slice(1) : text };
 }
 
-export function createUnavailableCommandController(message = "not available in this server version"): CommandController {
+export function createUnavailableCommandController(message = "not available in this server version", detached = false): CommandController {
   return {
     async prepareComposerInput(text) {
+      if (detached && /^\/permissions(?:\s|$)/.test(text.trim())) return { kind: "receipt", text: "open this run before changing permissions", tone: "error", retain: true };
       return isSlashCommandText(text) ? { kind: "receipt", text: message, tone: "error", retain: true } : directSend(text);
     },
     async completions() { return []; },
