@@ -825,7 +825,7 @@ try {
       for (let attempt = 0; attempt < 200 && fake.running; attempt++) await Bun.sleep(25);
       await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
       const stopped = await page.locator('[data-part="timeline"] [data-kind="stopped"]').count();
-      await submit(page, "then stop this turn");
+      await submit(page, "hold until stopped");
       await page.getByRole("button", { name: "stop" }).click({ timeout: 10_000 });
       for (let attempt = 0; attempt < 200 && await page.locator('[data-part="timeline"] [data-kind="stopped"]').count() === stopped; attempt++) await Bun.sleep(25);
       await page.getByPlaceholder("message zeta").waitFor({ timeout: 10_000 });
