@@ -142,6 +142,15 @@ test("the no-capability adapter leaves slash with no listbox rows", async () => 
   expect(await createUnavailableCommandController("commands need an open run", true).prepareComposerInput("/permissions")).toEqual({ kind: "receipt", text: "open this run before changing permissions", tone: "error", retain: true });
 });
 
+test("a fresh draft runs gamma's own actions and refuses commands that need a zeta session", async () => {
+  const fresh = createUnavailableCommandController("commands need an open run", true);
+  const refusal = { kind: "receipt", text: "commands need an open run", tone: "error", retain: true };
+  expect(await fresh.prepareComposerInput("/keys")).toEqual({ kind: "client-action", name: "keys", args: "" });
+  expect(await fresh.prepareComposerInput("/theme dracula")).toEqual({ kind: "client-action", name: "theme", args: "dracula" });
+  for (const text of ["/tree", "/name x", "/approve", "/status"]) expect(await fresh.prepareComposerInput(text)).toEqual(refusal);
+  expect(await createUnavailableCommandController().prepareComposerInput("/keys")).toEqual({ kind: "receipt", text: "not available in this server version", tone: "error", retain: true });
+});
+
 test("autocomplete filters and ranks slash and skill rows and exposes source badges", async () => {
   const { controller, frames } = fake({ slash_list: slashList });
   expect(await controller.completions("/st")).toEqual([

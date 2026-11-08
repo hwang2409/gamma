@@ -52,11 +52,23 @@ function hint({ vim, mode, steer, images }: { vim: boolean; mode: Vim["mode"]; s
   return `${send} · i type · u undo${steer ? " · ^c stop" : ""}`;
 }
 
+/** Marks the edges that have rows past them, so CSS shades only those (attributes, not state: scrolling never re-renders). */
+function markEdges(node: HTMLElement | null) {
+  if (!node) return;
+  node.toggleAttribute("data-more-above", node.scrollTop > 0.5);
+  node.toggleAttribute("data-more-below", node.scrollTop + node.clientHeight < node.scrollHeight - 0.5);
+}
+
 function Suggestions({ id, snapshot, onAccept }: { id: string; snapshot: CompletionSnapshot; onAccept(index: number): void }) {
+  const list = useRef<HTMLDivElement>(null);
   // aria-activedescendant moves no focus, so the list scrolls the active row into view itself.
-  useLayoutEffect(() => { if (snapshot.open) document.getElementById(`${id}-${snapshot.activeIndex}`)?.scrollIntoView({ block: "nearest" }); }, [id, snapshot]);
+  useLayoutEffect(() => {
+    if (!snapshot.open) return;
+    document.getElementById(`${id}-${snapshot.activeIndex}`)?.scrollIntoView({ block: "nearest" });
+    markEdges(list.current);
+  }, [id, snapshot]);
   if (!snapshot.open) return null;
-  return <div id={id} className="command-listbox" role="listbox" aria-label="command suggestions">{snapshot.rows.map((row, index) => <button
+  return <div ref={list} id={id} className="command-listbox" role="listbox" aria-label="command suggestions" onScroll={(event) => markEdges(event.currentTarget)}>{snapshot.rows.map((row, index) => <button
     type="button"
     role="option"
     id={`${id}-${index}`}
@@ -168,7 +180,7 @@ export function canSubmitComposer(blocked: boolean, text: string, imageCount: nu
   return !blocked && (text.trim() !== "" || imageCount > 0) && !sending && !(steer && imageCount > 0 && !text.trimStart().startsWith("/"));
 }
 
-function useSubmission(state: ComposerState, blocked: boolean, commands: CommandController, onSubmit: Submit, onPreparationFailure: ((error: unknown, images: readonly QueuedImage[]) => void) | undefined, onStop: (() => Promise<unknown>) | undefined, draft: ReturnType<typeof useComposerDraft>, attachments: ReturnType<typeof useAttachments>, store: RunStateStore, runId: string, pending: boolean) {
+function useSubmission(state: ComposerState, blocked: boolean, commands: CommandController, onSubmit: Submit, onPreparationFailure: ((error: unknown, images: readonly QueuedImage[], text: string) => void) | undefined, onStop: (() => Promise<unknown>) | undefined, draft: ReturnType<typeof useComposerDraft>, attachments: ReturnType<typeof useAttachments>, store: RunStateStore, runId: string, pending: boolean) {
   const [stopping, setStopping] = useState(false);
   const [preparing, setPreparing] = useState(false);
   const [error, setError] = useState<string>();
@@ -186,15 +198,14 @@ function useSubmission(state: ComposerState, blocked: boolean, commands: Command
     const sent = draft.text;
     const sentImages = attachments.current.current;
     const deliveryId = `web-${crypto.randomUUID()}`;
-    const prepared = commands.prepareComposerInput(sent).catch((error) => { onPreparationFailure?.(error, sentImages); throw error; });
-    prepared.then((action) => {
+    commands.prepareComposerInput(sent).then((action) => {
       const imageDelivery = action.kind === "send" && sentImages.length > 0;
       if (imageDelivery) store.beginDelivery(runId, { id: deliveryId, attemptId: deliveryId, method: "send_images", text: sent, images: sentImages });
       return attempt(() => onSubmit(action, sentImages, { steer, deliveryId, sourceText: sent })).then(
         () => { if (imageDelivery) store.settleDelivery(runIdRef.current, deliveryId, "accepted"); },
         (failure: unknown) => { if (imageDelivery) store.settleDelivery(runIdRef.current, deliveryId, "rejected"); throw failure; },
       );
-    }).catch((failure: unknown) => setError(`could not ${steer ? "steer" : "send"}: ${errorText(failure)}`))
+    }, (error: unknown) => { if (!onPreparationFailure) throw error; onPreparationFailure(error, sentImages, sent); }).catch((failure: unknown) => setError(`could not ${steer ? "steer" : "send"}: ${errorText(failure)}`))
       .finally(() => { inFlight.current.submit = false; setPreparing(false); });
   };
   const stop = () => {
@@ -215,7 +226,8 @@ export function GammaComposer({ state, reason, blockedReason, vim: vimOn, comman
   vim: boolean;
   commands: CommandController;
   onSubmit: Submit;
-  onPreparationFailure?(error: unknown, images: readonly QueuedImage[]): void;
+  /** Shows a failed command preparation; once it has, the composer shows no second error. */
+  onPreparationFailure?(error: unknown, images: readonly QueuedImage[], text: string): void;
   onStop?(): Promise<unknown>;
   /** Controls for the footer row, before attach, stop, and send. */
   footer?: ReactNode;

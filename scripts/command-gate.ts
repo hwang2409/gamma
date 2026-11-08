@@ -2,12 +2,14 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
-import { chromium, type Page } from "playwright";
+import { chromium, webkit, type Page } from "playwright";
 import { themes } from "@fulcrum/react";
 import { ACTIVE, startFakeZeta } from "./fake-zeta";
 import { completeSlashCatalog, defaultSlashCatalog } from "./fake-slash-catalog";
 
 const root = new URL("..", import.meta.url).pathname;
+const FRESH_REFUSAL = "this command needs an open run: send a message first";
+const FRESH_REFUSAL_WITH_IMAGE = `${FRESH_REFUSAL}\nattachments stay queued for your next message.`;
 const portText = process.env.WEB_COMMAND_GATE_PORT ?? "4195";
 if (!/^\d+$/.test(portText)) throw new Error("WEB_COMMAND_GATE_PORT must be an integer");
 const port = Number(portText);
@@ -50,12 +52,117 @@ const submit = async (page: Page, text: string) => {
   if (text.startsWith("/") && (await field(page).inputValue()).trim() === text) await field(page).press("Enter");
 };
 
+/** Rows inside the list's scrollport, the active row, and points just inside its top and bottom edges. */
+const measureList = (page: Page) => page.getByRole("listbox", { name: "command suggestions" }).evaluate((node) => {
+  const box = node.getBoundingClientRect();
+  const composerField = document.querySelector('[data-part="composer-field"]')!.getBoundingClientRect();
+  const top = box.top + node.clientTop, bottom = top + node.clientHeight;
+  const all = [...node.querySelectorAll('[role="option"]')].map((option) => option.getBoundingClientRect());
+  const rows = all.filter((row) => row.bottom > top + 0.5 && row.top < bottom - 0.5);
+  const active = document.getElementById(document.querySelector('textarea[aria-label="message"]')!.getAttribute("aria-activedescendant") ?? "")?.getBoundingClientRect();
+  const x = Math.floor(box.right) - 6;
+  return {
+    gap: composerField.top - box.bottom, overflowing: node.scrollHeight > node.clientHeight + 1, rows: rows.length,
+    moreAbove: node.scrollTop > 0.5, moreBelow: node.scrollTop + node.clientHeight < node.scrollHeight - 0.5,
+    clipped: rows.filter((row) => row.top < top - 0.5 || row.bottom > bottom + 0.5).map((row) => [Math.round(row.top - top), Math.round(row.bottom - bottom)]),
+    activeHidden: !active || active.top < top - 0.5 || active.bottom > bottom + 0.5,
+    topRow: rows[0] ? { x: Math.floor(rows[0].left + rows[0].width / 2), y: Math.floor(rows[0].top + rows[0].height / 2) } : null,
+    edge: { x, y: Math.floor(bottom) - 3 }, edgeMid: { x, y: Math.floor(bottom - all[0]!.height / 2) },
+    topEdge: { x, y: Math.ceil(top) + 2 }, topMid: { x, y: Math.floor(top + all[0]!.height / 2) },
+    background: getComputedStyle(node).backgroundColor,
+  };
+});
+const settle = (page: Page) => page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+const openList = async (page: Page) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.mouse.move(0, 0);
+  await field(page).fill("");
+  await field(page).fill("/");
+  await page.getByRole("listbox", { name: "command suggestions" }).waitFor();
+  await settle(page);
+};
+const closeList = async (page: Page) => { await page.mouse.move(0, 0); await field(page).press("Escape"); await field(page).fill(""); };
+async function listGeometry(page: Page) {
+  try {
+    await openList(page);
+    const listbox = page.getByRole("listbox", { name: "command suggestions" });
+    const atTop = await measureList(page);
+    if (atTop.gap < 4) throw new Error(`command list touches the composer field: gap ${atTop.gap}px`);
+    if (!atTop.overflowing) throw new Error("the default catalog no longer overflows the command list");
+    if (atTop.clipped.length) throw new Error(`the command list cuts ${atTop.clipped.length} visible row(s) at its edge: ${JSON.stringify(atTop)}`);
+    const background = await cssColor(page, atTop.background);
+    const moreBelow = distance(await pixel(page, atTop.edge.x, atTop.edge.y), background);
+    if (moreBelow < 12) throw new Error(`the command list shows no boundary for rows below its edge (distance ${moreBelow})`);
+    for (let index = 0; index <= atTop.rows; index++) await field(page).press("ArrowDown");
+    await settle(page);
+    const moved = await measureList(page);
+    if (moved.activeHidden || moved.clipped.length) throw new Error(`keyboard moved the active row out of view: ${JSON.stringify(moved)}`);
+    await listbox.evaluate((node) => { node.scrollTop = node.scrollHeight; });
+    await settle(page);
+    const atEnd = await measureList(page);
+    if (atEnd.clipped.length) throw new Error(`the scrolled command list cuts ${atEnd.clipped.length} row(s)`);
+    const endEdge = distance(await pixel(page, atEnd.edge.x, atEnd.edge.y), background);
+    if (endEdge > 6) throw new Error(`the command list still marks rows below after the last row (distance ${endEdge})`);
+  } finally { await closeList(page); }
+}
+/** The "more rows" shade must paint over the rows: the active and hovered rows fill their whole box, so a shade under them is hidden. */
+async function listShades(page: Page, name: string) {
+  try {
+    await openList(page);
+    const listbox = page.getByRole("listbox", { name: "command suggestions" });
+    const atTop = await measureList(page);
+    for (let index = 0; index <= atTop.rows; index++) await field(page).press("ArrowDown");
+    await settle(page);
+    const arrowed = await measureList(page);
+    if (!arrowed.moreBelow) throw new Error(`${name} the catalog has no rows below the arrowed list: ${JSON.stringify(arrowed)}`);
+    const below = distance(await pixel(page, arrowed.edge.x, arrowed.edge.y), await pixel(page, arrowed.edgeMid.x, arrowed.edgeMid.y));
+    await page.screenshot({ path: join(shots, `${name}-list-arrowed-bottom-shade.png`), clip: await listbox.boundingBox() ?? undefined });
+    if (below < 12) throw new Error(`${name} the bottom shade is hidden by the active edge row after ${atTop.rows + 1} ArrowDown (distance ${below})`);
+    await listbox.evaluate((node) => { node.scrollTop = node.scrollHeight; });
+    await settle(page);
+    const atEnd = await measureList(page);
+    if (!atEnd.moreAbove || !atEnd.topRow) throw new Error(`${name} the scrolled list has no rows above: ${JSON.stringify(atEnd)}`);
+    await page.mouse.move(atEnd.topRow.x, atEnd.topRow.y);
+    await settle(page);
+    const above = distance(await pixel(page, atEnd.topEdge.x, atEnd.topEdge.y), await pixel(page, atEnd.topMid.x, atEnd.topMid.y));
+    await page.screenshot({ path: join(shots, `${name}-list-hovered-top-shade.png`), clip: await listbox.boundingBox() ?? undefined });
+    if (above < 12) throw new Error(`${name} the top shade is hidden by the hovered edge row after scrolling (distance ${above})`);
+  } finally { await closeList(page); }
+}
+/** A wheel or trackpad scroll comes to rest on a row boundary, as the keyboard does. */
+async function listWheel(page: Page, name: string) {
+  try {
+    await openList(page);
+    const box = (await page.getByRole("listbox", { name: "command suggestions" }).boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.wheel(0, 100);
+    await page.waitForTimeout(600);
+    await settle(page);
+    const rested = await measureList(page);
+    if (!rested.moreAbove) throw new Error(`${name} the wheel did not scroll the list: ${JSON.stringify(rested)}`);
+    if (rested.clipped.length) throw new Error(`${name} a wheel scroll left ${rested.clipped.length} half row(s): ${JSON.stringify(rested.clipped)}`);
+  } finally { await closeList(page); }
+}
+
 try {
   for (let attempt = 0; attempt < 300; attempt++) {
     if (vite.exitCode !== null) throw new Error(`vite exited ${vite.exitCode}`);
     if (await fetch(origin).then((response) => response.ok, () => false)) break;
     await Bun.sleep(100);
   }
+  // CI installs only chromium; on macOS the list's paint order is also checked in webkit.
+  if (process.platform === "darwin") {
+    const safari = await webkit.launch();
+    try {
+      const other = await safari.newPage({ viewport: { width: 1440, height: 900 } });
+      other.on("pageerror", (error) => errors.push(`webkit: ${error.message}`));
+      await other.goto(`${origin}/?run=${ACTIVE}`);
+      await waitReady(other);
+      await check("webkit edge shades stay visible over the active and the hovered edge row", () => listShades(other, "webkit"));
+      await check("webkit free wheel scrolling rests on whole rows", () => listWheel(other, "webkit"));
+    } finally { await safari.close(); }
+  }
+
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
@@ -76,8 +183,13 @@ try {
         await submit(page, "/status");
         const receipt = page.locator(".command-receipt-text");
         await receipt.waitFor({ timeout: 5_000 });
+        await page.setViewportSize({ width: 390, height: 844 });
+        const fit = await receipt.evaluate((node) => ({ clientHeight: node.clientHeight, scrollHeight: node.scrollHeight, width: node.clientWidth, lineHeight: getComputedStyle(node).lineHeight, text: (node as HTMLElement).innerText }));
+        await page.screenshot({ path: join(shots, "fresh-refusal-390.png") });
+        await page.setViewportSize({ width: 1440, height: 900 });
+        if (fit.scrollHeight > fit.clientHeight) throw new Error(`at 390px the fresh refusal hides part of its text: ${JSON.stringify(fit)}`);
         const copy = await receipt.innerText();
-        if (copy !== "commands need an open run; send a message first or open a run\nattachments stay queued and send with your next message.") throw new Error(`fresh refusal copy was ${JSON.stringify(copy)}`);
+        if (copy !== FRESH_REFUSAL_WITH_IMAGE) throw new Error(`fresh refusal copy was ${JSON.stringify(copy)}`);
         if (fake.requests.slice(start).some((request) => ["new_session", "slash_run", "send", "send_images"].includes(request.method))) throw new Error("fresh attached slash reached zeta");
         if (await page.locator('[data-part="attachment"]').count() !== 1) throw new Error("fresh refusal dropped the attachment");
         if (!await field(page).evaluate((node) => node === document.activeElement)) throw new Error("fresh refusal moved focus out of the composer");
@@ -91,10 +203,23 @@ try {
       }
     });
 
+    await check("a fresh run runs gamma's own commands, which need no zeta session", async () => {
+      const start = fake.requests.length;
+      await submit(page, "/keys");
+      const receipt = page.locator(".command-receipt-text");
+      await receipt.waitFor({ timeout: 5_000 });
+      const shown = await receipt.innerText();
+      if (!shown.includes("browser precedence and terminal-only exclusions")) throw new Error(`fresh /keys answered ${JSON.stringify(shown.slice(0, 120))}`);
+      if (fake.requests.slice(start).some((request) => ["new_session", "slash_run", "send"].includes(request.method))) throw new Error("fresh /keys reached zeta");
+      if ((await field(page).inputValue()).trim() !== "") throw new Error("fresh /keys left its draft in the composer");
+      await page.getByRole("button", { name: "dismiss command result" }).click();
+      await page.locator(".command-receipt").waitFor({ state: "detached", timeout: 5_000 });
+    });
+
     await check("fresh draft blocks slash but double slash starts a direct turn", async () => {
       const start = fake.requests.length;
       await submit(page, "/status");
-      await page.getByText("commands need an open run; send a message first or open a run", { exact: true }).waitFor();
+      await page.getByText(FRESH_REFUSAL, { exact: true }).waitFor();
       if (fake.requests.slice(start).some((request) => ["new_session", "slash_run", "send"].includes(request.method))) throw new Error("fresh slash reached zeta");
       if ((await field(page).inputValue()).trim() !== "/status") throw new Error("fresh slash did not retain its draft");
       await field(page).fill("");
@@ -129,6 +254,7 @@ try {
       const image = join(gammaHome, "prepare.png");
       await writeFile(image, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
       await page.locator('input[type="file"]').setInputFiles(image);
+      await page.getByLabel("remove prepare.png").waitFor({ timeout: 5_000 });
       for (const message of ["slash rejected", "request timed out"]) {
         fake.failNext("slash_run", message);
         await submit(page, "/status");
@@ -316,39 +442,33 @@ try {
       await field(page).press("Escape");
     });
 
-    await check("desktop command list sits apart from the field, shows whole rows, and marks rows beyond its edge", async () => {
-      await page.setViewportSize({ width: 1440, height: 900 });
-      await page.mouse.move(0, 0);
+    await check("desktop command list sits apart from the field, shows whole rows, and marks rows beyond its edge", () => listGeometry(page));
+    await check("chromium edge shades stay visible over the active and the hovered edge row", () => listShades(page, "chromium"));
+    await check("chromium free wheel scrolling rests on whole rows", () => listWheel(page, "chromium"));
+    await check("without round() support the command list stays bounded", async () => {
       await field(page).fill("/");
       const listbox = page.getByRole("listbox", { name: "command suggestions" });
       await listbox.waitFor();
-      const measure = () => listbox.evaluate((node) => {
-        const box = node.getBoundingClientRect();
-        const composerField = document.querySelector('[data-part="composer-field"]')!.getBoundingClientRect();
-        const top = box.top + node.clientTop, bottom = top + node.clientHeight;
-        const rows = [...node.querySelectorAll('[role="option"]')].map((option) => option.getBoundingClientRect()).filter((row) => row.bottom > top + 0.5 && row.top < bottom - 0.5);
-        const active = document.getElementById(document.querySelector('textarea[aria-label="message"]')!.getAttribute("aria-activedescendant") ?? "")?.getBoundingClientRect();
-        return { gap: composerField.top - box.bottom, overflowing: node.scrollHeight > node.clientHeight + 1, rows: rows.length, clipped: rows.filter((row) => row.top < top - 0.5 || row.bottom > bottom + 0.5).length, activeHidden: !active || active.top < top - 0.5 || active.bottom > bottom + 0.5, edge: { x: Math.floor(box.right) - 6, y: Math.floor(bottom) - 3 }, background: getComputedStyle(node).backgroundColor };
+      // An engine without round() skips the @supports block, and a max-height that uses round() with var() computes to none.
+      const unsupported = await listbox.evaluate((node) => {
+        const strip = (rules: CSSRuleList) => {
+          for (let index = rules.length - 1; index >= 0; index--) {
+            const rule = rules[index]!;
+            if (rule instanceof CSSSupportsRule && rule.conditionText.includes("round(")) { (rule.parentRule as CSSGroupingRule | null ?? rule.parentStyleSheet!).deleteRule(index); continue; }
+            if (rule instanceof CSSStyleRule && rule.style.maxHeight.includes("round(")) rule.style.removeProperty("max-height");
+            if ("cssRules" in rule) strip((rule as CSSGroupingRule).cssRules);
+          }
+        };
+        for (const sheet of document.styleSheets) { try { strip(sheet.cssRules); } catch {} }
+        const row = node.querySelector('[role="option"]')!.getBoundingClientRect().height;
+        return { height: node.clientHeight, row, maxHeight: getComputedStyle(node).maxHeight };
       });
-      const atTop = await measure();
-      if (atTop.gap < 4) throw new Error(`command list touches the composer field: gap ${atTop.gap}px`);
-      if (!atTop.overflowing) throw new Error("the default catalog no longer overflows the command list");
-      if (atTop.clipped) throw new Error(`the command list cuts ${atTop.clipped} visible row(s) at its edge: ${JSON.stringify(atTop)}`);
-      const background = await cssColor(page, atTop.background);
-      const moreBelow = distance(await pixel(page, atTop.edge.x, atTop.edge.y), background);
-      if (moreBelow < 12) throw new Error(`the command list shows no boundary for rows below its edge (distance ${moreBelow})`);
-      for (let index = 0; index <= atTop.rows; index++) await field(page).press("ArrowDown");
-      const moved = await measure();
-      if (moved.activeHidden || moved.clipped) throw new Error(`keyboard moved the active row out of view: ${JSON.stringify(moved)}`);
-      await listbox.evaluate((node) => { node.scrollTop = node.scrollHeight; });
-      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-      const atEnd = await measure();
-      if (atEnd.clipped) throw new Error(`the scrolled command list cuts ${atEnd.clipped} row(s)`);
-      const endEdge = distance(await pixel(page, atEnd.edge.x, atEnd.edge.y), background);
-      if (endEdge > 6) throw new Error(`the command list still marks rows below after the last row (distance ${endEdge})`);
+      await field(page).press("Escape");
+      await field(page).fill("");
+      await page.reload();
+      await waitReady(page);
+      if (unsupported.maxHeight === "none" || unsupported.height > 6 * unsupported.row + 1) throw new Error(`without round() the command list grows unbounded: ${JSON.stringify(unsupported)}`);
     });
-    await field(page).press("Escape");
-    await field(page).fill("");
 
     await check("one escape closes the menu after one-shot input; modified tab and enter never accept", async () => {
       const listbox = page.getByRole("listbox", { name: "command suggestions" });
@@ -584,7 +704,13 @@ try {
       await field(page).fill("/plan");
       await field(page).press("Escape");
       await field(page).press("Enter");
-      await page.locator(".command-receipt-text", { hasText: "commands wait until this turn ends" }).waitFor({ timeout: 5_000 }).catch(async () => { throw new Error(`active command receipt missing; url=${page.url()}; value=${JSON.stringify(await field(page).inputValue())}; requests=${fake.requests.slice(-8).map((request) => request.method).join(",")}; body=${await page.locator("body").innerText()}; html=${(await page.locator("body").innerHTML()).slice(0, 5000)}`); });
+      await page.locator(".command-receipt-text", { hasText: "until this turn ends" }).waitFor({ timeout: 5_000 }).catch(async () => { throw new Error(`active command receipt missing; url=${page.url()}; value=${JSON.stringify(await field(page).inputValue())}; requests=${fake.requests.slice(-8).map((request) => request.method).join(",")}; body=${await page.locator("body").innerText()}; html=${(await page.locator("body").innerHTML()).slice(0, 5000)}`); });
+      const composerMessage = page.locator('[data-part="composer-message"]');
+      for (let attempt = 0; attempt < 80 && /^(steering|sending)$/.test(await composerMessage.innerText()); attempt++) await Bun.sleep(25);
+      const shown = { receipts: await page.locator(".command-receipt-text").allInnerTexts(), composer: await composerMessage.innerText() };
+      if (shown.receipts.length !== 1 || shown.composer.trim()) throw new Error(`one busy refusal showed two messages: ${JSON.stringify(shown)}`);
+      const busy = page.locator(".command-receipt");
+      if (!shown.receipts[0]!.startsWith("/plan waits until this turn ends; your draft is kept") || await busy.getAttribute("data-tone") !== "quiet") throw new Error(`busy refusal does not name the command as a quiet wait: ${JSON.stringify({ text: shown.receipts[0], tone: await busy.getAttribute("data-tone") })}`);
       if (requests("slash_run").length !== before.slash + 1 || requests("send").length !== before.send || requests("steer").length !== before.steer) throw new Error("active plan did not stop at slash_run");
       if (requests("session_settings").length !== settingsBefore) throw new Error("busy plan refreshed settings");
       if ((await field(page).inputValue()).trim() !== "/plan") throw new Error("active turn lost the slash draft");
