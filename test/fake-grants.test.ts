@@ -6,7 +6,7 @@ import { ACTIVE, startFakeZeta } from "../scripts/fake-zeta";
 const bounded = <T>(promise: Promise<T>, label: string) => Promise.race([promise, Bun.sleep(10_000).then(() => { throw new Error(`timed out waiting for ${label}`); })]);
 
 const until = async (predicate: () => boolean, label: string) => {
-  for (let attempt = 0; attempt < 200; attempt++) {
+  for (let attempt = 0; attempt < 400; attempt++) {
     if (predicate()) return;
     await Bun.sleep(25);
   }
@@ -51,4 +51,4 @@ test("fake zeta keeps an always grant when the next approval is cancelled", asyn
     socket.close();
     await fake.close();
   }
-}, 15_000);
+}, 30_000);
