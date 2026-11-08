@@ -38,10 +38,7 @@ def make_server() -> tuple[ZetaServer, Path, str]:
     manager = SessionManager(home)
     pending = manager.create(provider="codex", model="offline", cwd=cwd, name="pending proof")
     call = ToolCall("pending-proof-call", "read", {"path": str(cwd / "pending-proof")})
-    pending.store.append_message_with_approval_requests(
-        Message(MessageRole.ASSISTANT, [ToolUseContent(call)]),
-        [(call.id, call)],
-    )
+    pending.store.append_message(Message(MessageRole.ASSISTANT, [ToolUseContent(call)]))
     pending.store.close()
     plan_turns = (
         [

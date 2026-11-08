@@ -86,6 +86,9 @@ try {
   const seed = createClient(transport);
   await seed.hello(["model_input_ids", "delivery_id"], "controller");
   const created = await seed.request("new_session", {}) as { session: { session_id: string } };
+  await seed.request("resume", { session_id: discovery.pending_session });
+  const pendingStatus = await seed.request("status", {}) as { state?: unknown; pending_approvals?: unknown };
+  if (pendingStatus.state !== "idle" || !Array.isArray(pendingStatus.pending_approvals) || pendingStatus.pending_approvals.length !== 0) throw new Error(`seeded pending-tool session is not idle without approvals: ${JSON.stringify(pendingStatus)}`);
   transport.close();
   await Bun.sleep(250);
 
@@ -196,16 +199,34 @@ try {
     await page.getByPlaceholder("message zeta").waitFor({ timeout: 20_000 });
     await navigateRun(discovery.pending_session);
     await page.getByText("pending proof", { exact: true }).waitFor({ timeout: 20_000 });
+    const pendingImage = join(temp, "pending-proof.png");
+    await writeFile(pendingImage, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
+    await page.locator('input[type="file"]').setInputFiles(pendingImage);
+    await page.locator('[data-part="attachment"]').waitFor({ timeout: 5_000 });
     const pendingBefore = frames.length;
-    await submit("/plan");
+    await field.fill("/plan");
+    await field.press("Escape");
+    await page.getByRole("button", { name: "send message", exact: true }).click();
+    const pendingReceipt = page.locator(".command-receipt-text");
+    const expectedPendingReceipt = "commands wait for pending work to finish: tools, approvals, or background agents\nattachments are still attached and were not sent.";
     try {
-      await page.getByText("commands wait for pending work to finish: tools, approvals, or background agents", { exact: true }).waitFor({ timeout: 10_000 });
+      await pendingReceipt.waitFor({ timeout: 10_000 });
     } catch (error) {
       throw new Error(`pending command refusal missing; value=${JSON.stringify(await field.inputValue())}; body=${JSON.stringify((await page.locator("body").innerText()).slice(0, 2000))}; frames=${frames.slice(pendingBefore).join("\n").slice(-3000)}; cause=${String(error)}`);
     }
+    if ((await pendingReceipt.innerText()).trim() !== expectedPendingReceipt) throw new Error(`pending-work refusal used the wrong exact wording: ${JSON.stringify(await pendingReceipt.innerText())}`);
     if ((await field.inputValue()).trim() !== "/plan") throw new Error("real pending-work refusal lost the plan draft");
+    if (await page.locator('[data-part="attachment"]').count() !== 1) throw new Error("real pending-work refusal lost its attachment");
+    if (await page.getByRole("button", { name: "jump to approval", exact: true }).count()) throw new Error("idle pending-work refusal exposed jump to approval");
+    if ((await pendingReceipt.innerText()).includes("this turn ends")) throw new Error("idle pending-work refusal used active-turn wording");
+    if (await page.locator(".plan-chip").count()) throw new Error("refused pending-work /plan changed plan mode");
     const pendingFrames = frames.slice(pendingBefore).map((frame) => { try { return JSON.parse(frame); } catch { return null; } });
-    if (!pendingFrames.some((frame) => frame?.method === "slash_run") || pendingFrames.some((frame) => frame?.method === "session_settings")) throw new Error(`pending-work plan used the wrong route: ${JSON.stringify(pendingFrames)}`);
+    const slashIndex = pendingFrames.findIndex((frame) => frame?.method === "slash_run");
+    const routeFrames = slashIndex < 0 ? [] : pendingFrames.slice(slashIndex);
+    const pendingMethods = routeFrames.filter((frame) => frame?.method).map((frame) => frame.method);
+    const slashFrame = routeFrames.find((frame) => frame?.method === "slash_run");
+    const refusalFrame = routeFrames.find((frame) => frame?.id === slashFrame?.id && frame?.error);
+    if (pendingMethods.filter((method) => method === "slash_run").length !== 1 || slashFrame?.params?.session_id !== discovery.pending_session || slashFrame?.params?.text !== "/plan" || refusalFrame?.error?.code !== -32004 || refusalFrame?.error?.message !== "finish pending tools and background agents first" || pendingMethods.some((method) => method === "session_settings" || method === "send" || method === "steer")) throw new Error(`pending-work plan used the wrong route: ${JSON.stringify(routeFrames)}`);
   }
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
   console.log(`real zeta gate passed: ${ref}; private home ${zetaHome}; model_input_ids, slash_list, /status, opaque send, hidden-text, approval always_tool${planProof ? ", plan idle/active/pending" : ""}`);

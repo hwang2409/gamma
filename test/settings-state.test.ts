@@ -77,7 +77,7 @@ test("an approval-only write reads and preserves zeta's default model", async ()
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   const client = { features: [], request: async (method: string, params: Record<string, unknown>) => {
     calls.push({ method, params });
-    return method === "session_settings" ? { model: "server-default", approval_mode: "ask" } : {};
+    return method === "session_settings" ? { model: "server-default", approval_mode: "ask", plan_mode: true } : {};
   } } as any;
   const store = createRunStateStore(8, undefined, undefined, { id: "entry" as EntryId, run: session });
   store.activate(session);
