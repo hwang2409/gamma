@@ -64,8 +64,9 @@ try {
     await page.getByRole("button", { name: "clear all" }).waitFor();
     const clearStart = fake.requests.length;
     await page.getByRole("button", { name: "clear all" }).click();
-    await page.getByRole("button", { name: "confirm clear" }).waitFor();
+    await page.waitForTimeout(100);
     if (fake.requests.slice(clearStart).some((request) => request.method === "revoke_session_grants")) throw new Error("first clear-all click sent a request");
+    await page.getByRole("button", { name: "confirm clear" }).waitFor();
     await page.getByRole("button", { name: "confirm clear" }).click();
     const clearCalls = fake.requests.slice(clearStart).filter((request) => request.method === "revoke_session_grants");
     if (clearCalls.length !== 1 || JSON.stringify(clearCalls[0]!.params) !== JSON.stringify({ clear: true })) throw new Error(`confirmed clear used wrong params: ${JSON.stringify(clearCalls)}`);
@@ -120,6 +121,7 @@ try {
     await page.getByRole("button", { name: /^permissions/ }).waitFor({ state: "detached", timeout: 15_000 });
     for (let attempt = 0; attempt < 150 && fake.requests.filter((request) => request.method === "hello").length <= helloCount; attempt++) await Bun.sleep(100);
     await page.getByPlaceholder("message zeta").waitFor({ timeout: 15_000 });
+    if (await page.getByRole("button", { name: /^permissions/ }).count()) throw new Error("permissions control remained visible without the negotiated session_grants feature");
     await field.fill("/permissions");
     await field.press("Enter");
     if ((await field.inputValue()).trim()) await field.press("Enter");
