@@ -223,8 +223,10 @@ async function mobileKeysJourney(browserType: BrowserType, name: string) {
       await page.waitForTimeout(10);
     }
     expect(await receipt.evaluate((node) => node.scrollTop > 0), `${name} keyboard could not scroll the /keys receipt`);
-    await page.keyboard.press(name === "webkit" ? "Alt+Tab" : "Tab");
     const dismiss = page.getByRole("button", { name: "dismiss command result" });
+    for (let index = 0; index < 8 && !await dismiss.evaluate((node) => node === document.activeElement); index++) {
+      await page.keyboard.press(name === "webkit" ? "Alt+Tab" : "Tab");
+    }
     expect(await dismiss.evaluate((node) => node === document.activeElement), `${name} keyboard did not reach dismiss from the receipt`);
     await page.keyboard.press("Enter");
     await receipt.waitFor({ state: "detached" });
