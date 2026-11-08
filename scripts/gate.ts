@@ -659,6 +659,7 @@ try {
   vite.kill("SIGTERM");
   await fake.close();
 }
+await import("./keys-gate");
 for (const [theme, tokens] of tokenReport) console.log(`syntax tokens under 4.5:1 in ${theme}: ${[...tokens].join(", ")}`);
 console.log(failures.length ? `\n${failures.length} failure(s)` : "\nweb gate passed");
 console.log(`screenshots: ${shots}`);

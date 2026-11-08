@@ -4,7 +4,7 @@ import { hasPendingDelivery, type RunStateStore } from "./run-state";
 import { escape, normalKey, startVim, type Draft, type Step, type Vim } from "./vim";
 import { CompletionModel, type CompletionSnapshot } from "./completions";
 import type { CommandController, ComposerAction } from "./commands";
-import { composerHint } from "./keys";
+import { browserUsesControlRForReload, composerHint } from "./keys";
 
 // gamma's composer. It keeps @fulcrum/react's composer parts (data-part names, so the shipped styles apply) and adds what
 // that component has no seam for yet: attachments, vim keys, and footer controls. Fulcrum follow-up: give Composer slots
@@ -26,7 +26,7 @@ function composerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>, options: { s
   if (!options.vimOn) return;
   if (key === "Escape") { event.preventDefault(); return options.apply(escape(options.vim, options.draft())); }
   if (options.vim.mode === "insert") return;
-  if (event.ctrlKey && !event.metaKey && key.toLowerCase() === "r") { event.preventDefault(); return options.apply(normalKey(options.vim, options.draft(), "ctrl+r")); }
+  if (event.ctrlKey && !event.metaKey && key.toLowerCase() === "r" && !browserUsesControlRForReload(navigator.platform)) { event.preventDefault(); return options.apply(normalKey(options.vim, options.draft(), "ctrl+r")); }
   if (!plain) return;
   const mapped = key === "Backspace" ? "h" : key === "Delete" ? "x" : key;
   if (mapped.length === 1) { event.preventDefault(); options.apply(normalKey(options.vim, options.draft(), mapped)); }
