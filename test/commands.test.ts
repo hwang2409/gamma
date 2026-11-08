@@ -158,6 +158,16 @@ test("autocomplete filters and ranks slash and skill rows and exposes source bad
   expect(frames).toEqual([{ method: "slash_list", params: { session_id: "session-1" } }]);
 });
 
+test("an active turn hides slash rows it always refuses but keeps builtins and inline skills", async () => {
+  let active = true;
+  const { controller } = fake({ slash_list: slashList }, { ...modern, turnActive: () => active });
+  expect(await controller.completions("/r")).toEqual([]);
+  expect((await controller.completions("/")).map((row) => row.name)).toEqual(["status"]);
+  expect((await controller.completions("say $re")).map((row) => row.name)).toEqual(["release", "review"]);
+  active = false;
+  expect((await controller.completions("/r")).map((row) => row.name)).toEqual(["release", "review"]);
+});
+
 test("slash autocomplete hides unavailable commands", async () => {
   // zeta PR #835 head 886f5720 (unmerged): complete catalogs include unavailable TUI-only rows.
   const { controller } = fake({ slash_list: {

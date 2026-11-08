@@ -53,6 +53,8 @@ function hint({ vim, mode, steer, images }: { vim: boolean; mode: Vim["mode"]; s
 }
 
 function Suggestions({ id, snapshot, onAccept }: { id: string; snapshot: CompletionSnapshot; onAccept(index: number): void }) {
+  // aria-activedescendant moves no focus, so the list scrolls the active row into view itself.
+  useLayoutEffect(() => { if (snapshot.open) document.getElementById(`${id}-${snapshot.activeIndex}`)?.scrollIntoView({ block: "nearest" }); }, [id, snapshot]);
   if (!snapshot.open) return null;
   return <div id={id} className="command-listbox" role="listbox" aria-label="command suggestions">{snapshot.rows.map((row, index) => <button
     type="button"

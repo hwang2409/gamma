@@ -435,12 +435,14 @@ function Dock({ state, view, connection, runs, vim, setVim, theme, setTheme, onN
   }, [grants]);
   const requests = client ? commandRequests(client) : new Set<string>();
   const commands = useMemo(() => client && sessionId
-    ? createCommandController(sessionId, (method, params) => client.request(method, params), { features: new Set(client.features), requests: commandRequests(client) })
-    : createUnavailableCommandController(client ? "commands need an open run; send a message first or open a run" : undefined, Boolean(client && !sessionId)), [client, sessionId]);
+    ? createCommandController(sessionId, (method, params) => client.request(method, params), { features: new Set(client.features), requests: commandRequests(client), turnActive: () => activeRun(runState.getCatalog()) === sessionId })
+    : createUnavailableCommandController(client ? "commands need an open run; send a message first or open a run" : undefined, Boolean(client && !sessionId)), [client, runState, sessionId]);
   const approvalDisabledReason = !client ? "reconnecting — decisions are disabled until the server confirms this run" : open?.stale ? "reconnecting — decisions are disabled until the server confirms this run" : present.openError ? "opening the run — decisions are paused" : undefined;
 
   const onSubmit: Submit = useCallback(async (action, images, { steer, deliveryId, sourceText }) => {
-    const setReceipt = (text: string, tone: "quiet" | "error", extra: Pick<import("./receipts").CommandReceipt, "action"> = {}) => receipts.set(runState.canonical(runId), { text: images.length ? `${text}\nattachments are still attached and were not sent.` : text, tone, ...extra });
+    // Without an open run nothing was attempted, so the attachments wait for the message that opens one.
+    const kept = sessionId ? "attachments are still attached and were not sent." : "attachments stay queued and send with your next message.";
+    const setReceipt = (text: string, tone: "quiet" | "error", extra: Pick<import("./receipts").CommandReceipt, "action"> = {}) => receipts.set(runState.canonical(runId), { text: images.length ? `${text}\n${kept}` : text, tone, ...extra });
     const consume = () => runState.consumeDraft(runId, sourceText);
     const syncResult = async (command: string, text: string) => {
       if (sessionId && (command === "model" || command === "plan" || command === "implement")) await deliveries.loadSettings(sessionId).catch(() => {});
@@ -476,7 +478,8 @@ function Dock({ state, view, connection, runs, vim, setVim, theme, setTheme, onN
         const result = await clientActions[action.name](action.args);
         if (result) setReceipt(result.text, result.tone);
         if (!result?.retain) consume();
-        if (action.name !== "new_session" && action.name !== "paste" && action.name !== "permissions") requestAnimationFrame(focusComposer);
+        // Refocus only if the action lost focus: a reader who already tabbed into the receipt keeps their place.
+        if (action.name !== "new_session" && action.name !== "paste" && action.name !== "permissions") requestAnimationFrame(() => { if (!document.activeElement || document.activeElement === document.body) focusComposer(); });
       } catch (error) { setReceipt(error instanceof Error ? error.message : String(error), "error"); }
       return;
     }

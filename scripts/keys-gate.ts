@@ -227,6 +227,9 @@ async function mobileKeysJourney(browserType: BrowserType, name: string) {
     await submit(page, "/keys");
     const receipt = page.locator(".command-receipt-text", { hasText: "browser precedence and terminal-only exclusions" });
     await receipt.waitFor();
+    // Chromium focuses scroll areas without tabindex, so these two lines are what keep CI guarding Safari's keyboard path.
+    expect(await receipt.getAttribute("tabindex") === "0", `${name} /keys receipt is not in the tab order`);
+    expect(await page.getByRole("status", { name: "command result", exact: true }).count() === 1, `${name} /keys receipt has no "command result" status name`);
     const bounds = await receipt.evaluate((node) => ({ clientHeight: node.clientHeight, scrollHeight: node.scrollHeight }));
     expect(bounds.scrollHeight > bounds.clientHeight, `${name} /keys receipt is not bounded at 390px`);
     for (let index = 0; index < 20 && !await receipt.evaluate((node) => node === document.activeElement); index++) await page.keyboard.press("Shift+Tab");
@@ -250,6 +253,37 @@ async function mobileKeysJourney(browserType: BrowserType, name: string) {
   } finally { await browser.close(); }
 }
 
+/** A slow machine delays frame callbacks; a refocus queued by /keys must not pull a reader back out of the receipt. */
+async function lateFrameKeepsReceiptFocus(browserType: BrowserType, name: string) {
+  const browser = await browserType.launch({ headless: true });
+  try {
+    const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+    await page.addInitScript(() => {
+      const state = window as unknown as { late?: boolean; lateFrames: { queued: number; ran: number } };
+      state.lateFrames = { queued: 0, ran: 0 };
+      const frame = window.requestAnimationFrame.bind(window);
+      window.requestAnimationFrame = (callback) => {
+        if (!state.late) return frame(callback);
+        state.lateFrames.queued++;
+        setTimeout(() => frame((time) => { state.lateFrames.ran++; callback(time); }), 150);
+        return 0;
+      };
+    });
+    await page.goto(`${origin}/?run=${ACTIVE}`);
+    await field(page).waitFor({ timeout: 15_000 });
+    await page.evaluate(() => { (window as unknown as { late: boolean }).late = true; });
+    await submit(page, "/keys");
+    const receipt = page.locator(".command-receipt-text", { hasText: "browser precedence and terminal-only exclusions" });
+    await receipt.waitFor({ timeout: 5_000 });
+    await receipt.focus();
+    const queued = await page.evaluate(() => (window as unknown as { lateFrames: { queued: number } }).lateFrames.queued);
+    expect(queued > 0, `${name} /keys queued no frame callback to wait for`);
+    await page.waitForFunction((count) => (window as unknown as { lateFrames: { ran: number } }).lateFrames.ran >= count, queued, { timeout: 5_000 });
+    expect(await receipt.evaluate((node) => node === document.activeElement), `${name} a late frame pulled focus out of the /keys receipt`);
+    console.log(`ok   ${name} late frame keeps focus in the /keys receipt`);
+  } finally { await browser.close(); }
+}
+
 try {
   for (let attempt = 0; attempt < 300; attempt++) {
     if (vite.exitCode !== null) throw new Error(`vite exited ${vite.exitCode}: ${logs.join("").slice(-3000)}`);
@@ -262,9 +296,11 @@ try {
   finally { await browser.close(); }
   await browserReloadConvention("chromium", chromium);
   await mobileKeysJourney(chromium, "chromium");
+  await lateFrameKeepsReceiptFocus(chromium, "chromium");
   if (process.platform === "darwin") {
     await browserReloadConvention("webkit", webkit);
     await mobileKeysJourney(webkit, "webkit");
+    await lateFrameKeepsReceiptFocus(webkit, "webkit");
   }
   if (errors.length) throw new Error(errors.join(" | "));
 } finally {

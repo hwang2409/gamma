@@ -48,7 +48,13 @@ export type CommandRequest = (
 export type CommandCapabilities = {
   features: ReadonlySet<string>;
   requests: ReadonlySet<string>;
+  /** True while this run's turn is active: the same test as the "waits until the turn ends" receipt. */
+  turnActive?(): boolean;
 };
+
+// Zeta ee6a82d6 server/slash_commands.py:516-536 and 586-606: skills and prompt macros become model input, which a
+// running turn always refuses. Builtins decide by their arguments on the server, so they stay offered.
+const REFUSED_WHILE_TURN_RUNS = new Set(["skill", "macro-prompt"]);
 
 const CLIENT_ACTIONS: Readonly<Record<string, ClientActionName>> = {
   new: "new_session",
@@ -115,8 +121,9 @@ export function createCommandController(
     if (!token || !capabilities.requests.has("slash_list")) return [];
     if (catalog === undefined) await refreshCatalog();
     const prefix = token.prefix.toLowerCase();
+    const busy = token.trigger === "/" && capabilities.turnActive?.() === true;
     return (catalog ?? [])
-      .filter((entry) => entry.unavailable === null && (token.trigger === "/" || entry.kind === "skill") && entry.name.toLowerCase().startsWith(prefix))
+      .filter((entry) => entry.unavailable === null && (token.trigger === "/" || entry.kind === "skill") && !(busy && REFUSED_WHILE_TURN_RUNS.has(entry.kind)) && entry.name.toLowerCase().startsWith(prefix))
       .sort((a, b) => Number(b.name.toLowerCase() === prefix) - Number(a.name.toLowerCase() === prefix) || a.name.localeCompare(b.name))
       .map((entry) => ({ trigger: token.trigger, name: entry.name, description: entry.description, sourceBadge: entry.source }));
   }
