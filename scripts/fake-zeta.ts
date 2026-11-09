@@ -157,7 +157,11 @@ const historySeed: Record<string, Json[]> = {
     },
     { id: "fidelity-delivered", role: "system", event: "delivery_status", delivery_id: "fidelity-delivered", method: "steer", status: "delivered", content: [text("retained delivered steer")] },
     { id: "fidelity-dropped", role: "system", event: "delivery_status", delivery_id: "fidelity-dropped", method: "steer", status: "dropped", content: [text("retained dropped steer")], reason: "turn_end" },
+    // Zeta fd1f893 src/zeta/server/handlers/history_projection.py:390-400 and event_contract.py:11-32:
+    // fidelity alone exposes the generic terminal row when no accepted steer text was retained.
     { id: "fidelity-generic-drop", role: "system", event: "delivery_status", delivery_id: "fidelity-generic-drop", method: "steer", status: "dropped", content: [text("steer dropped: turn_end")], reason: "turn_end" },
+    { id: "fidelity-generic-unknown", role: "system", event: "delivery_status", delivery_id: "fidelity-generic-unknown", method: "steer", status: "dropped", content: [text("steer dropped: private_future_token")], reason: "private_future_token" },
+    { id: "fidelity-generic-missing", role: "system", event: "delivery_status", delivery_id: "fidelity-generic-missing", method: "steer", status: "dropped", content: [text("steer dropped")] },
     ...([
       ["abort", "retained stopped steer"], ["clear", "retained removed steer"], ["disconnect", "retained lost-connection steer"],
       ["failed", "retained unsuccessful steer"], ["restart", "retained interrupted steer"], ["future_token", "retained future steer"],
@@ -873,6 +877,11 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     /** `true`: every turn except a "fail this turn" prompt runs until it is stopped. */
     setHoldTurns(value: boolean) { composer.setHoldTurns(value); },
     flushEchoes() { composer.flushEchoes(); },
+    // Zeta fd1f893 src/zeta/server/control.py:392-417 publishes a later accepted user_message with the same delivery_id.
+    echoFidelityDrop() {
+      const event = { event: "user_message", session_id: FIDELITY, text: "recovered omitted steer", mode: "steer", delivery_id: "fidelity-generic-drop" };
+      for (const socket of sockets) socket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: event }));
+    },
     get aborts() { return composer.aborts; },
     /** Closes every socket, like a network blip; the server keeps running. */
     drop() { composer.persistWithheldHistory(); for (const socket of sockets) socket.close(1012, "restart"); },

@@ -76,5 +76,5 @@ test("fake history projects legacy and fidelity rows per negotiated socket", asy
     structured_content_truncated: false,
     content_blocks: [{ type: "image", mimeType: "image/png", caption: "fidelity preview", width: 640, height: 360, size: 1234, data_omitted: true }],
   });
-  expect(fidelity.filter((row) => row.event === "delivery_status")).toHaveLength(9);
+  expect(fidelity.filter((row) => row.event === "delivery_status")).toHaveLength(11);
 });

@@ -63,9 +63,9 @@ function UserRow({ id }: { id: string }) {
   const waiting = state === "requesting" || state === "queued";
   const label = state === "requesting" && pending?.resent ? "resending" : state;
   const renderDeliveryNote = useCallback((item: UserMessageItem) => {
-    if (item.event.delivery_status !== "dropped" && !lost) return null;
+    if (item.event.delivery_status !== "dropped" && !lost && !item.event.text_omitted) return null;
     const reason = item.event.delivery_reason ?? pending?.why ?? "dropped";
-    return <>{UNDELIVERED[reason] ?? UNDELIVERED.dropped}{pending?.failure ? <span className="resend-failure">{pending.failure}</span> : null} {lost && resend && identity ? <button type="button" className="ghost" onClick={() => resend(identity)}>resend</button> : null}</>;
+    return <>{UNDELIVERED[reason] ?? UNDELIVERED.dropped}{item.event.text_omitted ? " · text not kept" : null}{pending?.failure ? <span className="resend-failure">{pending.failure}</span> : null} {lost && !item.event.text_omitted && resend && identity ? <button type="button" className="ghost" onClick={() => resend(identity)}>resend</button> : null}</>;
   }, [identity, lost, pending?.failure, pending?.why, resend]);
   return (
     <>

@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chromium, type Locator, type Page } from "playwright";
+import { chromium, webkit, type Locator, type Page } from "playwright";
 import { ACTIVE, startFakeZeta } from "./fake-zeta";
 
 const FIDELITY = "s-fidelity";
@@ -31,6 +31,7 @@ async function fidelityValues(page: Page) {
   await waitFor(shell.locator('[data-stream="stderr"]', { hasText: "failed" }), 10_000, "fidelity stderr output");
   const image = shell.locator('[data-part="image"]', { hasText: "fidelity preview" });
   await waitFor(image, 10_000, "fidelity image metadata");
+  await waitFor(shell.locator('[data-part="image-placeholder"]', { hasText: "image not kept in history" }), 10_000, "omitted image history placeholder");
   const text = (await shell.innerText()).replace(/\s+/g, " ").trim();
   if (!text.includes("exit 2") || !text.includes("/tmp")) throw new Error(`fidelity shell lost exit code or cwd: ${JSON.stringify(text)}`);
   if (!text.includes("1.2 kB")) throw new Error(`fidelity image lost its size: ${JSON.stringify(text)}`);
@@ -181,17 +182,68 @@ async function checkSlotLayout(page: Page, fake: Fake, origin: string) {
   if (!await row.locator('[data-part="delivery-note"]').isVisible()) throw new Error("delivery note disappeared in forced colors at 200% zoom");
 }
 
+const omittedRow = (page: Page, deliveryId: string) => page.locator(`[data-part="item"][data-kind="user"][data-id="user:delivery:${deliveryId}"]`);
+const omittedReason = (words: string) => `${words} · text not kept`;
+
+async function checkGenericTerminal(page: Page, origin: string) {
+  await openFidelityHistory(page, origin);
+  const row = omittedRow(page, "fidelity-generic-drop");
+  await waitFor(row, 10_000, "generic terminal user row");
+  if (await row.count() !== 1) throw new Error(`generic terminal created ${await row.count()} user rows`);
+  if (await page.locator('[data-part="notification"]', { hasText: "steer dropped" }).count()) throw new Error("generic terminal created a notification row");
+  const note = (await row.locator('[data-part="delivery-note"]').innerText()).replace(/\s+/g, " ").trim();
+  if (note !== omittedReason(reasonWords.turn_end)) throw new Error(`generic terminal note was ${JSON.stringify(note)}`);
+}
+
+async function checkTextlessRendering(page: Page, origin: string) {
+  await openFidelityHistory(page, origin);
+  const row = omittedRow(page, "fidelity-generic-drop");
+  await waitFor(row, 10_000, "text-less custom user row");
+  if (!await row.isVisible()) throw new Error("text-less row did not reach gamma's user renderer");
+  if (await row.locator('[data-part="message-content"], [data-part="message-prompt"]').count()) throw new Error("text-less row rendered an empty message bubble");
+  if (await row.getByRole("button", { name: "resend" }).count()) throw new Error("text-less history row offered resend");
+  const rendered = (await row.innerText()).replace(/\s+/g, " ").trim();
+  if (rendered !== omittedReason(reasonWords.turn_end)) throw new Error(`text-less row rendered ${JSON.stringify(rendered)}`);
+  if (/steer dropped|turn_end/.test(rendered)) throw new Error(`text-less row leaked wire text: ${JSON.stringify(rendered)}`);
+}
+
+async function checkLaterEcho(page: Page, fake: Fake, origin: string) {
+  await openFidelityHistory(page, origin);
+  const row = omittedRow(page, "fidelity-generic-drop");
+  await waitFor(row, 10_000, "text-less row before later echo");
+  const before = (await row.locator('[data-part="delivery-note"]').innerText()).replace(/\s+/g, " ").trim();
+  if (before !== omittedReason(reasonWords.turn_end)) throw new Error(`pre-echo note was ${JSON.stringify(before)}`);
+  fake.echoFidelityDrop();
+  await waitFor(row.locator('[data-part="message-content"]', { hasText: "recovered omitted steer" }), 10_000, "later echo text in existing row");
+  if (await page.locator('[data-id="user:delivery:fidelity-generic-drop"]').count() !== 1) throw new Error("later echo duplicated the dropped row");
+  if (await row.getAttribute("data-text-omitted") !== null) throw new Error("later echo left the row marked text-omitted");
+  const note = (await row.locator('[data-part="delivery-note"]').innerText()).replace(/\s+/g, " ").trim();
+  if (note !== reasonWords.turn_end) throw new Error(`later echo note was ${JSON.stringify(note)}`);
+}
+
+async function checkOmittedPrivacy(page: Page, origin: string) {
+  await openFidelityHistory(page, origin);
+  for (const deliveryId of ["fidelity-generic-unknown", "fidelity-generic-missing"]) {
+    const row = omittedRow(page, deliveryId);
+    await waitFor(row, 10_000, `${deliveryId} text-less row`);
+    const rendered = (await row.innerText()).replace(/\s+/g, " ").trim();
+    const expected = omittedReason("not delivered · zeta did not take this message");
+    if (rendered !== expected) throw new Error(`${deliveryId} rendered ${JSON.stringify(rendered)}`);
+    if (/private_future_token|steer dropped|delivery_status/.test(rendered)) throw new Error(`${deliveryId} leaked wire text: ${JSON.stringify(rendered)}`);
+  }
+}
+
 async function checkTurnEndResend(page: Page, fake: Fake, origin: string) {
   fake.clearSent();
   await page.goto(`${origin}/?theme=tokyo-night&run=${ACTIVE}`);
   await ready(page);
   const field = page.locator('.dock textarea[aria-label^="message"]');
   await field.fill("start the fidelity resend turn");
-  await field.press("Enter");
+  await page.getByRole("button", { name: "send message" }).click();
   await until(() => fake.sent.some((item) => item.text === "start the fidelity resend turn"), 10_000, "first send");
   await waitFor(page.getByPlaceholder("steer the running turn"), 10_000, "steer composer ready");
   await field.fill("automatic fidelity steer");
-  await field.press("Enter");
+  await page.getByRole("button", { name: "steer the running turn" }).click();
   await until(() => fake.sent.filter((item) => item.text === "automatic fidelity steer").length === 2, 20_000, "one automatic resend");
   await Bun.sleep(1_000);
   const attempts = fake.sent.filter((item) => item.text === "automatic fidelity steer");
@@ -215,7 +267,8 @@ if (import.meta.main) {
   let browser;
   try {
     await until(() => fetch(origin).then((response) => response.ok, () => false), 60_000, "vite start");
-    browser = await chromium.launch();
+    const engine = process.env.FIDELITY_GATE_BROWSER === "webkit" ? webkit : chromium;
+    browser = await engine.launch();
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     const cases = {
       data: () => checkFidelityData(page, origin),
@@ -226,6 +279,10 @@ if (import.meta.main) {
       "slot-reasons": () => checkReasonTable(page, origin),
       "slot-resend": () => checkResendSafety(page, fake, origin),
       "slot-layout": () => checkSlotLayout(page, fake, origin),
+      "omitted-generic": () => checkGenericTerminal(page, origin),
+      "omitted-render": () => checkTextlessRendering(page, origin),
+      "omitted-echo": () => checkLaterEcho(page, fake, origin),
+      "omitted-privacy": () => checkOmittedPrivacy(page, origin),
       auto: () => checkTurnEndResend(page, fake, origin),
     } as const;
     const selected = process.env.FIDELITY_GATE_CASE as keyof typeof cases | undefined;
