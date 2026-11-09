@@ -162,7 +162,7 @@ export async function openSession(
   };
   const waitUntilIdle = async (status?: ServerStatus): Promise<ServerStatus> => {
     const shouldWait = status !== undefined || initialStatus.state !== "idle";
-    status ??= await getStatus(client, activeSignal);
+    status ??= initialStatus.state === "idle" ? await getStatus(client, activeSignal) : initialStatus;
     let pending = JSON.stringify(status.pending_approvals ?? []);
     while (shouldWait && status.state !== "idle") {
       await wait(500, activeSignal);
