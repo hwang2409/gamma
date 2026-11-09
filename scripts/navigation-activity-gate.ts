@@ -62,7 +62,7 @@ async function queuedSteerSequence(browser: Awaited<ReturnType<typeof chromium.l
     await field.fill(`queued steer ${stopped ? "stop" : "natural"}`); await page.getByRole("button", { name: "steer the running turn" }).click();
     if (stopped) {
       await page.getByRole("button", { name: "stop the running turn" }).click();
-      await page.getByText(/not delivered/i).waitFor({ timeout: 15_000 });
+      await page.locator('.undelivered[role="note"]').waitFor({ timeout: 15_000 }); // gamma's note with the resend; the message itself may also say "not delivered"
       await page.getByRole("button", { name: "resend" }).click();
     } else {
       // The automatic resend belongs to the view that sent the steer; leaving it in-app hands the steer to the user.
@@ -71,7 +71,7 @@ async function queuedSteerSequence(browser: Awaited<ReturnType<typeof chromium.l
       await page.getByText(/new run waits for the running run/i).waitFor();
       await page.getByText(/new run waits for the running run/i).waitFor({ state: "detached", timeout: 30_000 });
       await page.goBack(); await page.waitForURL(owner);
-      await page.getByText(/not delivered/i).waitFor({ timeout: 15_000 });
+      await page.locator('.undelivered[role="note"]').waitFor({ timeout: 15_000 }); // gamma's note with the resend; the message itself may also say "not delivered"
       if (fake.sent.some((sent) => sent.method === "send" && sent.text === "queued steer natural")) throw new Error("the steer was resent without the user after its view was left");
       await page.getByRole("button", { name: "resend" }).click();
     }
