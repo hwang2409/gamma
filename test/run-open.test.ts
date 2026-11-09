@@ -32,6 +32,15 @@ const tabStorage = () => { const items = new Map<string, string>(); return { ite
 /** Waits for a state without failing, so the row's next assertion names what did not happen. */
 const until = async (check: () => boolean, timeout = 2_000) => { for (const end = Date.now() + timeout; !check() && Date.now() < end;) await new Promise((resolve) => setTimeout(resolve, 5)); };
 
+/**
+ * zeta 1bf97c3c protocol.py:560-583 (delivery_session_guard): a send or steer whose session_id is not the attached
+ * session is refused with data.code session_mismatch before the delivery_id lookup; nothing is recorded or started.
+ */
+const guard = (zeta: Zeta, params: Record<string, unknown>) => {
+  const session = params.session_id;
+  if (typeof session === "string" && zeta.attached && session !== zeta.attached) throw { code: -32003, message: "session is not active", data: { code: "session_mismatch", attached_session_id: zeta.attached, session_id: session } };
+};
+
 function zetaHandlers(zeta: Zeta, extra: Record<string, Handler> = {}): Record<string, Handler> {
   return {
     // zeta docs/serve-protocol.md `status`: the attached session, or null.
@@ -48,6 +57,7 @@ function zetaHandlers(zeta: Zeta, extra: Record<string, Handler> = {}): Record<s
     // returns {accepted, session_id}. delivery.py:383-408 + docs/serve-protocol.md:509-520: a retained id on the same
     // session returns the original result with duplicate:true and starts no turn; the lookup runs before turn checks.
     send: (params) => {
+      guard(zeta, params);
       const session = zeta.attached;
       if (!session) throw { code: -32003, message: "no active session" };
       const id = params.delivery_id as string | undefined;
@@ -65,6 +75,7 @@ function zetaHandlers(zeta: Zeta, extra: Record<string, Handler> = {}): Record<s
     // delivery.py:48-90 + docs/serve-protocol.md:509-520: a steer needs a running turn (-32005 otherwise), is queued
     // ({accepted: true}, no turn), and a retained id answers its first result with duplicate:true.
     steer: (params) => {
+      guard(zeta, params);
       const session = zeta.attached;
       if (!session) throw { code: -32003, message: "no active session" };
       const id = params.delivery_id as string;
@@ -87,9 +98,9 @@ function zetaHandlers(zeta: Zeta, extra: Record<string, Handler> = {}): Record<s
   };
 }
 
-const FEATURES = ["delivery_id"];
+const FEATURES = ["delivery_id", "delivery_session_guard"];
 /** zeta publishes the live dropped-steer delivery_status event (with its reason) only to a controller with this feature. */
-const FIDELITY = ["delivery_id", "session_history_fidelity"];
+const FIDELITY = [...FEATURES, "session_history_fidelity"];
 
 async function world(options: { attached?: string | null; selected?: string; handlers?: (zeta: Zeta) => Record<string, Handler>; offline?: boolean; zeta?: Zeta; tab?: ReturnType<typeof tabStorage>; features?: string[] } = {}) {
   const zeta: Zeta = options.zeta ?? { attached: options.attached ?? null, created: 0, turns: [], accepted: new Map(), replies: [], evicted: new Set() };
@@ -1094,6 +1105,26 @@ const owner: Row[] = [
         expect(saved(tab)).toContain("newer draft");
         expect(saved(tab)).not.toContain("older draft");
       } finally { older.dispose(); newer.dispose(); }
+    },
+  },
+  {
+    name: "owner session guard: zeta attached b behind gamma's back; the send names a, zeta refuses it (session_mismatch), the draft goes back to a with its id and the note, 0 turns; after a reopens, Enter lands once in a",
+    async run() {
+      const h = await openA();
+      try {
+        h.zeta.attached = "b"; // another client attached b; gamma has not heard yet
+        h.type("only for a");
+        expect((await h.enter()).ok).toBe(false);
+        expect(h.zeta.turns).toEqual([]);
+        expect(h.text("a")).toBe("only for a");
+        const id = h.fake.calls.filter(([method]) => method === "send").map(([, params]) => params.delivery_id)[0] as string;
+        expect(h.fake.calls.filter(([method]) => method === "send")).toHaveLength(1);
+        expect(await noteOf(h.store.get("a"))).toContain("nothing was sent");
+        await h.manager.refreshStatus(); await h.live("a");
+        expect(await h.enter()).toEqual({ ok: true });
+        expect(h.sends().map((params) => params.delivery_id)).toEqual([id, id]);
+        expect(h.landed()).toEqual(["a"]);
+      } finally { h.dispose(); }
     },
   },
 ];

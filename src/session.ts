@@ -3,7 +3,7 @@ import type { RunEvent } from "@fulcrum/core";
 import type { hostBindings, Registration } from "./host-client";
 import type { QueuedImage } from "./image-queue";
 import { evictedResult, refusal } from "./delivery";
-import { decideSend } from "./delivery-owner";
+import { decideSend, MISMATCH, sessionMismatch } from "./delivery-owner";
 type HostBindings = typeof hostBindings;
 
 /** The `SessionMetadata` fields this app reads from `list_sessions` (zeta docs/serve-protocol.md). */
@@ -355,12 +355,13 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
   };
   const handleImages = async (effect: Extract<WorkspaceEffect, { type: "send-images" }>) => {
     const delivery = runs.get(effect.runId).deliveries.get(effect.intentId);
-    const blocked = decideSend(runs.getCatalog(), effect.runId, { kind: "attempt", intentId: effect.intentId }).blocked;
+    const { blocked, sessionId } = decideSend(runs.getCatalog(), effect.runId, { kind: "attempt", intentId: effect.intentId });
     if (!client || !delivery || blocked) { const error = new Error(client && delivery ? blocked : "session is not attached"); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false, failed: true }); finish(effect.operationId, undefined, error); return; }
     try {
-      await client.request("send_images", { session_id: effect.runId, text: delivery.text, images: delivery.images.map(({ name, mime_type, data }) => ({ name, mime_type, data })), delivery_id: effect.intentId }, { timeoutMs: 30_000 });
+      await client.request("send_images", { session_id: sessionId, text: delivery.text, images: delivery.images.map(({ name, mime_type, data }) => ({ name, mime_type, data })), delivery_id: effect.intentId }, { timeoutMs: 30_000 });
       runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false }); finish(effect.operationId, true);
     } catch (error) {
+      if (sessionMismatch(error)) { runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, failed: true, blocked: true, note: MISMATCH }); return finish(effect.operationId, undefined, new Error(MISMATCH)); }
       const evicted = evictedResult(error);
       if (evicted?.accepted) { runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false }); return finish(effect.operationId, true); }
       runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false, failed: true, refused: Boolean(evicted) });

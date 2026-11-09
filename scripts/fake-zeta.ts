@@ -294,6 +294,14 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
     const seen = delivery && active ? deliveries.get(`${active}\u0000${delivery}`) : undefined;
     const duplicate = (): Json => ({ result: statuses.get(delivery!) === "dropped" ? { accepted: false, duplicate: true, status: "dropped" } : { ...seen, duplicate: true } });
     const invalid = (checks: ParamChecks | undefined): Json | null => { const message = invalidParams(requested, checks, params, features); return message ? { error: { code: -32602, message } } : null; };
+    // zeta 1bf97c3c protocol.py:560-583 (_require_attached_session, before any handler, so before the delivery_id
+    // lookup): a session_id that is not the attached session is refused with data.code session_mismatch, and nothing is
+    // recorded, echoed, or started. zeta enforces it for every client; this fake enforces it only for a client that
+    // negotiated delivery_session_guard, and otherwise ignores session_id as an older zeta does (serve-protocol.md:505-510).
+    if (features.includes("delivery_session_guard") && "session_id" in params) {
+      if (typeof params.session_id !== "string" || !params.session_id) return { error: { code: -32602, message: "session_id must be a nonempty string" } };
+      if (active && params.session_id !== active) return { error: { code: -32003, message: "session is not active", data: { code: "session_mismatch", attached_session_id: active, session_id: params.session_id } } };
+    }
     if (!active) return { error: { code: -32003, message: "no active session" } };
     const late = invalid(rule.afterSession);
     if (late) return late;
@@ -563,7 +571,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           if (mode === "slow") await wait(helloDelay);
           if (!sockets.has(socket)) return;
           if (socket.data.role === "controller") controller = socket;
-          const features = protocolVersion === "1.0" ? [] : (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "send_images_delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || name === "served_turn_end" || name === "session_history_fidelity" || (name === "model_input_ids" && modelInputIds) || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings) || (name === "session_grants" && sessionGrants)) ?? [];
+          const features = protocolVersion === "1.0" ? [] : (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "send_images_delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || name === "served_turn_end" || name === "session_history_fidelity" || name === "delivery_session_guard" || (name === "model_input_ids" && modelInputIds) || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings) || (name === "session_grants" && sessionGrants)) ?? [];
           socket.data.features = features;
           const reconnect = features.includes("approval_reconnect");
           if (reconnect) reconnectControllers.add(socket as object);
@@ -673,7 +681,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           return;
         }
         // As in zeta (server/ergonomics.py `active`): these name the active session or fail.
-        if (SETTINGS_REQUESTS.includes(method) && method !== "model_catalog" && params.session_id !== active) return reply({ error: { code: -32003, message: "session is not active" } });
+        // send_images under delivery_session_guard answers with data.code in deliver(); before it, zeta sent no data (serve-protocol.md:508-510).
+        if (SETTINGS_REQUESTS.includes(method) && method !== "model_catalog" && params.session_id !== active && !(method === "send_images" && socket.data.features?.includes("delivery_session_guard"))) return reply({ error: { code: -32003, message: "session is not active" } });
         if (method === "slash_list") return reply({ result: { commands: params.include_unavailable === true ? completeSlashCatalog : defaultSlashCatalog, notices: [] } });
         const failure = failures.get(method)?.shift();
         if (failure) return reply({ error: { code: -32000, message: failure } });

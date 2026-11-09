@@ -154,3 +154,33 @@ test("the fake accepts an unknown param wherever real zeta does, and the feature
   });
   expect(rows.got).toEqual(rows.want);
 });
+
+// zeta 1bf97c3c protocol.py:560-583 and docs/serve-protocol.md:491-518 (delivery_session_guard): a delivery named for a
+// session that is not attached returns -32003 with data.code session_mismatch, before the delivery_id lookup, and zeta
+// records nothing (no row, no echo, no turn, no delivery_id record).
+test("delivery_session_guard: a mismatched send, steer, or send_images records nothing and starts no turn", async () => {
+  const mismatch = (frame: Frame) => (frame.error as { data?: unknown } | undefined)?.data;
+  const want = { code: "session_mismatch", attached_session_id: ACTIVE, session_id: "other" };
+  await withFake(["delivery_id", "send_images_delivery_id", "delivery_session_guard"], async (request, fake) => {
+    const send = await request("send", { text: "wrong run", session_id: "other", delivery_id: "web-g1" });
+    expect([code(send), mismatch(send)]).toEqual([-32003, want]);
+    expect(fake.sent).toEqual([]);
+    expect(fake.running).toBe(false);
+    // Nothing was recorded for web-g1: the same id in the attached session is a first delivery, not a duplicate.
+    fake.setHoldTurns(true);
+    const right = await request("send", { text: "right run", session_id: ACTIVE, delivery_id: "web-g1" });
+    expect(right.result).toMatchObject({ accepted: true });
+    expect(right.result).not.toHaveProperty("duplicate");
+    const steer = await request("steer", { text: "wrong steer", session_id: "other", delivery_id: "web-g2" });
+    expect([code(steer), mismatch(steer)]).toEqual([-32003, want]);
+    await request("abort", {});
+    const images = await request("send_images", { ...VALID.send_images, session_id: "other", delivery_id: "web-g3" });
+    expect([code(images), mismatch(images)]).toEqual([-32003, want]);
+    expect(fake.sent.map((item) => item.text)).toEqual(["right run"]);
+  });
+  // Without the feature the fake is an older zeta: session_id on send is ignored and the message lands in the attached session.
+  await withFake(["delivery_id"], async (request, fake) => {
+    expect(code(await request("send", { text: "old server", session_id: "other" }))).toBe("ok");
+    expect(fake.sent.map((item) => item.session)).toEqual([ACTIVE]);
+  });
+});

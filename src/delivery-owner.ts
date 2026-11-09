@@ -42,10 +42,13 @@ export type SendRequest =
   | { kind: "resend"; intentId: string }
   /** zeta dropped a queued steer; `reason` is the drop reason zeta gave for this delivery, if this view saw it. */
   | { kind: "auto"; intentId: string; reason?: string };
-/** `blocked` says why nothing is sent now; `id` is the delivery id the send uses. */
-export type SendDecision = { id: string; blocked?: string };
+/** `blocked` says why nothing is sent now; `id` is the delivery id the send uses; `sessionId` is the session it must land in. */
+export type SendDecision = { id: string; blocked?: string; sessionId?: SessionId };
 
 export const OTHER_SESSION = "this run is not open yet; your message is still in the draft";
+export const MISMATCH = "zeta had another run attached; nothing was sent, and your message is back in the draft";
+/** zeta refused a delivery for a session it does not have attached (delivery_session_guard): it recorded and delivered nothing. */
+export const sessionMismatch = (error: unknown) => (error as { data?: { code?: unknown } } | null)?.data?.code === "session_mismatch";
 const MANUAL = "only the user can send this again";
 const newId = () => `web-${crypto.randomUUID()}`;
 const newOperation = () => crypto.randomUUID() as OperationId;
@@ -64,7 +67,8 @@ export function decideSend(state: WorkspaceState, runId: RunId, request: SendReq
   if (!delivery) return { id: "", blocked: MANUAL };
   // zeta's `send` has no session_id yet, so it lands in whatever run zeta has attached: that must be this draft's run.
   if (!state.connected || state.attachment.kind !== "attached" || state.attachment.sessionId !== run) return { id: delivery.attemptId, blocked: OTHER_SESSION };
-  if (request.kind === "attempt") return { id: delivery.attemptId };
+  // Every attempt names the run's session, so zeta (delivery_session_guard) refuses it if another run got attached since.
+  if (request.kind === "attempt") return { id: delivery.attemptId, sessionId: run as SessionId };
   if (delivery.method === "opaque") return { id: delivery.attemptId, blocked: MANUAL };
   if (request.kind === "resend") return delivery.state === "dropped" ? { id: delivery.spent ? newId() : delivery.attemptId } : { id: delivery.attemptId, blocked: MANUAL };
   return delivery.method === "steer" && delivery.here && !delivery.resent && request.reason === "turn_end" ? { id: newId() } : { id: delivery.attemptId, blocked: MANUAL };
@@ -87,7 +91,7 @@ export const restoreText = (current: string, restored: string) => current.starts
 
 export type DeliveryEvent =
   | { type: "DELIVERY_BEGIN"; runId: RunId; delivery: PendingDelivery; operationId: OperationId }
-  | { type: "DELIVERY_ACK"; runId: RunId; intentId: string; operationId: OperationId; attemptId: string; queued?: boolean; failed?: boolean; /** zeta did no work for this id, so a retry needs a new one. */ refused?: boolean; /** Nothing left gamma: the draft's retry id stays as it was. */ blocked?: boolean }
+  | { type: "DELIVERY_ACK"; runId: RunId; intentId: string; operationId: OperationId; attemptId: string; queued?: boolean; failed?: boolean; /** zeta did no work for this id, so a retry needs a new one. */ refused?: boolean; /** zeta recorded nothing for this attempt (it never left gamma, or zeta refused its session): its id stays with the draft. */ blocked?: boolean; note?: string }
   /**
    * zeta's `delivery_status` answer for a delivery or for the draft's retry id. The reply has no drop reason
    * (zeta delivery.py:348-368); `reason` is the one zeta's live delivery_status event gave for this delivery, if this view saw it.
@@ -164,10 +168,11 @@ export function reduceDelivery(state: WorkspaceState, record: RunRecord, event: 
       return delivery && event.accepted ? { ...consumeDelivered(record, delivery), deliveries } : { ...record, deliveries };
     case "DELIVERY_ACK": {
       if (delivery?.operationId !== event.operationId) return record;
-      // A blocked attempt never reached zeta: the row or the draft goes back as it was, and an inherited retry id stays.
+      // zeta recorded nothing: the row or the draft (never consumed) stays in this run, with the attempt's id and a note; no retry.
       if (event.blocked) {
-        if (delivery.resent) deliveries.set(event.intentId, { ...delivery, state: "dropped", why: delivery.why ?? "dropped" }); else deliveries.delete(event.intentId);
-        return { ...record, deliveries };
+        if (delivery.resent) { deliveries.set(event.intentId, { ...delivery, state: "dropped", why: delivery.why ?? "dropped" }); return { ...record, deliveries, deliveryNote: event.note }; }
+        deliveries.delete(event.intentId);
+        return { ...record, deliveries, deliveryNote: event.note, retryDelivery: event.attemptId ? { id: event.attemptId, key: deliveryKey(delivery.text, delivery.images) } : record.retryDelivery };
       }
       if (!event.failed) {
         if (event.queued) deliveries.set(event.intentId, { ...delivery, attemptId: event.attemptId, state: "queued", spent: undefined, why: undefined }); else deliveries.delete(event.intentId);
