@@ -136,14 +136,14 @@ test("a rejected replay revision never publishes its stale snapshot", async () =
   }) as typeof fake.client.finishReplay;
   const originalResync = fake.client.store.resync.bind(fake.client.store);
   let stalePublishedAfterFirstPage = false;
-  let resyncs = 0;
+  let monitor = false;
   fake.client.store.resync = ((events: RunEvent[]) => {
-    resyncs++;
-    if (resyncs > 1 && !accepted) stalePublishedAfterFirstPage = true;
+    if (monitor && !accepted) stalePublishedAfterFirstPage = true;
     return originalResync(events);
   }) as typeof fake.client.store.resync;
 
   const opened = await within(openSession(fake.client, "s"), "stale-snapshot open");
+  monitor = true;
   await within(opened.complete, "stale-snapshot replay");
 
   expect(stalePublishedAfterFirstPage).toBe(false);
