@@ -142,7 +142,7 @@ function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: Del
     if (!delivery || delivery.operationId !== effect.operationId) return;
     const target = client();
     if (delivery.method === "opaque") return handleOpaqueDelivery(effect, delivery, target);
-    if (!target || !canDeliver(runs.getCatalog(), effect.runId)) { const error = target ? new Error(NOT_OPEN) : unavailable(); if (delivery.state !== "retrying") runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, failed: true }); return finish(effect.operationId, error); }
+    if (!target || !canDeliver(runs.getCatalog(), effect.runId)) { const error = target ? new Error(NOT_OPEN) : unavailable(); if (delivery.state !== "retrying") runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, failed: true, refused: true }); return finish(effect.operationId, error); } // nothing reached zeta
     const attemptId = delivery.state === "retrying" ? `web-${crypto.randomUUID()}` : delivery.attemptId;
     try {
       if (delivery.state === "retrying") await record(effect.runId).delivery.retry(target, delivery.text, delivery.id, attemptId);

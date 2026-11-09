@@ -32,7 +32,7 @@ try {
     await page.goto(`${origin}/?run=${LONG}`);
     const scroll = page.locator(".scroll");
     await page.locator('[data-part="timeline"] [data-kind="user"]').last().waitFor({ timeout: 20_000 });
-    await page.locator(".note", { hasText: "loading earlier messages" }).waitFor({ state: "detached", timeout: 20_000 });
+    await page.locator(".note", { hasText: "loading history…" }).waitFor({ state: "detached", timeout: 20_000 });
     await page.waitForFunction(() => {
       const element = document.querySelector<HTMLElement>(".scroll");
       return element && element.scrollHeight > element.clientHeight * 2;

@@ -221,7 +221,7 @@ export type OpenFailure = { id: string; message: string; busy: boolean };
 export type RunState = {
   selected: string | null;
   open: OpenRun | null;
-  opening: { id: string; messages: number } | null;
+  opening: { id: string; messages: number; loading: boolean } | null;
   openError: OpenFailure | null;
   session: SessionMeta | null;
   /** The attached run that owns zeta's active turn, independent from the selected URL. */

@@ -2,13 +2,14 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { chromium, webkit, type Browser, type BrowserContext, type Page } from "playwright";
 import { startFakeZeta } from "./fake-zeta";
 
 const root = new URL("..", import.meta.url).pathname;
 const port = Number(process.env.DELIVERY_GATE_PORT ?? 4321);
 const origin = `http://127.0.0.1:${port}`;
 const gammaHome = await mkdtemp(join(tmpdir(), "gamma-delivery-"));
+const shots = process.env.GATE_SHOTS ?? gammaHome;
 const fake = await startFakeZeta({ origins: [origin], live: false });
 const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: root, env: { ...process.env, ZETA_HOME: fake.home, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin, VITE_ZETA_PORT: String(fake.port) }, stdio: "ignore" });
 const failures: string[] = [];
@@ -90,7 +91,58 @@ try {
         if (order.indexOf("queued delayed retry") > order.indexOf("second after retry")) throw new Error(`second submit was out of order: ${JSON.stringify(order)}`);
       } finally { await cleanup(context, page); }
     });
+    await check("lost-send-reply-keeps-the-draft-and-says-a-retry-is-safe", async () => {
+      const { context, page } = await fresh(browser, 1440);
+      try {
+        await page.goto(`${origin}/?run=s-docs`); await ready(page);
+        await page.locator('.status-line[data-state="ready"]').waitFor({ timeout: 15_000 });
+        const field = page.locator('.dock textarea[aria-label="message"]');
+        fake.delayNext("send", 2_500);
+        await field.fill("retry me once"); await field.press("Enter");
+        await Bun.sleep(500); fake.drop(); // zeta takes the send; its reply is lost with the socket
+        const note = page.locator('[data-part="composer-message"]');
+        await note.filter({ hasText: "will not run it twice" }).waitFor({ timeout: 15_000 }).catch(async () => { throw new Error(`composer note after a lost reply: ${JSON.stringify(await note.innerText().catch(() => ""))}`); });
+        if (!(await note.innerText()).includes("stays in this draft") || await field.inputValue() !== "retry me once") throw new Error("the note does not say where the message is");
+        await page.screenshot({ path: join(shots, "lost-reply-note-1440.png") });
+        await page.getByRole("button", { name: /send message|steer the running turn/ }).click();
+        await Bun.sleep(1_500);
+        const accepted = fake.sent.filter((item) => item.text === "retry me once");
+        if (accepted.length !== 1) throw new Error(`the retry after a lost reply started ${accepted.length} turns`);
+      } finally { await cleanup(context, page); }
+    });
   } finally { await browser.close(); }
+  // M1: a full page back then forward (real navigations, not pushState) must not bring a delivered send back as a
+  // draft. CI installs only chromium; on macOS webkit runs too.
+  for (const [name, type] of [["chromium", chromium], ...(process.platform === "darwin" ? [["webkit", webkit] as const] : [])] as const) {
+    const other = await type.launch();
+    try {
+      await check(`delivered-send-is-not-a-draft-after-page-back-forward-${name}`, async () => {
+        const context = await other.newContext({ viewport: { width: 1440, height: 900 } });
+        const page = await context.newPage();
+        try {
+          await page.goto(`${origin}/?run=s-markdown`); await ready(page);
+          await page.goto(`${origin}/?run=s-themes`); await ready(page);
+          await page.locator('.status-line[data-state="ready"]').waitFor({ timeout: 15_000 });
+          const text = `dup check ${name}`;
+          const field = page.locator('.dock textarea[aria-label="message"]');
+          fake.delayNext("send", 3_000);
+          await field.fill(text); await field.press("Enter");
+          await Bun.sleep(200);
+          await page.goBack(); await page.waitForURL(/run=s-markdown/); await ready(page);
+          await Bun.sleep(4_500); // zeta takes the send while this page is away
+          await page.goForward(); await page.waitForURL(/run=s-themes/); await ready(page);
+          await page.locator('.status-line').waitFor({ timeout: 15_000 });
+          await Bun.sleep(1_500); // the restored delivery settles from delivery_status
+          const restored = await field.inputValue();
+          await page.screenshot({ path: join(shots, `page-back-forward-${name}.png`) });
+          if (restored) await field.press("Enter"); // what a user does with a ready draft
+          await Bun.sleep(1_500);
+          const turns = fake.sent.filter((item) => item.text === text);
+          if (turns.length !== 1 || restored) throw new Error(`after page back and forward the draft held ${JSON.stringify(restored)} and zeta accepted ${turns.length} turns`);
+        } finally { await cleanup(context, page); }
+      });
+    } finally { await other.close(); }
+  }
 } finally {
   vite.kill("SIGTERM"); await Promise.race([new Promise<void>((resolve) => vite.once("exit", () => resolve())), Bun.sleep(2_000)]);
   await fake.close(); await rm(gammaHome, { recursive: true, force: true });

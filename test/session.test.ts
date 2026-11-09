@@ -69,7 +69,7 @@ test("a failed replacement keeps the requested selection and never presents the 
 test("on connect it opens the server's own session without resume, with every history page and its approval", async () => {
   const fake = await server(handlers("b"));
   const view = harness(source(fake.client), { selected: "b" });
-  await tick();
+  await waitFor(() => present(view).open?.history.complete === true);
   expect(present(view).selected).toBe("b");
   expect(view.state.session?.session_id).toBe("b");
   expect(kinds(view.state)).toEqual(["user", "approval", "message"]);
@@ -133,9 +133,9 @@ test("selecting another session resumes it, releases the old one, and reports pr
   const view = harness(source(fake.client), { selected: "b", onSelect: (id) => selected.push(id) });
   await tick();
   view.select("a");
-  expect(present(view).opening).toEqual({ id: "a", messages: 0 });
+  expect(present(view).opening).toEqual({ id: "a", messages: 0, loading: true });
   expect(present(view).open).toBeNull();
-  expect(present(view).opening).toEqual({ id: "a", messages: 0 });
+  expect(present(view).opening).toEqual({ id: "a", messages: 0, loading: true });
   await tick();
   expect(selected).toEqual(["a"]);
   expect(present(view).open?.id).toBe("a");

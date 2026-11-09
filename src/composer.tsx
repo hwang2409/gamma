@@ -14,6 +14,11 @@ export type ComposerState = "idle" | "steerable" | "read-only";
 export type Submit = (action: ComposerAction, images: readonly QueuedImage[], intent: { steer: boolean; deliveryId: string; sourceText: string }) => Promise<unknown>;
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error)) || "unknown error";
+/** A failure that kept the draft's delivery id is safe to retry: zeta dedupes the id if the first attempt landed. */
+export const submitFailureText = (steer: boolean, failure: unknown, retrySafe: boolean) => {
+  const verb = steer ? "steer" : "send";
+  return retrySafe ? `could not confirm the ${verb} (${errorText(failure)}). the message stays in this draft; ${verb} again and zeta will not run it twice` : `could not ${verb}: ${errorText(failure)}`;
+};
 const attempt = (action: () => unknown) => new Promise<unknown>((resolve) => resolve(action()));
 const hasFiles = (event: DragEvent) => [...event.dataTransfer.types].includes("Files");
 function composerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>, options: { steer: boolean; normal: boolean; vimOn: boolean; text: string; vim: Vim; draft(): Draft; apply(step: Step): void; submit(): void; stop(): void }) {
@@ -205,7 +210,7 @@ function useSubmission(state: ComposerState, blocked: boolean, commands: Command
         () => { if (imageDelivery) store.settleDelivery(runIdRef.current, deliveryId, "accepted"); },
         (failure: unknown) => { if (imageDelivery) store.settleDelivery(runIdRef.current, deliveryId, "rejected"); throw failure; },
       );
-    }, (error: unknown) => { if (!onPreparationFailure) throw error; onPreparationFailure(error, sentImages, sent); }).catch((failure: unknown) => setError(`could not ${steer ? "steer" : "send"}: ${errorText(failure)}`))
+    }, (error: unknown) => { if (!onPreparationFailure) throw error; onPreparationFailure(error, sentImages, sent); }).catch((failure: unknown) => setError(submitFailureText(steer, failure, store.get(runId).retryDelivery?.id === deliveryId)))
       .finally(() => { inFlight.current.submit = false; setPreparing(false); });
   };
   const stop = () => {

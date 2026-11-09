@@ -111,7 +111,7 @@ export type WorkspaceEvent =
   | { type: "TURN_START"; runId: SessionId; turn?: "running" | "tool" | "approval" }
   | { type: "TURN_END"; runId: SessionId }
   | { type: "DELIVERY_BEGIN"; runId: RunId; delivery: PendingDelivery; operationId: OperationId }
-  | { type: "DELIVERY_ACK"; runId: RunId; intentId: string; operationId: OperationId; attemptId: string; queued?: boolean; failed?: boolean; refused?: boolean }
+  | { type: "DELIVERY_ACK"; runId: RunId; intentId: string; operationId: OperationId; attemptId: string; queued?: boolean; failed?: boolean; /** zeta did no work for this id (or it never reached zeta), so a retry needs no dedupe. */ refused?: boolean }
   /** zeta's `delivery_status` answer: `unknown` means zeta never took this id (the page left before the frame arrived). */
   | { type: "DELIVERY_STATUS"; runId: RunId; intentId: string; operationId: OperationId; status: "delivered" | "dropped" | "unknown" }
   | { type: "DELIVERY_RECONCILE"; runId: RunId }
@@ -281,7 +281,7 @@ export const activeRun = (state: WorkspaceState) => state.attachment.kind === "a
 
 /** Why the composer of a run cannot submit. */
 export type InputBlock = "offline" | "opening" | "reconnecting" | "open-failed" | "syncing" | "pending" | "waits-for-active";
-export type RunInput = { run: RunId; open: OpenRun | null; accept: boolean; block: InputBlock | null; opening: { messages: number } | null };
+export type RunInput = { run: RunId; open: OpenRun | null; accept: boolean; block: InputBlock | null; /** Why the run's model and approval mode cannot change now: a change made before the run opens would be lost. */ settingsBlock: InputBlock | null; /** `loading`: zeta's history is being read; before that the run waits for zeta to attach it. */ opening: { messages: number; loading: boolean } | null };
 /** The executor guard: zeta's `send` has no session_id and goes to the attached runtime, so only that run may send. */
 export const canDeliver = (state: WorkspaceState, runId: RunId) => Boolean(state.connected) && state.attachment.kind === "attached" && state.attachment.sessionId === canonical(state, runId);
 /** The one answer to "which open does this run show, and can its composer submit". */
@@ -293,17 +293,15 @@ export const runInput = (state: WorkspaceState, runId: RunId = state.entry.run):
   const reopening = Boolean(record?.openOperation) && record?.openOperation !== record?.openedBy;
   const draft = run.startsWith("draft:");
   const active = activeRun(state);
-  const opening = !draft && !open && !record?.openError ? { messages: record?.openingMessages ?? 0 } : null;
+  const opening = !draft && !open && !record?.openError ? { messages: record?.openingMessages ?? 0, loading: Boolean(record?.openOperation) } : null;
+  // What keeps the run from being open and attached; a draft has no open, only its connection and create failure.
+  const notOpen: InputBlock | null = !state.connected ? "offline" : open?.stale ? "reconnecting" : record?.openError ? "open-failed" : !draft && (!open || !attached || reopening) ? "opening" : null;
   const block: InputBlock | null = record && hasPendingDelivery(record) ? "pending"
     : draft && active ? "waits-for-active"
-    : !state.connected ? "offline"
-    : open?.stale ? "reconnecting"
-    : record?.openError ? "open-failed"
-    : draft ? null
-    : !open || !attached || reopening ? "opening"
-    : open.syncing && attached.turn === "idle" ? "syncing"
-    : null;
-  return { run, open, accept: block === null, block, opening };
+    : notOpen ?? (open?.syncing && attached?.turn === "idle" ? "syncing" : null);
+  // A settings change before the run opens has no session to reach, so it would be lost.
+  const settingsBlock = draft ? null : notOpen;
+  return { run, open, accept: block === null, block, settingsBlock, opening };
 };
 export const inputBlockText = (block: InputBlock | null, active: string | null) => {
   if (block === "pending") return "sending waits while the previous message is pending or retrying";
@@ -311,6 +309,7 @@ export const inputBlockText = (block: InputBlock | null, active: string | null) 
   if (block === "offline") return "sending is paused until zeta reconnects";
   return block ? "sending is paused until the run opens" : null;
 };
+export const settingsBlockText = (block: InputBlock | null) => block === "offline" ? "settings can change once zeta reconnects" : block ? "settings can change once the run opens" : undefined;
 const deliveryKey = (text: string, images: readonly QueuedImage[]) => JSON.stringify([text, images.map((image) => image.url)]);
 
 export const workspaceRunState = (state: WorkspaceState) => {
@@ -320,7 +319,7 @@ export const workspaceRunState = (state: WorkspaceState) => {
   return {
     selected,
     open: input.open,
-    opening: selected && input.opening ? { id: selected, messages: input.opening.messages } : null,
+    opening: selected && input.opening ? { id: selected, ...input.opening } : null,
     openError: record?.openError ?? null,
     session: record?.session ?? null,
     active: activeRun(state),
