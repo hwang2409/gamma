@@ -117,14 +117,14 @@ async function disabledReason(page: Page, name: string) {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openLive(page);
   await check(`${name}: reconnecting approval buttons are disabled and say why`, async () => {
-    fake.drop();
-    // The reconnecting row is short-lived, so read its buttons and status in the same frame that first shows it.
+    // Zeta stays down until the row is read, so the reconnecting state cannot end before the check sees it.
+    await fake.stop();
     const stale = await page.waitForFunction(() => {
       const row = document.querySelector('[data-part="approval"][data-state="reconnecting"]');
       if (!row) return null;
       const button = (action: string) => row.querySelector<HTMLButtonElement>(`button[data-action="${action}"]`);
       return { approve: button("approve")?.disabled ?? null, deny: button("deny")?.disabled ?? null, reasons: [...row.querySelectorAll('[role="status"]')].map((node) => node.textContent ?? ""), text: (row as HTMLElement).innerText };
-    }, undefined, { timeout: 10_000, polling: "raf" }).then((handle) => handle.jsonValue());
+    }, undefined, { timeout: 10_000 }).then((handle) => handle.jsonValue()).finally(() => fake.start());
     expect(stale && stale.approve === true && stale.deny === true, `approve or deny stays enabled while reconnecting: ${JSON.stringify(stale)}`);
     expect(stale!.reasons.filter((text) => /disabled/.test(text)).length === 1, `no status names the disabled reason: ${JSON.stringify(stale)}`);
     await pendingApproval(page).waitFor({ timeout: 15_000 });
