@@ -130,7 +130,7 @@ async function commandListbox(page: Page, name: string) {
     await input.fill("/");
     const listbox = page.getByRole("listbox", { name: "command suggestions" });
     const opens = (step: string) => listbox.waitFor({ timeout: 10_000 }).catch(async () => {
-      await dump(page, `${name}-listbox-${step}-failure`);
+      await dump(page, `${name}-listbox-${step.replace(/[^a-z0-9]+/gi, "-")}-failure`);
       const catalog = fake.requests.filter((request) => request.method === "slash_list").length;
       throw new Error(`${step}: no command list; value ${JSON.stringify(await input.inputValue())}, focus on ${await focused(page)}, ${catalog} slash_list requests`);
     });
@@ -236,11 +236,11 @@ async function stoppedTurn(page: Page, name: string) {
 }
 
 async function reducedMotion(browser: Browser, name: string) {
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, reducedMotion: "reduce" });
-  try {
-    const page = await context.newPage();
-    await page.goto(`${origin}/?run=${ACTIVE}`);
-    await check(`${name}: reduced motion leaves no endless animation while the run works`, async () => {
+  await check(`${name}: reduced motion leaves no endless animation while the run works`, async () => {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, reducedMotion: "reduce" });
+    try {
+      const page = await context.newPage();
+      await page.goto(`${origin}/?run=${ACTIVE}`);
       await startTurn(page, "a turn to watch under reduced motion");
       const endless = () => page.evaluate(() => document.getAnimations().filter((animation) => {
         const timing = animation.effect?.getComputedTiming();
@@ -256,18 +256,18 @@ async function reducedMotion(browser: Browser, name: string) {
       await ready(page);
       expect(allowed.length > 0, "the animation probe saw no endless animation even with motion allowed");
       expect(!reduced.length, `endless animations under reduced motion: ${reduced.join(", ")}`);
-    });
-  } finally { await context.close(); }
+    } finally { await context.close(); }
+  });
 }
 
 /** 200% zoom of a 1440x900 window is a 720x450 CSS viewport; WCAG reflow is 320 CSS px wide (1280 at 400%). */
 async function zoom(browser: Browser, name: string) {
   for (const [label, viewport] of [["200pct-zoom", { width: 720, height: 450 }], ["reflow-320", { width: 320, height: 568 }]] as const) {
-    const context = await browser.newContext({ viewport, deviceScaleFactor: 2 });
-    try {
-      const page = await context.newPage();
-      await openLive(page);
-      await check(`${name} ${label}: no horizontal scrolling, and the composer, send, and approval stay reachable`, async () => {
+    await check(`${name} ${label}: no horizontal scrolling, and the composer, send, and approval stay reachable`, async () => {
+      const context = await browser.newContext({ viewport, deviceScaleFactor: 2 });
+      try {
+        const page = await context.newPage();
+        await openLive(page);
         await dump(page, `${name}-${label}`);
         const layout = await page.evaluate(() => {
           const box = (selector: string) => { const node = document.querySelector(selector)?.getBoundingClientRect(); return node ? { left: node.left, right: node.right, top: node.top, bottom: node.bottom, width: node.width, height: node.height } : null; };
@@ -288,8 +288,8 @@ async function zoom(browser: Browser, name: string) {
           .catch(async () => { throw new Error(`focus is on ${await focused(page)}`); });
         const approve = await page.evaluate(() => { const rect = document.activeElement!.getBoundingClientRect(); return { top: rect.top, bottom: rect.bottom, right: rect.right }; });
         expect(approve.top >= 0 && approve.bottom <= viewport.height && approve.right <= viewport.width, `approve is focused but off screen: ${JSON.stringify(approve)}`);
-      });
-    } finally { await context.close(); }
+      } finally { await context.close(); }
+    });
   }
 }
 
@@ -306,7 +306,7 @@ async function journey(browserType: BrowserType, name: string) {
     await popovers(page, name);
     await keyboardComposer(page, name);
     // One controller at a time: leave the run before another context opens it.
-    await page.goto("about:blank");
+    await page.goto("about:blank", { timeout: 15_000 });
     await zoom(browser, name);
     await stoppedTurn(page, name);
     await page.close();
