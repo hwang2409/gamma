@@ -48,23 +48,27 @@ const within = async <T>(promise: Promise<T>, name: string, ms = 10_000): Promis
   } finally { if (timer) clearTimeout(timer); }
 };
 
-for (const fidelity of [false, true]) test(`a ${fidelity ? "fidelity" : "legacy"} reload restores the stopped turn that matches zeta's served outcome`, async () => {
-  const turn = "turn-stopped";
+for (const fidelity of [false, true]) for (const scenario of [
+  { name: "matching served outcome", servedTurn: "turn-status", status: { turn_id: "turn-status", reason: "user_stop" }, errors: ["provider_error", "aborted"] },
+  { name: "stale served outcome", servedTurn: "turn-old", status: { turn_id: "turn-new", reason: "completed" }, errors: ["provider_error"] },
+  { name: "missing status outcome", servedTurn: "turn-old", status: null, errors: ["provider_error"] },
+  { name: "status-only outcome", servedTurn: null, status: { turn_id: "turn-status", reason: "user_stop" }, errors: ["provider_error", "aborted"] },
+] as const) test(`a ${fidelity ? "fidelity" : "legacy"} reload handles a ${scenario.name}`, async () => {
   const rows = [
-    { id: "failed", role: "assistant", content: [], failed_turn: { code: "provider_error", message: "provider failed" } },
-    { id: "served", role: "system", event: "served_turn_end", content: [], data: { turn_id: turn, reason: "user_stop" } },
+    { id: "failed", role: "assistant", content: [], tool_result: null, failed_turn: { code: "provider_error", message: "provider failed" } },
+    ...(scenario.servedTurn ? [{ id: "served", role: "system", event: "served_turn_end", data: { turn_id: scenario.servedTurn, reason: "user_stop" } }] : []),
   ];
   const features = ["delivery_id", "served_turn_end", ...(fidelity ? ["session_history_fidelity"] : [])];
   const fake = await within(server((method) => {
-    if (method === "status") return { ...idleStatus, last_turn_outcome: { turn_id: turn, reason: "user_stop" } };
+    if (method === "status") return { ...idleStatus, last_turn_outcome: scenario.status };
     if (method === "session_history") return { messages: rows, next_offset: null };
     throw new Error(method);
-  }, features), `${fidelity ? "fidelity" : "legacy"} test server hello`);
+  }, features), `${fidelity ? "fidelity" : "legacy"} ${scenario.name} test server hello`);
 
-  const opened = await within(openSession(fake.client, "s"), `${fidelity ? "fidelity" : "legacy"} stopped-turn open`);
-  await within(opened.complete, `${fidelity ? "fidelity" : "legacy"} stopped-turn replay`);
+  const opened = await within(openSession(fake.client, "s"), `${fidelity ? "fidelity" : "legacy"} ${scenario.name} open`);
+  await within(opened.complete, `${fidelity ? "fidelity" : "legacy"} ${scenario.name} replay`);
   const errors = items(opened.lease.store).flatMap((item) => item?.type === "error" ? [item.event.error.code] : []);
-  expect(errors).toEqual(["provider_error", "aborted"]);
+  expect(errors).toEqual(scenario.errors);
 });
 
 // Review 3's exact loss: both events arrive in the ambiguous first-page window and are absent from that page.

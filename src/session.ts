@@ -37,16 +37,14 @@ export type OpenResult = { lease: SessionLease; session: SessionMeta | null; syn
 
 type HistoryPage = { messages?: unknown[]; next_offset?: number | null };
 const isApprovalEvent = (event: RunEvent) => event.type === "approval_request" || event.type === "approval_end";
-const terminalEvents = (status: ServerStatus, rows: unknown[] = []): RunEvent[] => {
+const terminalEvents = (status: ServerStatus, rows: unknown[] = [], restoredTurnId?: string, historyComplete = true): RunEvent[] => {
   if (status.state !== "idle") return [{ type: "run_start" }];
   const turnId = typeof status.last_turn_outcome?.turn_id === "string" ? status.last_turn_outcome.turn_id : undefined;
-  const servedId = rows.flatMap((row) => {
-    if (!row || typeof row !== "object" || (row as { event?: unknown }).event !== "served_turn_end") return [];
-    const data = (row as { data?: unknown }).data;
-    return data && typeof data === "object" && typeof (data as { turn_id?: unknown }).turn_id === "string" ? [(data as { turn_id: string }).turn_id] : [];
-  }).at(-1);
-  const outcome = servedId ? servedTurnOutcome(rows, servedId) : turnId ? statusTurnOutcome(status.last_turn_outcome, turnId) : undefined;
-  const stopped: RunEvent[] = outcome === "cancelled"
+  const hasServedOutcome = rows.some((row) => row && typeof row === "object" && (row as { event?: unknown }).event === "served_turn_end");
+  const outcome = turnId
+    ? servedTurnOutcome(rows, turnId) ?? (historyComplete && !hasServedOutcome ? statusTurnOutcome(status.last_turn_outcome, turnId) : undefined)
+    : undefined;
+  const stopped: RunEvent[] = outcome === "cancelled" && restoredTurnId !== turnId
     ? [{ type: "error", error: { code: "aborted", message: "turn aborted" } }]
     : [];
   return [...stopped, { type: "run_end", ...(outcome ? { outcome } : {}) }];
@@ -63,7 +61,6 @@ const snapshotEvents = (id: string, rows: unknown[], status: ServerStatus, histo
       event: "approval_request", session_id: id, ...approval,
       ...(approval.resolution_pending ? { state: "resolving", status: "resolving…", disabled_reason: "the server is saving this decision" } : {}),
     }));
-  events.push(...terminalEvents(status, rows));
   return events;
 };
 const wait = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve, reject) => {
@@ -110,19 +107,24 @@ export async function openSession(
   const allRows = () => pages.flatMap((page) => page.rows);
   let publishedPages = 1;
   let stoppedRestoredTurnId: string | undefined;
-  const replayEvents = (rows: unknown[], status: ServerStatus, historyApprovals = true) => {
-    const events = snapshotEvents(id, rows, status, historyApprovals, approvalReconnect);
-    if (events.some((event) => event.type === "error" && event.error.code === "aborted") && typeof status.last_turn_outcome?.turn_id === "string")
-      stoppedRestoredTurnId = status.last_turn_outcome.turn_id;
+  const finalEvents = (rows: unknown[], status: ServerStatus, historyComplete = true, replacing = false) => {
+    const events = terminalEvents(status, rows, replacing ? undefined : stoppedRestoredTurnId, historyComplete);
+    const turnId = typeof status.last_turn_outcome?.turn_id === "string" ? status.last_turn_outcome.turn_id : undefined;
+    if (events.some((event) => event.type === "error" && event.error.code === "aborted")) stoppedRestoredTurnId = turnId;
+    else if (replacing && stoppedRestoredTurnId === turnId) stoppedRestoredTurnId = undefined;
     return events;
   };
+  const replayEvents = (rows: unknown[], status: ServerStatus, historyComplete = true) => [
+    ...snapshotEvents(id, rows, status, historyComplete, approvalReconnect),
+    ...finalEvents(rows, status, historyComplete, true),
+  ];
   const stableRows = () => (pages.length === 1 ? pages : pages.slice(0, -1)).flatMap((page) => page.rows);
   const publishStablePrefix = (status: ServerStatus) => {
     lease.store.resync(replayEvents(stableRows(), status, false));
     publishedPages = pages.length === 1 ? 1 : pages.length - 1;
   };
   const publishApprovals = (status: ServerStatus) => {
-    for (const event of replayEvents([], status)) if (event.type === "approval_request") lease.store.dispatch(event);
+    for (const event of snapshotEvents(id, [], status, true, approvalReconnect)) if (event.type === "approval_request") lease.store.dispatch(event);
   };
   const loadPageRange = async (start: number) => {
     const loaded: LoadedPage[] = [];
@@ -155,12 +157,7 @@ export async function openSession(
       for (const event of fromZetaHistory(page.rows)) if (!isApprovalEvent(event)) lease.store.dispatch(event);
     if (pages.length > 1)
       for (const event of fromZetaHistory(allRows())) if (isApprovalEvent(event)) lease.store.dispatch(event);
-    const turnId = typeof status.last_turn_outcome?.turn_id === "string" ? status.last_turn_outcome.turn_id : undefined;
-    for (const event of terminalEvents(status, allRows())) {
-      if (event.type === "error" && event.error.code === "aborted" && stoppedRestoredTurnId === turnId) continue;
-      if (event.type === "error" && event.error.code === "aborted") stoppedRestoredTurnId = turnId;
-      lease.store.dispatch(event);
-    }
+    for (const event of finalEvents(allRows(), status)) lease.store.dispatch(event);
     publishedPages = pages.length;
   };
   const waitUntilIdle = async (status = initialStatus): Promise<ServerStatus> => {
@@ -227,12 +224,12 @@ export async function openSession(
   const complete = (async (): Promise<{ syncing: boolean }> => {
     try {
       await wait(0, activeSignal);
-      const [, idle] = await Promise.all([loadRemainingPages(), waitUntilIdle()]);
+      const [, status] = await Promise.all([loadRemainingPages(), waitUntilIdle()]);
       if (client.replayRevision(id) === 0 && client.finishReplay(id, 0)) {
-        publishFinalTail(idle);
+        publishFinalTail(status);
         return { syncing: false };
       }
-      await finishWhenClean(idle);
+      await finishWhenClean(status);
       return { syncing: false };
     } catch (error) {
       throw error;

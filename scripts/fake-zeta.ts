@@ -294,9 +294,18 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
   let chat: { session: string; turnId: string; sendDelivery: string | null; steers: string[]; aborted: boolean } | null = null;
   const externalSteers: Array<{ id: string; session: string }> = [];
   // docs/serve-protocol.md:791-808 (served_turn_end): status.last_turn_outcome.reason of the last whole turn.
-  let lastTurn: "completed" | "user_stop" | "error" | "disconnect" | null = null;
+  type TurnEndReason = "completed" | "user_stop" | "error" | "disconnect";
+  let lastTurn: TurnEndReason | null = null;
   let lastTurnId: string | null = null;
   let lastTurnSession: string | null = null;
+  const recordTurnEnd = (session: string, turnId: string, reason: TurnEndReason) => {
+    lastTurn = reason;
+    lastTurnId = turnId;
+    lastTurnSession = session;
+    // Zeta origin/main event_contract.py:35-45 defines this exact frame; history_projection.py:295-300 keeps
+    // every durable turn_end in branch order when served_turn_end is negotiated.
+    histories[session]!.push({ id: `served-${turnId}`, role: "system", event: "served_turn_end", data: { turn_id: turnId, reason } });
+  };
   type Send = (event: Json) => void;
   const chatTurn = async (session: string, send: Send, prompt: string, sendDelivery: string | null) => {
     const turn = { session, turnId: `turn-${sent.length}`, sendDelivery, steers: [] as string[], aborted: false }; // steers holds delivery ids
@@ -307,9 +316,11 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
     e("turn_start", { data: { turn: sent.length, turn_id: turn.turnId } });
     const finish = () => {
       if (turn.sendDelivery) statuses.set(turn.sendDelivery, "delivered");
-      // Zeta fd1f893 runtime/loop/turn_persistence.py:82-96 and handlers/history_projection.py:337-373.
-      histories[session]!.push({ id: `failed-${turn.turnId}`, role: "assistant", content: [], failed_turn: { code: "provider_error", message: "the provider is overloaded (529)" } });
-      e("turn_end", { data: { turn: sent.length } }); chat = null; lastTurn = "error"; lastTurnId = turn.turnId; lastTurnSession = session; running.set(false); e("agent_end");
+      // Zeta origin/main runtime/loop/turn_persistence.py:83-118 persists the failed assistant message;
+      // handlers/history_projection.py:518-526 always projects its tool_result field and failed_turn marker.
+      histories[session]!.push({ id: `failed-${turn.turnId}`, role: "assistant", content: [], tool_result: null, failed_turn: { code: "provider_error", message: "the provider is overloaded (529)" } });
+      recordTurnEnd(session, turn.turnId, "error");
+      e("turn_end", { data: { turn: sent.length } }); chat = null; running.set(false); e("agent_end");
     };
     // Prompts that steer the scripted turn, for the status line: a provider failure, and a slow tool call.
     if (prompt.includes("fail this turn")) {
@@ -349,10 +360,8 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
       e("delivery_status", { ...row, required_feature: "session_history_fidelity" });
     }
     e("turn_end", { data: { turn: sent.length } });
+    recordTurnEnd(session, turn.turnId, "completed");
     chat = null;
-    lastTurn = "completed";
-    lastTurnId = turn.turnId;
-    lastTurnSession = session;
     running.set(false);
     e("agent_end");
   };
@@ -421,10 +430,8 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
       histories[turn.session]!.push({ ...row, event: "delivery_status" });
       send({ event: "delivery_status", session_id: turn.session, ...row, required_feature: "session_history_fidelity" });
     }
+    recordTurnEnd(turn.session, turn.turnId, "user_stop");
     chat = null;
-    lastTurn = "user_stop";
-    lastTurnId = turn.turnId;
-    lastTurnSession = turn.session;
     running.set(false);
     turn.aborted = true;
     aborts++;
@@ -446,9 +453,7 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
     get lastTurnOutcome() { return lastTurn && lastTurnId ? { turn_id: lastTurnId, reason: lastTurn } : null; },
     get lastTurnSession() { return lastTurnSession; },
     finishExternalTurn(session: string, send: Send) {
-      lastTurn = "completed";
-      lastTurnId = `turn-${sent.length}`;
-      lastTurnSession = session;
+      const turnId = `turn-${sent.length}`;
       for (const steer of externalSteers.splice(0).filter((steer) => steer.session === session)) {
         statuses.set(steer.id, "dropped");
         const row = { id: `delivery-${steer.id}`, role: "system", delivery_id: steer.id, method: "steer", status: "dropped", content: [text("steer dropped: turn_end")], reason: "turn_end" };
@@ -456,6 +461,7 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
         // zeta delivery.py:305-325: published live only to a controller with session_history_fidelity.
         send({ event: "delivery_status", session_id: session, ...row, required_feature: "session_history_fidelity" });
       }
+      recordTurnEnd(session, turnId, "completed");
     },
     disconnect() {
       if (chat || externalSteers.length) lastTurn = "disconnect";
@@ -468,6 +474,7 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
         statuses.set(id, "dropped");
         histories[chat.session]!.push({ id: `delivery-${id}`, role: "system", event: "delivery_status", delivery_id: id, method: "steer", status: "dropped", content: [text("steer dropped: abort")], reason: "abort" });
       }
+      recordTurnEnd(chat.session, chat.turnId, "disconnect");
       chat.aborted = true; chat = null; running.set(false);
     },
     /** The reply body for a composer method, or undefined for any other method. */
@@ -633,12 +640,11 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
       delayedOpen = true;
       await wait(openDelay);
     }
-    const stored = (histories[active!] ?? []).filter((row) => approvalHistoryMode !== "not-advertised-without-rows" || (row.event !== "approval_request" && row.event !== "approval_end"));
+    const servedTurnEnd = socket.data.features?.includes("served_turn_end") === true;
+    const stored = (histories[active!] ?? []).filter((row) =>
+      (approvalHistoryMode !== "not-advertised-without-rows" || (row.event !== "approval_request" && row.event !== "approval_end"))
+      && (servedTurnEnd || row.event !== "served_turn_end"));
     const rows = projectHistory(stored, socket.data.features?.includes("session_history_fidelity") === true);
-    const outcome = composer.lastTurnSession === active ? composer.lastTurnOutcome : null;
-    // Zeta fd1f893 server/handlers/history_projection.py:344-356 adds only the latest served turn.
-    if (outcome && socket.data.features?.includes("served_turn_end"))
-      rows.unshift({ id: `served-${outcome.turn_id}`, role: "system", event: "served_turn_end", content: [], data: outcome });
     const offset = Number(params.offset ?? 0);
     const pageSize = active === LARGE ? 128 : active === FIDELITY ? 32 : 8;
     reply({ result: { messages: rows.slice(offset, offset + pageSize), next_offset: offset + pageSize < rows.length ? offset + pageSize : null } });

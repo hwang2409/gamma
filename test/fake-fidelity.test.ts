@@ -3,13 +3,14 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { startFakeZeta } from "../scripts/fake-zeta";
 
-type Frame = { id?: number; result?: { messages?: Record<string, unknown>[] }; error?: { code: number; message: string } };
+type Frame = { id?: number; result?: { messages?: Record<string, unknown>[]; next_offset?: number | null; state?: string }; error?: { code: number; message: string } };
+type Request = (method: string, params: Record<string, unknown>) => Promise<Frame>;
 const bounded = <T>(promise: Promise<T>, label: string) => Promise.race([
   promise,
   Bun.sleep(10_000).then((): T => { throw new Error(`timed out waiting for ${label}`); }),
 ]);
 
-async function history(features: string[], session = "s-fidelity") {
+async function history(features: string[], session = "s-fidelity", beforeHistory?: (request: Request) => Promise<void>) {
   const origin = "http://127.0.0.1:4225";
   const fake = await startFakeZeta({ origins: [origin], port: 0, live: false });
   const discovery = JSON.parse(await readFile(join(fake.home, "run", "serve.ws.json"), "utf8")) as { controller_token: string };
@@ -34,14 +35,30 @@ async function history(features: string[], session = "s-fidelity") {
     }), "socket open");
     expect((await request("hello", { protocol_version: "1.2", client_version: "1.2", role: "controller", features })).error).toBeUndefined();
     expect((await request("resume", { session_id: session })).error).toBeUndefined();
-    const reply = await request("session_history", { session_id: session });
-    expect(reply.error).toBeUndefined();
-    return reply.result?.messages ?? [];
+    await beforeHistory?.(request);
+    const rows: Record<string, unknown>[] = [];
+    for (let offset: number | null = 0; offset !== null; ) {
+      const reply = await request("session_history", { session_id: session, offset });
+      expect(reply.error).toBeUndefined();
+      rows.push(...(reply.result?.messages ?? []));
+      offset = reply.result?.next_offset ?? null;
+    }
+    return rows;
   } finally {
     socket.close();
     await fake.close();
   }
 }
+
+const waitForCompletedTurn = (request: Request, label: string) => bounded((async () => {
+  let sawRunning = false;
+  while (true) {
+    const state = (await request("status", {})).result?.state;
+    sawRunning ||= state !== "idle";
+    if (sawRunning && state === "idle") return;
+    await Bun.sleep(20);
+  }
+})(), label);
 
 test("a client without fidelity still opens legacy history without fidelity-only rows", async () => {
   const rows = await history([], "s-reconnect");
@@ -77,4 +94,16 @@ test("fake history projects legacy and fidelity rows per negotiated socket", asy
     content_blocks: [{ type: "image", mimeType: "image/png", caption: "fidelity preview", width: 640, height: 360, size: 1234, data_omitted: true }],
   });
   expect(fidelity.filter((row) => row.event === "delivery_status")).toHaveLength(11);
+});
+
+test("fake failed turns keep zeta's durable row order and shape", async () => {
+  const rows = await history(["served_turn_end"], "s-reconnect", async (request) => {
+    expect((await request("send", { text: "fail this turn" })).error).toBeUndefined();
+    await waitForCompletedTurn(request, "failed fake turn to finish");
+  });
+  const failed = rows.findIndex((row) => row.failed_turn !== undefined);
+  expect(failed).toBeGreaterThanOrEqual(0);
+  expect(rows[failed]).toMatchObject({ role: "assistant", content: [], tool_result: null, failed_turn: { code: "provider_error" } });
+  expect(rows[failed + 1]).toMatchObject({ role: "system", event: "served_turn_end", data: { reason: "error" } });
+  expect(rows[failed + 1]).not.toHaveProperty("content");
 });

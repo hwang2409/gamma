@@ -7,6 +7,7 @@ const found: ZetaDiscovery = { url: "ws://127.0.0.1:8765/", controller_token: "c
 
 test("hello requests session history fidelity", () => {
   expect(FEATURES).toContain("session_history_fidelity");
+  expect(FEATURES).toContain("served_turn_end");
 });
 
 test("backoff doubles from 0.5 s and stops at 10 s", () => {

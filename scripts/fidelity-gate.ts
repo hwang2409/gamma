@@ -170,6 +170,21 @@ async function checkSlotLayout(page: Page, fake: Fake, origin: string) {
     const note = row.locator('[data-part="delivery-note"]');
     const box = await note.boundingBox();
     if (!box || box.x < 0 || box.x + box.width > width || box.y + box.height > 800) throw new Error(`delivery note clips at ${width}: ${JSON.stringify(box)}`);
+    const colors = await row.evaluate((node) => {
+      const note = node.querySelector<HTMLElement>('[data-part="delivery-note"]')!;
+      const message = node.querySelector<HTMLElement>('[data-part="message-content"]')!;
+      return {
+        danger: getComputedStyle(node).borderLeftColor,
+        mark: getComputedStyle(note, "::before").backgroundColor,
+        note: getComputedStyle(note).color,
+        noteDecoration: getComputedStyle(note).textDecorationLine,
+        rowDecoration: getComputedStyle(node).textDecorationLine,
+        messageDecoration: getComputedStyle(message).textDecorationLine,
+      };
+    });
+    if (colors.noteDecoration !== "none" || colors.rowDecoration !== "none") throw new Error(`delivery note is struck at ${width}: ${JSON.stringify(colors)}`);
+    if (!colors.messageDecoration.includes("line-through")) throw new Error(`dropped message is not struck at ${width}: ${JSON.stringify(colors)}`);
+    if (colors.note === colors.danger || colors.mark !== colors.danger) throw new Error(`delivery note uses danger as text instead of its mark at ${width}: ${JSON.stringify(colors)}`);
     if (width === 390) {
       const noteLeft = await note.evaluate((node) => node.getBoundingClientRect().left);
       const buttonLeft = await note.getByRole("button", { name: "resend" }).evaluate((node) => node.getBoundingClientRect().left);

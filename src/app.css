@@ -125,10 +125,11 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .jump-lane { flex: none; display: flex; justify-content: flex-end; height: var(--control); padding-inline: max(var(--gutter), calc((100% - var(--measure)) / 2)); }
 .jump-lane [data-part="jump-to-latest"] { display: flex; align-items: center; min-height: var(--control); padding: 0 14px; border: 0; }
 
-/* A steer that a stop dropped: the row stays, struck through, with a danger rail and a note that says why. */
-.scroll [data-kind="user"]:has([data-part="delivery-note"]) { border-left-color: var(--fulcrum-danger); color: var(--fulcrum-muted); text-decoration: line-through; text-decoration-color: var(--fulcrum-danger); }
+/* A steer that a stop dropped: its message stays struck through, with a danger rail and an unstruck note that says why. */
+.scroll [data-kind="user"]:has([data-part="delivery-note"]) { border-left-color: var(--fulcrum-danger); }
+.scroll [data-kind="user"]:has([data-part="delivery-note"]) > :is([data-part="message-prompt"], [data-part="message-content"]) { color: var(--fulcrum-muted); text-decoration: line-through; text-decoration-color: var(--fulcrum-danger); }
 /* The square sits under the row's rail; the words keep the 14 px indent. */
-[data-part="delivery-note"] { margin: 4px 0 0; padding-left: 14px; color: var(--fulcrum-fg); font-size: 12px; font-weight: 700; text-indent: -14px; }
+.scroll [data-part="item"][data-kind="user"] > [data-part="delivery-note"] { margin: 4px 0 0; padding-left: 14px; color: var(--fulcrum-fg); font-size: 12px; font-weight: 700; text-indent: -14px; }
 [data-part="delivery-note"]::before { margin-right: 7px; }
 /* The resend's own result and its button sit under the note's words, on the same 14 px indent. */
 [data-part="delivery-note"] > .resend-failure { display: block; font-weight: 400; text-indent: 0; }
