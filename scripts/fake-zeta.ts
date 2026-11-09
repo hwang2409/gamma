@@ -158,9 +158,12 @@ const historySeed: Record<string, Json[]> = {
     { id: "fidelity-delivered", role: "system", event: "delivery_status", delivery_id: "fidelity-delivered", method: "steer", status: "delivered", content: [text("retained delivered steer")] },
     { id: "fidelity-dropped", role: "system", event: "delivery_status", delivery_id: "fidelity-dropped", method: "steer", status: "dropped", content: [text("retained dropped steer")], reason: "turn_end" },
     { id: "fidelity-generic-drop", role: "system", event: "delivery_status", delivery_id: "fidelity-generic-drop", method: "steer", status: "dropped", content: [text("steer dropped: turn_end")], reason: "turn_end" },
-    ...(["abort", "clear", "disconnect", "failed", "restart", "future_token"] as const).map((reason) => ({
+    ...([
+      ["abort", "retained stopped steer"], ["clear", "retained removed steer"], ["disconnect", "retained lost-connection steer"],
+      ["failed", "retained unsuccessful steer"], ["restart", "retained interrupted steer"], ["future_token", "retained future steer"],
+    ] as const).map(([reason, display]) => ({
       id: `fidelity-reason-${reason}`, role: "system", event: "delivery_status", delivery_id: `fidelity-reason-${reason}`,
-      method: "steer", status: "dropped", content: [text(`retained reason ${reason}`)], reason,
+      method: "steer", status: "dropped", content: [text(display)], reason,
     })),
   ],
   "s-themes": [

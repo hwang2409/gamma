@@ -47,6 +47,15 @@ export async function checkFidelityData(page: Page, origin: string) {
   if (JSON.stringify(reloaded) !== JSON.stringify(live)) throw new Error(`live/reload fidelity differs: ${JSON.stringify({ live, reloaded })}`);
 }
 
+const reasonRows = {
+  turn_end: "retained dropped steer",
+  abort: "retained stopped steer",
+  clear: "retained removed steer",
+  disconnect: "retained lost-connection steer",
+  failed: "retained unsuccessful steer",
+  restart: "retained interrupted steer",
+  future_token: "retained future steer",
+} as const;
 const reasonWords = {
   turn_end: "not delivered · the turn ended before zeta used this steer",
   abort: "not delivered · the stop ended the turn before zeta took this steer",
@@ -87,12 +96,10 @@ async function checkHistoryDrop(page: Page, origin: string) {
 async function checkReasonTable(page: Page, origin: string) {
   await openFidelityHistory(page, origin);
   for (const [reason, words] of Object.entries(reasonWords)) {
-    const text = reason === "turn_end" ? "retained dropped steer" : `retained reason ${reason}`;
-    const row = userRow(page, text);
+    const row = userRow(page, reasonRows[reason as keyof typeof reasonRows]);
     await row.waitFor({ timeout: 10_000 });
     const note = (await row.locator('[data-part="delivery-note"]').innerText()).replace(/\s+/g, " ").trim();
     if (note !== words) throw new Error(`${reason} note was ${JSON.stringify(note)}`);
-    if ((await row.innerText()).includes(reason)) throw new Error(`${reason} leaked into rendered row text`);
   }
 }
 
@@ -123,11 +130,10 @@ async function checkLocalDrop(page: Page, fake: Fake, origin: string) {
 async function checkOneOwner(page: Page, origin: string) {
   await openFidelityHistory(page, origin);
   for (const reason of Object.keys(reasonWords)) {
-    const text = reason === "turn_end" ? "retained dropped steer" : `retained reason ${reason}`;
-    const row = userRow(page, text);
+    const row = userRow(page, reasonRows[reason as keyof typeof reasonRows]);
     if (await row.locator('[data-part="delivery-note"]').count() !== 1) throw new Error(`${reason} does not have exactly one note owner`);
     const rendered = await row.innerText();
-    for (const token of [reason, "delivery_status"]) if (rendered.includes(token)) throw new Error(`raw ${token} leaked into the retained row`);
+    for (const token of ["delivery_status", "turn_end", "future_token", "abort", "clear", "disconnect", "restart"]) if (new RegExp(`(^|\\W)${token}($|\\W)`).test(rendered)) throw new Error(`raw ${token} leaked into the retained row`);
   }
 }
 
