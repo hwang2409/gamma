@@ -3,7 +3,7 @@ import type { RunEvent } from "@fulcrum/core";
 import type { hostBindings, Registration } from "./host-client";
 import type { QueuedImage } from "./image-queue";
 import { evictedResult, refusal } from "./delivery";
-import { canDeliver } from "./run-state";
+import { decideSend } from "./delivery-owner";
 type HostBindings = typeof hostBindings;
 
 /** The `SessionMetadata` fields this app reads from `list_sessions` (zeta docs/serve-protocol.md). */
@@ -355,7 +355,8 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
   };
   const handleImages = async (effect: Extract<WorkspaceEffect, { type: "send-images" }>) => {
     const delivery = runs.get(effect.runId).deliveries.get(effect.intentId);
-    if (!client || !delivery || !canDeliver(runs.getCatalog(), effect.runId)) { const error = new Error(client && delivery ? "this run is not open yet; your message is still in the draft" : "session is not attached"); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false, failed: true }); finish(effect.operationId, undefined, error); return; }
+    const blocked = decideSend(runs.getCatalog(), effect.runId, { kind: "attempt", intentId: effect.intentId }).blocked;
+    if (!client || !delivery || blocked) { const error = new Error(client && delivery ? blocked : "session is not attached"); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false, failed: true }); finish(effect.operationId, undefined, error); return; }
     try {
       await client.request("send_images", { session_id: effect.runId, text: delivery.text, images: delivery.images.map(({ name, mime_type, data }) => ({ name, mime_type, data })), delivery_id: effect.intentId }, { timeoutMs: 30_000 });
       runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false }); finish(effect.operationId, true);

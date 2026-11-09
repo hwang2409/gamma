@@ -18,14 +18,23 @@ const rows: Record<string, unknown[]> = {
 };
 
 /** Zeta's server-side truth: one attached runtime, its accepted delivery ids per session, and every started turn. */
-type Zeta = { attached: string | null; created: number; turns: Array<{ session: string; text: string; id?: string }>; accepted: Map<string, Map<string, Record<string, unknown>>>; replies: Array<Record<string, unknown>>; evicted: Set<string> };
+type Zeta = { attached: string | null; created: number; turns: Array<{ session: string; text: string; id?: string }>; accepted: Map<string, Map<string, Record<string, unknown>>>; replies: Array<Record<string, unknown>>; evicted: Set<string>; running?: boolean; steers?: Map<string, { session: string; text: string; status: "queued" | "dropped" }>; lastTurn?: string };
+/**
+ * zeta ends the running turn: delivery.py:305-312 drops every queued steer (reason turn_end only when the turn completed),
+ * and docs/serve-protocol.md:791-808 reports the outcome as status.last_turn_outcome.reason.
+ */
+const endTurn = (zeta: Zeta, reason: "completed" | "user_stop" | "error" | "disconnect") => {
+  for (const steer of zeta.steers?.values() ?? []) if (steer.status === "queued") steer.status = "dropped";
+  zeta.running = false; zeta.lastTurn = reason;
+};
 /** sessionStorage as one browser tab keeps it across a full page back and forward. */
 const tabStorage = () => { const items = new Map<string, string>(); return { getItem: (key: string) => items.get(key) ?? null, setItem: (key: string, value: string) => void items.set(key, value) }; };
 
 function zetaHandlers(zeta: Zeta, extra: Record<string, Handler> = {}): Record<string, Handler> {
   return {
     // zeta docs/serve-protocol.md `status`: the attached session, or null.
-    status: () => ({ session: zeta.attached ? meta(zeta.attached, "x") : null, state: "idle", pending_approvals: [] }),
+    // docs/serve-protocol.md:791-808: with served_turn_end (fulcrum always asks for it) status carries last_turn_outcome.
+    status: () => ({ session: zeta.attached ? meta(zeta.attached, "x") : null, state: "idle", pending_approvals: [], last_turn_outcome: zeta.lastTurn ? { turn_id: "t", reason: zeta.lastTurn } : null }),
     resume: (params) => { zeta.attached = params.session_id as string; return { session: meta(zeta.attached, "x") }; },
     session_history: (params) => {
       const all = rows[params.session_id as string] ?? [];
@@ -51,9 +60,24 @@ function zetaHandlers(zeta: Zeta, extra: Record<string, Handler> = {}): Record<s
       zeta.replies.push(reply);
       return reply;
     },
+    // delivery.py:48-90 + docs/serve-protocol.md:509-520: a steer needs a running turn (-32005 otherwise), is queued
+    // ({accepted: true}, no turn), and a retained id answers its first result with duplicate:true.
+    steer: (params) => {
+      const session = zeta.attached;
+      if (!session) throw { code: -32003, message: "no active session" };
+      const id = params.delivery_id as string;
+      const steers = zeta.steers ??= new Map();
+      const seen = steers.get(id);
+      if (seen) return seen.status === "dropped" ? { accepted: false, duplicate: true, status: "dropped" } : { accepted: true, duplicate: true };
+      if (!zeta.running) throw { code: -32005, message: "no turn is running for steering" };
+      steers.set(id, { session, text: params.text as string, status: "queued" });
+      return { accepted: true };
+    },
     // delivery.py:348-368: the retained status ("delivered" for an accepted send), the outcome of an evicted id, else unknown.
     delivery_status: (params) => {
       const id = params.delivery_id as string;
+      const steer = zeta.steers?.get(id);
+      if (steer && steer.session === zeta.attached) return { delivery_id: id, status: steer.status };
       if (zeta.evicted.has(id)) return { delivery_id: id, status: "evicted", outcome: "delivered" };
       return { delivery_id: id, status: zeta.attached && zeta.accepted.get(zeta.attached)?.has(id) ? "delivered" : "unknown" };
     },
@@ -90,11 +114,14 @@ async function world(options: { attached?: string | null; selected?: string; han
     type(text: string, runId = run()) { store.edit(runId, { text }); },
     text(runId = run()) { return store.get(runId).text; },
     /** Enter in the composer of the run on screen, as submitRun does for an existing run. */
-    async enter(runId = run(), text = store.get(runId).text, deliveryId?: string) {
-      try { await deliveries.submit(runId, text, false, deliveryId); return { ok: true as const }; }
+    async enter(runId = run(), text = store.get(runId).text, deliveryId?: string, steer = false) {
+      try { await deliveries.submit(runId, text, steer, deliveryId); return { ok: true as const }; }
       catch (error) { return { ok: false as const, error: error instanceof Error ? error.message : String(error) }; }
     },
     sends() { return fake.calls.filter(([method]) => method === "send").map(([, params]) => params); },
+    asked() { return fake.calls.filter(([method]) => method === "delivery_status").map(([, params]) => params.delivery_id as string); },
+    /** Where zeta started each turn: the session list a row asserts with the turn count. */
+    landed() { return zeta.turns.map(({ session }) => session); },
     async live(id: string) { await waitFor(() => workspaceRunState(store.getCatalog()).open?.id === id && store.getCatalog().attachment.kind === "attached" && (store.getCatalog().attachment as { sessionId: string }).sessionId === id, 2_000); },
     dispose() { deliveries.dispose(); store.dispose(); manager.dispose(); },
   };
@@ -524,7 +551,7 @@ const table: Row[] = [
     },
   },
   {
-    name: "23 M1 page restore before zeta took the send: the restored delivery is sent again with its old id, once",
+    name: "23 M1 page restore before zeta took the send: the draft comes back with its old id and nothing is sent until Enter; then one turn in a",
     async run() {
       const tab = tabStorage();
       const page1 = await openA({ tab });
@@ -539,17 +566,20 @@ const table: Row[] = [
       const page2 = await world({ selected: "a", zeta: page1.zeta, tab });
       try {
         page2.start(); await page2.live("a");
-        await waitFor(() => page2.zeta.turns.length > 0, 2_000);
-        expect(page2.zeta.turns).toEqual([{ session: "a", text: "never arrived", id: first as string }]);
-        await waitFor(() => page2.text("a") === "", 2_000);
-        page2.deliveries.reconcile("a"); // the app reconciles on the run's next store event
+        await waitFor(() => page2.asked().includes(first as string), 2_000);
         await waitFor(() => page2.store.get("a").deliveries.size === 0, 2_000);
-        expect(page2.owner()).toMatchObject({ accept: true });
+        expect(page2.sends()).toEqual([]);
+        expect(page2.zeta.turns).toEqual([]);
+        expect(page2.text("a")).toBe("never arrived");
+        expect(await page2.enter()).toEqual({ ok: true });
+        expect(page2.sends().map((params) => params.delivery_id)).toEqual([first]);
+        expect(page2.landed()).toEqual(["a"]);
+        expect(page2.text("a")).toBe("");
       } finally { page2.dispose(); }
     },
   },
   {
-    name: "24 a failed send's draft keeps its delivery id across a page restore; the retry is a zeta duplicate",
+    name: "24 M-a a lost reply that landed: after a page restore the open asks the saved id, zeta says delivered, the draft is cleared; one turn in a",
     async run() {
       const tab = tabStorage();
       let lost = 0;
@@ -561,11 +591,12 @@ const table: Row[] = [
       const page2 = await world({ selected: "a", zeta: page1.zeta, tab });
       try {
         page2.start(); await page2.live("a");
-        expect(page2.text("a")).toBe("lost reply");
-        expect(await page2.enter()).toEqual({ ok: true });
-        expect(page2.zeta.turns).toHaveLength(1);
-        expect(page2.sends()[0]!.delivery_id).toBe(page1.sends()[0]!.delivery_id);
-        expect(page2.text("a")).toBe("");
+        await waitFor(() => page2.asked().includes(page1.sends()[0]!.delivery_id as string), 2_000);
+        await waitFor(() => page2.text("a") === "", 2_000);
+        if (page2.text("a")) await page2.enter(); // what the user does with a ready draft
+        expect(page2.sends()).toEqual([]);
+        expect(page2.landed()).toEqual(["a"]);
+        expect(page2.store.get("a").retryDelivery).toBeUndefined();
       } finally { page2.dispose(); }
     },
   },
@@ -627,3 +658,343 @@ const table: Row[] = [
 ];
 
 for (const row of table) test(row.name, () => row.run(), 10_000);
+
+/** The draft's delivery note as the composer shows it; read after a row's behavior assertions (the owner module is new). */
+const noteOf = async (record: RunState.RunRecord) => (await import("../src/delivery-owner").catch(() => null))?.deliveryNote(record) ?? null;
+const saved = (tab: ReturnType<typeof tabStorage>) => tab.getItem("gamma-run-drafts") ?? "";
+const lostReply = (zeta: Zeta, times = 1) => { let lost = 0; return { send: (params: Record<string, unknown>) => { const reply = zetaHandlers(zeta).send!(params); if (lost++ < times) throw { code: -32603, message: "connection lost before the reply" }; return reply; } }; };
+/** A steer zeta queued in a's running turn, then the turn ends with `reason`; the app asks on the run's next store event. */
+async function steerThenEnd(h: Awaited<ReturnType<typeof world>>, text: string, reason: Parameters<typeof endTurn>[1], ask = true) {
+  h.zeta.running = true;
+  h.type(text);
+  expect(await h.enter("a", text, undefined, true)).toEqual({ ok: true });
+  const intent = [...h.store.get("a").deliveries.keys()][0]!;
+  expect(h.store.get("a").deliveries.get(intent)?.state).toBe("queued");
+  endTurn(h.zeta, reason);
+  if (ask) h.deliveries.reconcile("a");
+  return intent;
+}
+const settledSends = async (h: Awaited<ReturnType<typeof world>>, count: number) => { await waitFor(() => h.sends().length >= count, 2_000); await new Promise((resolve) => setTimeout(resolve, 30)); };
+
+/**
+ * The delivery owner (src/delivery-owner.ts): one decision for whether and with which id gamma sends. Every row drives
+ * the public factories over a real fulcrum client and asserts the fake's turn count and the session each turn landed in.
+ */
+const owner: Row[] = [
+  {
+    name: "owner success: the delivery id is saved in the tab before the send leaves; one turn in a",
+    async run() {
+      const tab = tabStorage();
+      const h = await openA({ tab });
+      try {
+        const send = h.fake.hold("send");
+        h.type("hello"); const sent = h.enter();
+        const params = await send.reached;
+        expect(saved(tab)).toContain(params.delivery_id as string);
+        send.release(); expect(await sent).toEqual({ ok: true });
+        expect(h.landed()).toEqual(["a"]);
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "owner lost reply at the raced steer->send fallback: Enter again reuses the id; one turn in a",
+    async run() {
+      const h = await openA({ handlers: (zeta) => lostReply(zeta) });
+      try {
+        h.type("raced");
+        expect((await h.enter("a", "raced", undefined, true)).ok).toBe(false); // steer -> -32005 -> send, whose reply is lost
+        expect(h.text()).toBe("raced");
+        expect(await h.enter()).toEqual({ ok: true });
+        const ids = h.sends().map((params) => params.delivery_id);
+        expect(ids).toEqual([ids[0], ids[0]]);
+        expect(h.landed()).toEqual(["a"]);
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "owner lost reply at delivery_status: nothing changes and nothing is sent; the next ask restores the draft with its id; one turn in a after Enter",
+    async run() {
+      const tab = tabStorage();
+      const page1 = await openA({ tab });
+      const send = page1.fake.hold("send");
+      page1.type("asked twice"); void page1.enter(); await send.reached;
+      page1.dispose(); send.fail({ code: -32603, message: "the page left" });
+      const id = page1.sends()[0]!.delivery_id as string;
+      const page2 = await world({ selected: "a", zeta: page1.zeta, tab, handlers: (zeta) => { let lost = 0; return { delivery_status: (params) => { if (lost++ === 0) throw { code: -32603, message: "lost" }; return zetaHandlers(zeta).delivery_status!(params); } }; } });
+      try {
+        page2.start(); await page2.live("a");
+        await waitFor(() => page2.asked().length === 1, 2_000); await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(page2.sends()).toEqual([]);
+        expect(page2.store.get("a").deliveries.size).toBe(1);
+        page2.deliveries.reconcile("a");
+        await waitFor(() => page2.store.get("a").deliveries.size === 0, 2_000);
+        expect(page2.sends()).toEqual([]);
+        expect(page2.text()).toBe("asked twice");
+        expect(await page2.enter()).toEqual({ ok: true });
+        expect(page2.sends().map((params) => params.delivery_id)).toEqual([id]);
+        expect(page2.landed()).toEqual(["a"]);
+      } finally { page2.dispose(); }
+    },
+  },
+  {
+    name: "owner retry after a reload reads the saved id: zeta never took it, the restored draft's Enter sends that id once; one turn in a",
+    async run() {
+      const tab = tabStorage();
+      const page1 = await openA({ tab });
+      const send = page1.fake.hold("send");
+      page1.type("retry later"); const first = page1.enter(); await send.reached;
+      send.fail({ code: -32603, message: "connection lost before the reply" });
+      expect((await first).ok).toBe(false);
+      const id = page1.sends()[0]!.delivery_id as string;
+      page1.dispose();
+      const page2 = await world({ selected: "a", zeta: page1.zeta, tab });
+      try {
+        page2.start(); await page2.live("a");
+        await waitFor(() => page2.asked().includes(id), 2_000); await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(page2.text()).toBe("retry later");
+        expect(page2.sends()).toEqual([]);
+        expect(await page2.enter()).toEqual({ ok: true });
+        expect(page2.sends().map((params) => params.delivery_id)).toEqual([id]);
+        expect(page2.landed()).toEqual(["a"]);
+      } finally { page2.dispose(); }
+    },
+  },
+  {
+    name: "owner B1 back to another run: a page for b leaves a's saved entry untouched (storage unchanged, no status query, no send); forward restores a's draft; one turn in a",
+    async run() {
+      const tab = tabStorage();
+      const pageA = await world({ attached: "b", selected: "a", tab });
+      pageA.start(); await pageA.live("a");
+      const send = pageA.fake.hold("send");
+      pageA.type("unknown check"); void pageA.enter(); await send.reached;
+      pageA.dispose(); send.fail({ code: -32603, message: "the frame never reached zeta" });
+      const id = pageA.sends()[0]!.delivery_id as string;
+      const before = saved(tab);
+      expect(before).toContain(id);
+      // Back: zeta still has a attached when b's page loads, and b's page resumes b.
+      const back = await world({ selected: "b", zeta: pageA.zeta, tab });
+      try {
+        back.start(); await back.live("b"); await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(back.sends()).toEqual([]);
+        expect(back.asked()).toEqual([]);
+        expect(back.zeta.turns).toEqual([]);
+        expect(JSON.parse(saved(tab)).a).toEqual(JSON.parse(before).a);
+      } finally { back.dispose(); }
+      const forward = await world({ selected: "a", zeta: pageA.zeta, tab });
+      try {
+        forward.start(); await forward.live("a");
+        await waitFor(() => forward.store.get("a").deliveries.size === 0, 2_000);
+        expect(forward.sends()).toEqual([]);
+        expect(forward.text()).toBe("unknown check");
+        expect(await noteOf(forward.store.get("a"))).toContain("Enter will not run it twice");
+        expect(await forward.enter()).toEqual({ ok: true });
+        expect(forward.sends().map((params) => params.delivery_id)).toEqual([id]);
+        expect(forward.landed()).toEqual(["a"]);
+      } finally { forward.dispose(); }
+    },
+  },
+  {
+    name: "owner m1 a page back from the bfcache writes only its own runs: a's newer saved draft and id survive b's write",
+    async run() {
+      const tab = tabStorage();
+      const pageB = await world({ attached: "b", selected: "b", tab });
+      pageB.start(); await pageB.live("b");
+      const pageA = await world({ selected: "a", zeta: pageB.zeta, tab, handlers: (zeta) => lostReply(zeta) });
+      try {
+        pageA.start(); await pageA.live("a");
+        pageA.type("keep me"); expect((await pageA.enter()).ok).toBe(false);
+        const id = pageA.sends()[0]!.delivery_id as string;
+        pageB.type("b's own draft", "b"); pageB.store.dispatch({ type: "RECONNECT" }); // the restored page's first writes
+        expect(saved(tab)).toContain(id);
+        expect(JSON.parse(saved(tab)).a.text).toBe("keep me");
+        expect(pageB.landed()).toEqual(["a"]);
+      } finally { pageA.dispose(); pageB.dispose(); }
+    },
+  },
+  {
+    name: "owner reconnect after a lost reply: the reopen asks the saved id, zeta says delivered, the draft clears; one turn in a",
+    async run() {
+      const h = await openA({ handlers: (zeta) => lostReply(zeta) });
+      try {
+        h.type("across reconnect"); expect((await h.enter()).ok).toBe(false);
+        expect(h.text()).toBe("across reconnect");
+        const next = await server(zetaHandlers(h.zeta), FEATURES);
+        h.connection.set(next.client);
+        await h.live("a");
+        await waitFor(() => h.text() === "", 2_000);
+        expect(next.calls.filter(([method]) => method === "send")).toEqual([]);
+        expect(h.landed()).toEqual(["a"]);
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "owner duplicate Enter during a lost reply: both use the saved id; one turn in a",
+    async run() {
+      const h = await openA({ handlers: (zeta) => lostReply(zeta) });
+      try {
+        h.type("twice"); expect((await h.enter()).ok).toBe(false);
+        const results = await Promise.all([h.enter(), h.enter()]);
+        expect(results.some((result) => result.ok)).toBe(true);
+        expect(new Set(h.sends().map((params) => params.delivery_id)).size).toBe(1);
+        expect(h.landed()).toEqual(["a"]);
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "owner edit before retry: the note says the edit is a new message; Enter sends it with a new id by the user's choice; two turns in a",
+    async run() {
+      const h = await openA({ handlers: (zeta) => lostReply(zeta) });
+      try {
+        h.type("first words"); expect((await h.enter()).ok).toBe(false);
+        expect(await noteOf(h.store.get("a"))).toContain("Enter will not run it twice");
+        h.type("first words, edited");
+        expect(await noteOf(h.store.get("a"))).toBe("edited · Enter sends this as a new message");
+        expect(await h.enter()).toEqual({ ok: true });
+        const ids = h.sends().map((params) => params.delivery_id);
+        expect(ids[1]).not.toBe(ids[0]);
+        expect(h.landed()).toEqual(["a", "a"]);
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "owner (a)+(d) a steer dropped at a natural turn end is resent once automatically, with a new id saved before the send; one turn in a",
+    async run() {
+      const tab = tabStorage();
+      const h = await openA({ tab });
+      try {
+        const send = h.fake.hold("send");
+        const intent = await steerThenEnd(h, "late steer", "completed");
+        const params = await send.reached;
+        expect(params.delivery_id).not.toBe(intent);
+        expect(JSON.parse(saved(tab)).a.deliveries[0].attemptId).toBe(params.delivery_id);
+        send.release(); await settledSends(h, 1);
+        expect(h.landed()).toEqual(["a"]);
+      } finally { h.dispose(); }
+    },
+  },
+  ...(["user_stop", "error", "disconnect"] as const).map((reason): Row => ({
+    name: `owner (a) a steer dropped by a turn that ended with ${reason} is not resent; the resend button sends it once; one turn in a`,
+    async run() {
+      const h = await openA();
+      try {
+        const intent = await steerThenEnd(h, `dropped by ${reason}`, reason);
+        await waitFor(() => h.store.get("a").deliveries.get(intent)?.state === "dropped", 2_000); await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(h.sends()).toEqual([]);
+        expect(h.zeta.turns).toEqual([]);
+        h.deliveries.resend("a", intent); await settledSends(h, 1);
+        expect(h.sends()[0]!.delivery_id).not.toBe(intent);
+        expect(h.landed()).toEqual(["a"]);
+      } finally { h.dispose(); }
+    },
+  })),
+  {
+    name: "owner (b) after a reload a steer dropped at a natural turn end is not resent automatically; the button resends it; one turn in a",
+    async run() {
+      const tab = tabStorage();
+      const page1 = await openA({ tab });
+      const intent = await steerThenEnd(page1, "steer before reload", "completed", false);
+      page1.dispose();
+      const page2 = await world({ selected: "a", zeta: page1.zeta, tab });
+      try {
+        page2.start(); await page2.live("a");
+        await waitFor(() => page2.store.get("a").deliveries.get(intent)?.state === "dropped", 2_000); await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(page2.sends()).toEqual([]);
+        expect(page2.zeta.turns).toEqual([]);
+        page2.deliveries.resend("a", intent); await settledSends(page2, 1);
+        expect(page2.landed()).toEqual(["a"]);
+      } finally { page2.dispose(); }
+    },
+  },
+  {
+    name: "owner (b) leaving the run in-app and coming back ends the automatic resend: no send, the row waits for the button; zero turns",
+    async run() {
+      const h = await openA();
+      try {
+        const intent = await steerThenEnd(h, "steer then leave", "completed", false);
+        h.select("b"); await h.live("b"); h.select("a"); await h.live("a");
+        h.deliveries.reconcile("a");
+        await waitFor(() => h.store.get("a").deliveries.get(intent)?.state === "dropped", 2_000); await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(h.sends()).toEqual([]);
+        expect(h.zeta.turns).toEqual([]);
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "owner (c) zeta attaches another run while the status answer is on its way: no automatic send; zero turns",
+    async run() {
+      const h = await openA();
+      try {
+        const status = h.fake.hold("delivery_status");
+        const intent = await steerThenEnd(h, "steer, then b attaches", "completed");
+        await status.reached;
+        const reopen = h.fake.hold("resume"); // gamma's reopen of a waits, so zeta keeps b attached when it answers
+        h.zeta.attached = "b"; await h.manager.refreshStatus(); await reopen.reached;
+        status.release(); await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(h.sends()).toEqual([]);
+        expect(h.zeta.turns).toEqual([]);
+        expect(h.store.get("a").deliveries.get(intent)?.state).toBe("queued");
+        reopen.release();
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "owner (c) row 2: a resend while zeta has another run attached sends nothing, keeps the row, and says why; zero turns",
+    async run() {
+      const h = await openA();
+      try {
+        const intent = await steerThenEnd(h, "stopped steer", "user_stop");
+        await waitFor(() => h.store.get("a").deliveries.get(intent)?.state === "dropped", 2_000);
+        h.zeta.attached = "b"; await h.manager.refreshStatus();
+        h.deliveries.resend("a", intent); await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(h.sends()).toEqual([]);
+        expect(h.zeta.turns).toEqual([]);
+        expect(h.store.get("a").deliveries.get(intent)?.state).toBe("dropped");
+        expect(await noteOf(h.store.get("a"))).toContain("zeta has another run attached; nothing was sent");
+      } finally { h.dispose(); }
+    },
+  },
+  ...([
+    ["fails", (zeta: Zeta) => ({ send: () => { throw { code: -32602, message: "invalid params" }; } }), "unconfirmed"],
+    ["gets unknown", (zeta: Zeta) => ({ send: () => { throw { code: -32603, message: "the frame never reached zeta" }; } }), "unconfirmed"],
+    ["is dropped", (zeta: Zeta) => ({ send: () => ({ accepted: false, duplicate: true, status: "dropped" }) }), "dropped"],
+  ] as const).map(([how, handlers, why]): Row => ({
+    name: `owner one automatic resend at most: when it ${how}, the row waits for the button; one send, zero turns`,
+    async run() {
+      let failing = true;
+      const h = await openA({ handlers: (zeta) => ({ send: (params) => failing ? (handlers(zeta).send as (params: Record<string, unknown>) => unknown)(params) : zetaHandlers(zeta).send!(params) }) });
+      try {
+        const intent = await steerThenEnd(h, `auto resend ${how}`, "completed");
+        await waitFor(() => h.store.get("a").deliveries.get(intent)?.state === "dropped" && h.sends().length === 1, 2_000);
+        h.deliveries.reconcile("a"); await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(h.sends()).toHaveLength(1);
+        expect(h.zeta.turns).toEqual([]);
+        expect(h.store.get("a").deliveries.get(intent)).toMatchObject({ state: "dropped", why });
+        failing = false;
+        h.deliveries.resend("a", intent); await settledSends(h, 2);
+        expect(h.landed()).toEqual(["a"]);
+      } finally { h.dispose(); }
+    },
+  })),
+  {
+    name: "owner MJ1 turn-end steer -> automatic resend -> lost reply -> reload -> explicit resend reuses the saved id; one turn in a",
+    async run() {
+      const tab = tabStorage();
+      const page1 = await openA({ tab, handlers: (zeta) => lostReply(zeta) });
+      const intent = await steerThenEnd(page1, "mj1 steer", "completed");
+      await waitFor(() => page1.store.get("a").deliveries.get(intent)?.state === "dropped", 2_000);
+      const resent = page1.sends()[0]!.delivery_id as string;
+      expect(resent).not.toBe(intent);
+      page1.dispose();
+      const page2 = await world({ selected: "a", zeta: page1.zeta, tab, handlers: (zeta) => ({ delivery_status: () => { throw { code: -32603, message: "lost" }; } }) });
+      try {
+        page2.start(); await page2.live("a"); await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(page2.sends()).toEqual([]);
+        page2.deliveries.resend("a", intent); await settledSends(page2, 1);
+        expect(page2.sends().map((params) => params.delivery_id)).toEqual([resent]);
+        expect(page2.landed()).toEqual(["a"]);
+      } finally { page2.dispose(); }
+    },
+  },
+];
+
+for (const row of owner) test(row.name, () => row.run(), 10_000);

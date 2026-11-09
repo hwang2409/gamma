@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ClipboardEvent, type Dispatch, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject, type SetStateAction } from "react";
 import { addImage, readImage, type QueuedImage } from "./image-queue";
 import { hasPendingDelivery, type RunStateStore } from "./run-state";
+import { deliveryNote } from "./delivery-owner";
 import { escape, normalKey, startVim, type Draft, type Step, type Vim } from "./vim";
 import { CompletionModel, type CompletionSnapshot } from "./completions";
 import type { CommandController, ComposerAction } from "./commands";
@@ -14,11 +15,7 @@ export type ComposerState = "idle" | "steerable" | "read-only";
 export type Submit = (action: ComposerAction, images: readonly QueuedImage[], intent: { steer: boolean; deliveryId: string; sourceText: string }) => Promise<unknown>;
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error)) || "unknown error";
-/** A failure that kept the draft's delivery id is safe to retry: zeta dedupes the id if the first attempt landed. */
-const submitFailureText = (steer: boolean, failure: unknown, retrySafe: boolean) => {
-  const verb = steer ? "steer" : "send";
-  return retrySafe ? `${verb} not confirmed: the draft is kept, and a retry will not run it twice (${errorText(failure)})` : `could not ${verb}: ${errorText(failure)}`;
-};
+const submitFailureText = (steer: boolean, failure: unknown) => `could not ${steer ? "steer" : "send"}: ${errorText(failure)}`;
 const attempt = (action: () => unknown) => new Promise<unknown>((resolve) => resolve(action()));
 const hasFiles = (event: DragEvent) => [...event.dataTransfer.types].includes("Files");
 function composerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>, options: { steer: boolean; normal: boolean; vimOn: boolean; text: string; vim: Vim; draft(): Draft; apply(step: Step): void; submit(): void; stop(): void }) {
@@ -210,7 +207,8 @@ function useSubmission(state: ComposerState, blocked: boolean, commands: Command
         () => { if (imageDelivery) store.settleDelivery(runIdRef.current, deliveryId, "accepted"); },
         (failure: unknown) => { if (imageDelivery) store.settleDelivery(runIdRef.current, deliveryId, "rejected"); throw failure; },
       );
-    }, (error: unknown) => { if (!onPreparationFailure) throw error; onPreparationFailure(error, sentImages, sent); }).catch((failure: unknown) => setError(submitFailureText(steer, failure, store.get(runId).retryDelivery?.id === deliveryId)))
+    }, (error: unknown) => { if (!onPreparationFailure) throw error; onPreparationFailure(error, sentImages, sent); })// A failure that kept the draft's delivery id is a wait, not an error: the run's delivery note says Enter is safe.
+      .catch((failure: unknown) => { if (store.get(runId).retryDelivery?.id !== deliveryId) setError(submitFailureText(steer, failure)); })
       .finally(() => { inFlight.current.submit = false; setPreparing(false); });
   };
   const stop = () => {
@@ -285,7 +283,7 @@ export function GammaComposer({ state, reason, blockedReason, vim: vimOn, comman
     {reason ? <p data-part="composer-reason">{reason}</p> : null}
   </div>;
 
-  const message = submission.error ?? (submission.stopping ? "stopping" : submission.sending ? (submission.steer ? "steering" : "sending") : blockedReason ?? "");
+  const message = submission.error ?? (submission.stopping ? "stopping" : submission.sending ? (submission.steer ? "steering" : "sending") : blockedReason ?? deliveryNote(record) ?? "");
   return <ComposerBody
     field={{ id, state, vimOn, vim: draft.vim, text: draft.text, input: draft.input, completion, listboxId: `${id}-commands`, onKeyDown, onChange: (value, start, end) => { draft.setText(value); completions.update(value, start, end); }, onSelect: (value, start, end) => completions.select(value, start, end), onAccept: (index) => applyCompletion(completions.choose(index)) }}
     attachments={{ images: attachments.images, error: attachments.attachError, dragging: attachments.dragging, files: attachments.files, onPaste: attachments.onPaste, onImageOpen, onRemove: attachments.remove, onFiles: attachments.addFiles, setDragging: attachments.setDragging }}

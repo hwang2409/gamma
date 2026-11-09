@@ -19,8 +19,10 @@ class Reference {
   deliveryOperations = new Map<string, string>();
   lastAttached: string | null = null;
   disconnected = false;
-  /** A delivery-status query takes a fresh operation for each queued or retrying delivery of the run. */
-  query(runId: string) { for (const [id, state] of this.deliveries.get(runId) ?? []) if (state !== "requesting" && state !== "dropped") this.deliveryOperations.set(id, "generated"); }
+  /**
+   * Delivery status is asked and acted on only by the page that shows the run live (an OPEN_OK this walk never emits), so
+   * here no query takes an operation and no status answer acts; the delivery owner's table in run-open.test.ts covers them.
+   */
   stopOperations = new Map<string, string>();
   settings = new Map<string, { desired?: string; loaded?: string; pending?: string; error?: string }>();
   canonical(id: string) { return this.aliases.get(id) ?? id; }
@@ -31,16 +33,16 @@ class Reference {
       case "FIRST_SEND": if (["draft", "failed"].includes(this.lifecycle.get(event.runId)?.kind ?? "draft")) this.lifecycle.set(event.runId, { kind: "creating", operation: event.operationId }); break;
       case "NEW_SESSION_OK": if (this.lifecycle.get(event.runId)?.operation === event.operationId) { const old = this.lifecycle.get(event.runId)!; this.lifecycle.delete(event.runId); this.lifecycle.set(event.sessionId, { ...old, kind: "opening" }); const moved = this.settings.get(event.runId); this.settings.delete(event.runId); if (moved) this.settings.set(event.sessionId, moved); else this.settings.delete(event.sessionId); this.aliases.set(event.runId, event.sessionId); if (this.selected === event.runId) this.selected = event.sessionId; this.attached = event.sessionId; this.turn = "idle"; } break;
       case "NEW_SESSION_FAIL": if (this.lifecycle.get(event.runId)?.operation === event.operationId) this.lifecycle.set(event.runId, { kind: "failed" }); break;
-      case "STATUS": this.attached = event.sessionId ?? null; this.turn = event.sessionId ? event.turn : null; this.disconnected = false; if (event.sessionId) this.query(event.sessionId); break;
-      case "RESUME_OK": if (![...this.lifecycle.values()].some((value) => value.kind === "creating") && (!this.attached || this.turn === "idle" || this.attached === event.runId)) { this.attached = event.runId; this.turn = "idle"; this.disconnected = false; this.query(event.runId); this.lifecycle.set(event.runId, { kind: "opening", operation: event.operationId }); const value = this.settings.get(event.runId) ?? {}; this.settings.set(event.runId, { ...value, pending: event.operationId, error: undefined }); } break;
+      case "STATUS": this.attached = event.sessionId ?? null; this.turn = event.sessionId ? event.turn : null; this.disconnected = false; break;
+      case "RESUME_OK": if (![...this.lifecycle.values()].some((value) => value.kind === "creating") && (!this.attached || this.turn === "idle" || this.attached === event.runId)) { this.attached = event.runId; this.turn = "idle"; this.disconnected = false; this.lifecycle.set(event.runId, { kind: "opening", operation: event.operationId }); const value = this.settings.get(event.runId) ?? {}; this.settings.set(event.runId, { ...value, pending: event.operationId, error: undefined }); } break;
       case "RESUME_BUSY": this.lifecycle.set(event.runId, { kind: "opening", operation: event.operationId }); break;
       case "RESUME_FAIL": if (this.lifecycle.get(event.runId)?.operation === event.operationId) this.lifecycle.set(event.runId, { kind: "failed" }); break;
       case "FIRST_PAGE": if (!event.operationId || !this.lifecycle.get(event.runId)?.operation || this.lifecycle.get(event.runId)?.operation === event.operationId) this.lifecycle.set(event.runId, { kind: "open" }); break;
       case "TURN_START": if (this.attached === event.runId) this.turn = event.turn ?? "running"; break;
-      case "TURN_END": if (this.attached === event.runId) { this.turn = "idle"; for (const [id, state] of this.deliveries.get(event.runId) ?? []) if (state !== "requesting" && state !== "dropped") this.deliveryOperations.set(id, "generated"); } break;
+      case "TURN_END": if (this.attached === event.runId) { this.turn = "idle"; } break;
       case "DELIVERY_BEGIN": { const items = this.deliveries.get(event.runId) ?? new Map(); items.set(event.delivery.id, "requesting"); this.deliveryMethods.set(event.delivery.id, event.delivery.method); this.deliveryOperations.set(event.delivery.id, event.operationId); this.deliveries.set(event.runId, items); break; }
-      case "DELIVERY_ACK": { if (this.deliveryOperations.get(event.intentId) !== event.operationId) break; const items = this.deliveries.get(event.runId); if (event.queued && !event.failed && items?.get(event.intentId) !== "retrying") items.set(event.intentId, "queued"); else items?.delete(event.intentId); break; }
-      case "DELIVERY_STATUS": { if (this.deliveryOperations.get(event.intentId) !== event.operationId) break; const items = this.deliveries.get(event.runId); if (event.status === "delivered") items?.delete(event.intentId); else if (items?.get(event.intentId) !== "dropped") { items?.set(event.intentId, "retrying"); this.deliveryOperations.set(event.intentId, "generated"); } break; }
+      case "DELIVERY_ACK": { if (this.deliveryOperations.get(event.intentId) !== event.operationId) break; const items = this.deliveries.get(event.runId); if (event.queued && !event.failed) items.set(event.intentId, "queued"); else items?.delete(event.intentId); break; }
+      case "DELIVERY_STATUS": break;
       case "STOP": this.stopOperations.set(event.runId, event.operationId ?? "generated"); break;
       case "STOP_OK": { if (this.stopOperations.get(event.runId) !== event.operationId) break; this.stopOperations.delete(event.runId); const items = this.deliveries.get(event.runId); for (const [id] of items ?? []) if (this.deliveryMethods.get(id) === "steer") items!.set(id, "dropped"); break; }
       case "STOP_FAIL": if (this.stopOperations.get(event.runId) === event.operationId) this.stopOperations.delete(event.runId); break;
@@ -48,7 +50,7 @@ class Reference {
       case "SETTINGS_LOAD": case "SETTINGS_WRITE": { const value = this.settings.get(event.runId) ?? {}; this.settings.set(event.runId, { ...value, pending: event.operationId, error: undefined }); break; }
       case "SETTINGS_OK": { const value = this.settings.get(event.runId); if (value?.pending === event.operationId) this.settings.set(event.runId, { desired: value.desired, loaded: event.approval_mode, pending: undefined }); break; }
       case "SETTINGS_FAIL": { const value = this.settings.get(event.runId); if (value?.pending === event.operationId) this.settings.set(event.runId, { ...value, pending: undefined, error: event.error }); break; }
-      case "RECONNECT": if (this.disconnected && this.lastAttached) this.query(this.lastAttached); break;
+      case "RECONNECT": break;
       case "DISCONNECT": this.lastAttached = this.disconnected ? null : this.attached; this.disconnected = true; this.attached = null; this.turn = null; for (const items of this.deliveries.values()) for (const [id, state] of items) if (state === "requesting") items.set(id, "queued"); break;
       default: break;
     }
@@ -117,11 +119,14 @@ test("mutation: resume cannot replace another run's active turn", () => {
   expect(observe(correct.state, correct.effects)).not.toEqual(observe(mutant.state, mutant.effects));
 });
 
-test("mutation: reconnect reconciles each durable delivery", () => {
+test("mutation: the open of the run on screen reconciles each durable delivery", () => {
   let state = reduceWorkspace(initial(), { type: "NAVIGATED", entryId: entry(1), runId: session(1) }).state;
   state = reduceWorkspace(state, { type: "DELIVERY_BEGIN", runId: session(1), delivery: { id: "intent", attemptId: "intent", operationId: operation(1), method: "steer", text: "keep this", images: [], state: "requesting" }, operationId: operation(1) }).state;
   state = reduceWorkspace(reduceWorkspace(state, { type: "STATUS", sessionId: session(1), turn: "running" }).state, { type: "DISCONNECT" }).state;
-  const correct = reduceWorkspace(state, { type: "RECONNECT" });
+  state = reduceWorkspace(reduceWorkspace(state, { type: "RECONNECT" }).state, { type: "STATUS", sessionId: session(1), turn: "running" }).state;
+  const opening = state.runs.get(session(1))!.openOperation!;
+  const correct = reduceWorkspace(state, { type: "OPEN_OK", runId: session(1), operationId: opening, open: { id: session(1), lease: { release() {} } as never, stale: false, history: { messages: 0, complete: true }, syncing: false } });
+  expect(correct.effects.map((effect) => effect.type)).toContain("delivery-status");
   const mutant = { ...correct, effects: correct.effects.filter((effect) => effect.type !== "delivery-status") };
   expect(observe(correct.state, correct.effects)).not.toEqual(observe(mutant.state, mutant.effects));
 });

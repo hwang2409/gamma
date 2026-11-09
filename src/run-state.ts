@@ -1,6 +1,7 @@
 import type { QueuedImage } from "./image-queue";
 import type { OpenFailure, OpenRun, SessionMeta, ServerStatus } from "./session";
 import { catalogModels, catalogProviders } from "./settings";
+import { decideSend, queryDeliveries, reduceDelivery, restoreSaved, restoreText, savedRun, showsLive, type DeliveryEvent, type PendingDelivery, type RetryDraft, type SavedRun } from "./delivery-owner";
 
 export type Brand<T, Name extends string> = T & { readonly __brand: Name };
 export type DraftRunId = Brand<`draft:${string}`, "DraftRunId">;
@@ -10,7 +11,6 @@ export type EntryId = Brand<string, "EntryId">;
 export type IntentId = Brand<string, "IntentId">;
 export type OperationId = Brand<string, "OperationId">;
 export type DeliveryMethod = "send" | "steer" | "send_images" | "opaque";
-export type PendingDelivery = { id: string; attemptId: string; operationId: OperationId; method: DeliveryMethod; text: string; images: readonly QueuedImage[]; state: "requesting" | "queued" | "retrying" | "dropped" };
 export type SessionSettings = { model?: string; approval_mode?: "ask" | "allow"; plan_mode?: boolean };
 export type WritableSessionSettings = Pick<SessionSettings, "model" | "approval_mode">;
 export type RunModel = (
@@ -49,8 +49,10 @@ export type RunRecord = {
   readonly session?: SessionMeta;
   readonly submitting?: boolean;
   readonly lastDeliveryMethod?: DeliveryMethod;
-  /** The delivery id of a draft whose last send failed: a retry of the same draft reuses it, so zeta dedupes it. */
-  readonly retryDelivery?: { id: string; key: string };
+  /** The delivery id of a draft whose last send is not confirmed: a retry of the same draft reuses it, so zeta dedupes it. */
+  readonly retryDelivery?: RetryDraft;
+  /** Why a resend the user asked for did not go (shown by the composer). */
+  readonly deliveryNote?: string;
 };
 export type AttachmentState =
   | { kind: "detached" }
@@ -85,7 +87,6 @@ export type WorkspaceEvent =
   | { type: "ENSURE_RUN"; runId: RunId; model?: RunModel; text?: string }
   | { type: "COMPOSER_EDIT"; runId: RunId; text?: string; attachments?: readonly QueuedImage[] }
   | { type: "REMOVE_ATTACHMENT"; runId: RunId; index: number }
-  | { type: "DELIVERY_SETTLE"; runId: RunId; intentId: string; accepted: boolean }
   | { type: "PROMOTE"; runId: DraftRunId; sessionId: SessionId }
   | { type: "MODEL_SET"; runId: RunId; model: RunModel }
   | { type: "MODEL_DEFERRED"; runId: RunId; deferred: boolean }
@@ -110,12 +111,8 @@ export type WorkspaceEvent =
   | { type: "FIRST_PAGE"; runId: SessionId; operationId?: OperationId; lease?: unknown; title?: string; transcript?: string }
   | { type: "TURN_START"; runId: SessionId; turn?: "running" | "tool" | "approval" }
   | { type: "TURN_END"; runId: SessionId }
-  | { type: "DELIVERY_BEGIN"; runId: RunId; delivery: PendingDelivery; operationId: OperationId }
-  | { type: "DELIVERY_ACK"; runId: RunId; intentId: string; operationId: OperationId; attemptId: string; queued?: boolean; failed?: boolean; /** zeta did no work for this id (or it never reached zeta), so a retry needs no dedupe. */ refused?: boolean }
-  /** zeta's `delivery_status` answer: `unknown` means zeta never took this id (the page left before the frame arrived). */
-  | { type: "DELIVERY_STATUS"; runId: RunId; intentId: string; operationId: OperationId; status: "delivered" | "dropped" | "unknown" }
+  | DeliveryEvent
   | { type: "DELIVERY_RECONCILE"; runId: RunId }
-  | { type: "DELIVERY_RESEND"; runId: RunId; intentId: string }
   | { type: "SETTINGS_DESIRED"; runId: RunId; model?: string; approval_mode?: "ask" | "allow" }
   | { type: "SETTINGS_LOAD" | "SETTINGS_WRITE"; runId: SessionId; operationId: OperationId }
   | { type: "CATALOG_LOAD"; runId?: SessionId; operationId: OperationId }
@@ -131,9 +128,6 @@ export type WorkspaceEvent =
 const canonical = (state: WorkspaceState, id: RunId): RunId => state.aliases.get(id as DraftRunId) ?? id;
 const blank = (id: RunId): RunRecord => ({ id, lifecycle: id.startsWith("draft:") ? { kind: "draft" } : { kind: "opening" }, text: "", attachments: [], deliveries: new Map(), model: { choice: "default" }, settings: {} });
 const operationMatches = (record: RunRecord | undefined, operationId: OperationId) => record?.lifecycle.kind === "creating" ? record.lifecycle.operationId === operationId : record?.lifecycle.kind === "opening" ? !record.lifecycle.operationId || record.lifecycle.operationId === operationId : false;
-/** Takes a message zeta accepted out of the draft it was sent from. */
-const consumeDelivered = (record: RunRecord, delivery: PendingDelivery): RunRecord => ({ ...record, text: record.text.startsWith(delivery.text) ? record.text.slice(delivery.text.length) : record.text, attachments: record.attachments.filter((image) => !delivery.images.includes(image)) });
-const restoreText = (current: string, restored: string) => current.startsWith(restored) ? current : current ? `${restored}${current.startsWith("\n") ? "" : "\n"}${current}` : restored;
 
 /** Pure owner of run identity, lifecycle, attachment, settings, delivery, and browser-entry policy. */
 export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): { state: WorkspaceState; effects: WorkspaceEffect[] } {
@@ -163,22 +157,26 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     if (!owner || owner === runId) effects.push({ type: "open-session", runId, operationId });
   };
   /** Asks zeta what became of each settled-or-queued delivery; the delivery takes the query's operation so only its answer counts. */
-  const queryDeliveries = (runId: RunId) => { if (runs.get(canonical({ ...state, aliases }, runId))?.deliveries.size) update(runId, (record) => { const deliveries = new Map(record.deliveries); for (const [intentId, delivery] of deliveries) { if (delivery.state === "dropped" || delivery.state === "requesting") continue; const operationId = crypto.randomUUID() as OperationId; deliveries.set(intentId, { ...delivery, operationId }); effects.push({ type: "delivery-status", runId: record.id as SessionId, operationId, intentId }); } return { ...record, deliveries }; }); };
+  /** The workspace as the event sees it so far, for the delivery owner. */
+  const now = (): WorkspaceState => ({ ...state, entry, runs, aliases, attachment, connected });
+  const query = (runId: RunId, withRetry = false) => { if (runs.has(canonical({ ...state, aliases }, runId))) update(runId, (record) => queryDeliveries(now(), record, effects, withRetry)); };
+  /** Leaving a run ends "sent by this view": only the view that sent a steer may resend it automatically. */
+  const leaveSelected = (next: RunId) => { const selected = canonical({ ...state, aliases }, entry.run); if (selected !== next && runs.get(selected)?.deliveries.size) update(selected, (record) => ({ ...record, deliveries: new Map([...record.deliveries].map(([id, delivery]) => [id, { ...delivery, here: undefined }])) })); };
   switch (event.type) {
     case "ENSURE_RUN": if (!runs.has(canonical({ ...state, aliases }, event.runId))) runs.set(event.runId, { ...blank(event.runId), ...(event.model ? { model: event.model } : {}), ...(event.text ? { text: event.text } : {}) }); break;
     case "EVICT": for (const id of event.runIds) { const record = runs.get(id); if (record?.open && !id.startsWith("draft:")) effects.push({ type: "release-lease", runId: id as SessionId }); runs.delete(id); } break;
     case "COMPOSER_EDIT": update(event.runId, (record) => ({ ...record, text: event.text ?? record.text, attachments: event.attachments ?? record.attachments })); break;
     case "REMOVE_ATTACHMENT": update(event.runId, (record) => ({ ...record, attachments: record.attachments.filter((_, index) => index !== event.index) })); break;
-    case "DELIVERY_SETTLE": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); const delivery = deliveries.get(event.intentId); deliveries.delete(event.intentId); if (!delivery || !event.accepted) return { ...record, deliveries }; return { ...consumeDelivered(record, delivery), deliveries }; }); break;
+    case "DELIVERY_BEGIN": case "DELIVERY_ACK": case "DELIVERY_STATUS": case "DELIVERY_SETTLE": case "DELIVERY_RESEND": update(event.runId, (record) => reduceDelivery(now(), record, event, effects)); break;
     case "PROMOTE": { const source = runs.get(event.runId) ?? blank(event.runId); const target = runs.get(event.sessionId); runs.delete(event.runId); runs.set(event.sessionId, target && (target.text || target.attachments.length || target.deliveries.size) ? target : { ...source, id: event.sessionId, lifecycle: { kind: "opening" } }); aliases.set(event.runId, event.sessionId); if (entry.run === event.runId) entry = { ...entry, run: event.sessionId }; else notice = { runId: event.sessionId }; break; }
     case "MODEL_SET": update(event.runId, (record) => ({ ...record, model: { ...event.model, deferred: record.model.deferred }, settings: record.id.startsWith("draft:") ? { ...record.settings, desired: { ...record.settings.desired, model: event.model.choice === "explicit" ? event.model.model : undefined } } : record.settings })); break;
     case "MODEL_DEFERRED": update(event.runId, (record) => ({ ...record, model: { ...record.model, deferred: event.deferred } })); break;
     case "DISMISS_NOTICE": notice = undefined; break;
     case "NEW_RUN":
-      cancelSelectedOpen(event.runId); runs.set(event.runId, blank(event.runId)); entry = { id: event.entryId, run: event.runId }; break;
+      leaveSelected(event.runId); cancelSelectedOpen(event.runId); runs.set(event.runId, blank(event.runId)); entry = { id: event.entryId, run: event.runId }; break;
     case "NAVIGATED": {
       const target = canonical({ ...state, aliases }, event.runId);
-      cancelSelectedOpen(target); entry = { id: event.entryId, run: target }; if (!runs.has(target)) runs.set(target, blank(target));
+      leaveSelected(target); cancelSelectedOpen(target); entry = { id: event.entryId, run: target }; if (!runs.has(target)) runs.set(target, blank(target));
       if (connected && !target.startsWith("draft:") && !openingOwner()) beginOpen(target as SessionId, crypto.randomUUID() as OperationId);
       break;
     }
@@ -204,7 +202,6 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
       if (runs.get(canonical({ ...state, aliases }, entry.run))?.openError?.busy) update(entry.run, (record) => ({ ...record, openError: undefined }));
       if (event.sessionId) {
         update(event.sessionId, (record) => ({ ...record, session: event.session ?? record.session }));
-        queryDeliveries(event.sessionId);
       }
       break;
     }
@@ -212,7 +209,7 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     // The reopen's replay is about to dispose the old store: stop showing it. A busy or failed resume never gets here.
     case "OPEN_EVICTED": update(event.runId, (record) => record.openOperation === event.operationId && record.open && !record.open.stale ? { ...record, open: undefined } : record); break;
     case "OPEN_PROGRESS": update(event.runId, (record) => record.openOperation === event.operationId ? { ...record, openingMessages: event.messages } : record); break;
-    case "OPEN_OK": update(event.runId, (record) => record.openOperation === event.operationId ? { ...record, lifecycle: { kind: "open", lease: event.open.lease }, open: event.open, openedBy: event.operationId, openingMessages: undefined, openError: undefined, session: event.session ?? record.session } : record); break;
+    case "OPEN_OK": update(event.runId, (record) => record.openOperation === event.operationId ? { ...record, lifecycle: { kind: "open", lease: event.open.lease }, open: event.open, openedBy: event.operationId, openingMessages: undefined, openError: undefined, session: event.session ?? record.session } : record); query(event.runId, true); break;
     case "OPEN_COMPLETE": update(event.runId, (record) => record.openOperation === event.operationId ? { ...record, lifecycle: { kind: "open", lease: event.open.lease }, open: event.open, openingMessages: undefined } : record); break;
     case "OPEN_FAIL": update(event.runId, (record) => record.openOperation === event.operationId ? { ...record, lifecycle: record.open ? record.lifecycle : { kind: "failed", error: event.error }, openOperation: undefined, openingMessages: undefined, openError: { id: event.runId, message: event.error, busy: event.busy } } : record); break;
     case "OPEN_DISMISS": update(event.runId, (record) => ({ ...record, openError: undefined })); break;
@@ -220,7 +217,7 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
       const creatingOwner = [...runs.values()].some((record) => record.submitting && record.lifecycle.kind === "creating");
       if (creatingOwner || (attachment.kind === "attached" && attachment.turn !== "idle" && attachment.sessionId !== event.runId)) break;
       attachment = { kind: "attached", sessionId: event.runId, turn: "idle" }; update(event.runId, (current) => ({ ...current, lifecycle: { kind: "opening", operationId: event.operationId }, settings: { ...current.settings, pending: { operationId: event.operationId, kind: "load" }, error: undefined } })); effects.push({ type: "load-settings", runId: event.runId, operationId: event.operationId });
-      queryDeliveries(event.runId); break;
+      break;
     }
     case "RESUME_BUSY": update(event.runId, (record) => ({ ...record, lifecycle: { kind: "opening", operationId: event.operationId, waitingForIdle: event.owner } })); break;
     case "RESUME_FAIL": update(event.runId, (record) => operationMatches(record, event.operationId) ? { ...record, lifecycle: { kind: "failed", error: event.error } } : record); break;
@@ -229,18 +226,10 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     case "TURN_END": {
       if (attachment.kind !== "attached" || attachment.sessionId !== event.runId) break;
       attachment = { ...attachment, turn: "idle" };
+      query(event.runId);
       break;
     }
-    case "DELIVERY_BEGIN": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); deliveries.set(event.delivery.id, event.delivery); effects.push(event.delivery.method === "send_images" ? { type: "send-images", runId: record.id as SessionId, operationId: event.operationId, intentId: event.delivery.id } : { type: "deliver", runId: record.id, operationId: event.operationId, intentId: event.delivery.id }); return { ...record, deliveries, submitting: false, lastDeliveryMethod: event.delivery.method }; }); break;
-    case "DELIVERY_ACK": {
-      // A failure keeps the draft and its attempt id for the retry (zeta returns duplicate:true if the first one landed);
-      // only a definite refusal (accepted:false, e.g. dropped) needs a new id.
-      update(event.runId, (record) => { const deliveries = new Map(record.deliveries); const delivery = deliveries.get(event.intentId); if (delivery?.operationId !== event.operationId) return record; if (event.queued && !event.failed && delivery.state !== "retrying") deliveries.set(event.intentId, { ...delivery, attemptId: event.attemptId, state: "queued" }); else deliveries.delete(event.intentId); if (event.failed) return { ...record, deliveries, retryDelivery: event.refused || !event.attemptId ? undefined : { id: event.attemptId, key: deliveryKey(delivery.text, delivery.images) } }; return { ...consumeDelivered(record, delivery), deliveries, retryDelivery: undefined }; });
-      break;
-    }
-    case "DELIVERY_RESEND": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); const delivery = deliveries.get(event.intentId); if (delivery?.state === "dropped" && delivery.method !== "opaque") { const operationId = crypto.randomUUID() as OperationId; deliveries.set(event.intentId, { ...delivery, operationId, state: "retrying" }); effects.push({ type: "deliver", runId: record.id, operationId, intentId: event.intentId }); } return { ...record, deliveries }; }); break;
-    case "DELIVERY_RECONCILE": queryDeliveries(event.runId); break;
-    case "DELIVERY_STATUS": update(event.runId, (record) => { const deliveries = new Map(record.deliveries); const delivery = deliveries.get(event.intentId); if (delivery?.operationId !== event.operationId) return record; if (event.status === "delivered") { deliveries.delete(event.intentId); return { ...consumeDelivered(record, delivery), deliveries, retryDelivery: undefined }; } else if (event.status === "unknown" && delivery.method !== "opaque") { const operationId = crypto.randomUUID() as OperationId; deliveries.set(event.intentId, { ...delivery, operationId, state: "requesting" }); effects.push({ type: "deliver", runId: record.id, operationId, intentId: event.intentId }); } else if (delivery.method === "opaque") { deliveries.delete(event.intentId); return { ...record, text: restoreText(record.text, delivery.text), deliveries }; } else if (delivery.state !== "dropped") { const operationId = crypto.randomUUID() as OperationId; deliveries.set(event.intentId, { ...delivery, operationId, state: "retrying" }); effects.push({ type: "deliver", runId: record.id, operationId, intentId: event.intentId }); } return { ...record, deliveries }; }); break;
+    case "DELIVERY_RECONCILE": query(event.runId); break;
     case "SETTINGS_DESIRED": update(event.runId, (record) => ({ ...record, model: event.model === undefined ? record.model : { ...(event.model ? { choice: "explicit" as const, model: event.model } : { choice: "default" as const, resolvedDefault: record.model.resolvedDefault }), deferred: record.model.deferred }, settings: { ...record.settings, desired: { ...record.settings.desired, ...(event.model !== undefined ? { model: event.model || undefined } : {}), ...(event.approval_mode !== undefined ? { approval_mode: event.approval_mode } : {}) }, error: undefined } })); break;
     case "SETTINGS_LOAD": update(event.runId, (record) => { effects.push({ type: "load-settings", runId: event.runId, operationId: event.operationId }); return { ...record, settings: { ...record.settings, pending: { operationId: event.operationId, kind: "load" }, error: undefined } }; }); break;
     case "SETTINGS_WRITE": update(event.runId, (record) => { const model = record.settings.desired?.model ?? record.settings.loaded?.model; const approvalMode = record.settings.desired?.approval_mode ?? record.settings.loaded?.approval_mode; const settings = { ...(model !== undefined ? { model } : {}), ...(approvalMode !== undefined ? { approval_mode: approvalMode } : {}) }; effects.push({ type: "set-settings", runId: event.runId, operationId: event.operationId, settings }); return { ...record, settings: { ...record.settings, pending: { operationId: event.operationId, kind: "write" }, error: undefined } }; }); break;
@@ -248,7 +237,7 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     case "CATALOG_OK": if (state.catalogPending === event.operationId) { state = { ...state, modelCatalog: event.catalog, catalogPending: undefined, catalogError: undefined }; } break;
     case "CATALOG_FAIL": if (state.catalogPending === event.operationId) state = { ...state, catalogPending: undefined, catalogError: event.error }; break;
     case "STOP": { const operationId = event.operationId ?? crypto.randomUUID() as OperationId; update(event.runId, (record) => ({ ...record, stopOperation: operationId })); effects.push({ type: "abort", runId: event.runId, operationId }); break; }
-    case "STOP_OK": update(event.runId, (record) => record.stopOperation !== event.operationId ? record : ({ ...record, stopOperation: undefined, deliveries: new Map([...record.deliveries].filter(([, delivery]) => delivery.method === "steer").map(([id, delivery]) => [id, { ...delivery, state: "dropped" as const }])) })); break;
+    case "STOP_OK": update(event.runId, (record) => record.stopOperation !== event.operationId ? record : ({ ...record, stopOperation: undefined, deliveries: new Map([...record.deliveries].filter(([, delivery]) => delivery.method === "steer").map(([id, delivery]) => [id, { ...delivery, state: "dropped" as const, spent: true as const, why: "stop" as const }])) })); break;
     case "STOP_FAIL": update(event.runId, (record) => record.stopOperation === event.operationId ? { ...record, stopOperation: undefined } : record); break;
     case "DISCONNECT":
       connected = false;
@@ -260,7 +249,6 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
       // A new connection may succeed where the old one failed: the post-step tries the selected run's open once more.
       if (runs.get(canonical({ ...state, aliases }, entry.run))?.openError?.busy === false) update(entry.run, (record) => ({ ...record, openError: undefined }));
       effects.push({ type: "status", operationId: crypto.randomUUID() as OperationId });
-      if (attachment.kind === "disconnected" && attachment.lastAttached) queryDeliveries(attachment.lastAttached);
       break;
     case "SETTINGS_OK": update(event.runId, (record) => record.settings.pending?.operationId !== event.operationId ? record : { ...record, settings: { loaded: { model: event.model, approval_mode: event.approval_mode, plan_mode: event.plan_mode }, desired: record.settings.desired } }); break;
     case "SETTINGS_FAIL": update(event.runId, (record) => record.settings.pending?.operationId !== event.operationId ? record : { ...record, settings: { ...record.settings, pending: undefined, error: event.error }, submitting: false }); break;
@@ -269,7 +257,7 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
   const selected = canonical({ ...state, aliases }, entry.run);
   const record = runs.get(selected);
   const inFlight = Boolean(record?.openOperation) && record?.openOperation !== record?.openedBy;
-  const live = attachment.kind === "attached" && attachment.sessionId === selected && record?.open && !record.open.stale && !inFlight;
+  const live = showsLive(now(), selected);
   if (connected && attachment.kind !== "disconnected" && !selected.startsWith("draft:") && record && !live && !inFlight && !record.openError && !openingOwner())
     beginOpen(selected as SessionId, crypto.randomUUID() as OperationId);
   return { state: { ...state, entry, runs, aliases, attachment, connected, ...(notice ? { notice } : { notice: undefined }) }, effects };
@@ -283,7 +271,6 @@ export const activeRun = (state: WorkspaceState) => state.attachment.kind === "a
 export type InputBlock = "offline" | "opening" | "reconnecting" | "open-failed" | "syncing" | "pending" | "waits-for-active";
 export type RunInput = { run: RunId; open: OpenRun | null; accept: boolean; block: InputBlock | null; /** Why the run's model and approval mode cannot change now: a change made before the run opens would be lost. */ settingsBlock: InputBlock | null; /** `loading`: zeta's history is being read; before that the run waits for zeta to attach it. */ opening: { messages: number; loading: boolean } | null };
 /** The executor guard: zeta's `send` has no session_id and goes to the attached runtime, so only that run may send. */
-export const canDeliver = (state: WorkspaceState, runId: RunId) => Boolean(state.connected) && state.attachment.kind === "attached" && state.attachment.sessionId === canonical(state, runId);
 /** The one answer to "which open does this run show, and can its composer submit". */
 export const runInput = (state: WorkspaceState, runId: RunId = state.entry.run): RunInput => {
   const run = canonical(state, runId);
@@ -310,7 +297,6 @@ export const inputBlockText = (block: InputBlock | null, active: string | null) 
   return block ? "sending is paused until the run opens" : null;
 };
 export const settingsBlockText = (block: InputBlock | null) => block === "offline" ? "settings can change once zeta reconnects" : block ? "settings can change once the run opens" : undefined;
-const deliveryKey = (text: string, images: readonly QueuedImage[]) => JSON.stringify([text, images.map((image) => image.url)]);
 
 export const workspaceRunState = (state: WorkspaceState) => {
   const record = selectedRun(state);
@@ -330,9 +316,8 @@ export const workspaceRunState = (state: WorkspaceState) => {
 type DefaultModels = Record<string, string>;
 type RunStorage = Pick<globalThis.Storage, "getItem" | "setItem">;
 const DEFAULTS_KEY = "gamma-run-defaults";
+/** One entry per run (SavedRun): its draft text, unconfirmed retry id, and open deliveries, keyed by run id. */
 const DRAFTS_KEY = "gamma-run-drafts";
-const DELIVERIES_KEY = "gamma-deliveries";
-const RETRY_KEY = "gamma-retry-deliveries";
 const DEFAULTS_LIMIT = 32;
 const parseMap = (storage: RunStorage | undefined, key: string): Record<string, string> => { try { const value = JSON.parse(storage?.getItem(key) ?? "null"); return value && typeof value === "object" ? value : {}; } catch { return {}; } };
 
@@ -345,58 +330,50 @@ export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefi
   const listeners = new Set<() => void>();
   let active: RunId = seed;
   let defaults = parseMap(storage, DEFAULTS_KEY);
-  let drafts = parseMap(draftStorage, DRAFTS_KEY);
-  let persistedDeliveries: Record<string, Array<Omit<PendingDelivery, "images">>> = {};
-  try { persistedDeliveries = JSON.parse(draftStorage?.getItem(DELIVERIES_KEY) ?? "{}"); } catch {}
-  let persistedRetries: Record<string, RunRecord["retryDelivery"]> = {};
-  try { persistedRetries = JSON.parse(draftStorage?.getItem(RETRY_KEY) ?? "{}"); } catch {}
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
   let executeEffects: (effects: readonly WorkspaceEffect[]) => void = () => {};
   const emit = () => listeners.forEach((listener) => listener());
-  // The tab's sessionStorage is shared by every page this tab loads: keep the entries of runs this page never loaded.
-  const persistDeliveries = () => {
+  /** Runs this page holds: the run it shows, and runs it typed into or sent to. Only their saved entries are read or written. */
+  const held = new Set<RunId>();
+  // The tab's sessionStorage is shared by every page the tab loads (and a page back from the bfcache holds an old copy): read it fresh before each write.
+  const readSaved = (): Record<string, SavedRun> => { try { const value = JSON.parse(draftStorage?.getItem(DRAFTS_KEY) ?? "null"); return value && typeof value === "object" ? value : {}; } catch { return {}; } };
+  const persist = () => {
+    if (persistTimer) { clearTimeout(persistTimer); persistTimer = null; }
+    const saved = readSaved();
+    for (const id of held) { const record = state.runs.get(id); const entry = record && savedRun(record); if (entry) saved[id] = entry; else delete saved[id]; }
+    try { draftStorage?.setItem(DRAFTS_KEY, JSON.stringify(saved)); } catch {}
+  };
+  /** Takes up the run on screen, and any run this page changed, restoring its saved entry once. Other runs' entries stay untouched. */
+  const hold = () => {
+    const selected = canonical(state, state.entry.run);
+    for (const [draft, session] of state.aliases) if (held.has(draft)) held.add(session);
+    let runs: Map<RunId, RunRecord> | undefined;
     for (const [id, record] of state.runs) {
-      const textOnly = [...record.deliveries.values()].filter((delivery) => delivery.method !== "send_images").map(({ images: _, ...delivery }) => delivery);
-      if (textOnly.length) persistedDeliveries[id] = textOnly; else delete persistedDeliveries[id];
-      if (record.retryDelivery) persistedRetries[id] = record.retryDelivery; else delete persistedRetries[id];
+      if (held.has(id) || (id !== selected && !record.text && !record.attachments.length && !record.deliveries.size && !record.retryDelivery)) continue;
+      held.add(id);
+      const saved = readSaved()[id];
+      const restored = saved && typeof saved === "object" ? restoreSaved(record, saved) : record;
+      if (restored !== record) (runs ??= new Map(state.runs)).set(id, restored);
     }
-    try { draftStorage?.setItem(DELIVERIES_KEY, JSON.stringify(persistedDeliveries)); draftStorage?.setItem(RETRY_KEY, JSON.stringify(persistedRetries)); } catch {}
+    if (runs) state = { ...state, runs };
   };
   let disposed = false;
   // A late reply after dispose (the page is gone) must not rewrite the tab's saved drafts and deliveries.
   const dispatch = (event: WorkspaceEvent, notify = true) => {
     if (disposed) return;
     const result = reduceWorkspace(state, event);
-    state = hydrate(state, result.state);
-    persistDeliveries();
-    // A message zeta took leaves the saved draft now, not after the debounce: a page left in between must not bring it back.
-    if ((event.type === "DELIVERY_ACK" && !event.failed) || event.type === "DELIVERY_STATUS") { queueDraft(event.runId, state.runs.get(canonical(state, event.runId))?.text ?? ""); if (persistTimer) { clearTimeout(persistTimer); persistDrafts(); } }
+    state = result.state;
+    hold();
+    // Typing is saved after a short pause; every other change (a delivery id, an accepted send) is saved before its effects run.
+    if (event.type === "COMPOSER_EDIT") { if (persistTimer) clearTimeout(persistTimer); persistTimer = setTimeout(persist, 120); } else persist();
     executeEffects(result.effects);
     if (notify) emit();
   };
   const key = (id: string) => canonical(state, id as RunId);
-  const restoredDeliveries = (id: string) => new Map((persistedDeliveries[id] ?? []).flatMap((delivery) => delivery?.id && delivery.text && delivery.operationId && delivery.attemptId ? [[delivery.id, { ...delivery, images: [], state: delivery.state === "requesting" ? "queued" : delivery.state } as PendingDelivery]] : []));
-  /** A run this page has not held yet takes the tab's saved draft, deliveries, and retry id, whichever event created it. */
-  const hydrate = (previous: WorkspaceState, next: WorkspaceState) => {
-    let runs: Map<RunId, RunRecord> | undefined;
-    for (const [id, record] of next.runs) {
-      if (previous.runs.has(id)) continue;
-      const restored = record.deliveries.size ? record.deliveries : restoredDeliveries(id);
-      const deliveries = restored.size ? restored : record.deliveries;
-      const retry = persistedRetries[id];
-      const retryDelivery = record.retryDelivery ?? (retry?.id && retry.key ? retry : undefined);
-      const text = record.text || drafts[id] || "";
-      if (deliveries === record.deliveries && retryDelivery === record.retryDelivery && text === record.text) continue;
-      (runs ??= new Map(next.runs)).set(id, { ...record, text, deliveries, retryDelivery });
-    }
-    return runs ? { ...next, runs } : next;
-  };
   const value = (id: string): RunRecord => { const target = key(id); if (!state.runs.has(target)) dispatch({ type: "ENSURE_RUN", runId: target }, false); return state.runs.get(target)!; };
   const revoke = (images: readonly QueuedImage[]) => images.forEach((image) => URL.revokeObjectURL(image.url));
   const dirty = (record: RunRecord) => Boolean(record.text || record.attachments.length || record.deliveries.size || record.lifecycle.kind === "creating");
   const evict = () => { const clean = [...state.runs].filter(([id, record]) => id !== active && !dirty(record)); const evicted: RunId[] = []; while (clean.length > cleanLimit) { const [id, record] = clean.shift()!; revoke(record.attachments); evicted.push(id); } if (evicted.length) dispatch({ type: "EVICT", runIds: evicted }, false); };
-  const persistDrafts = () => { persistTimer = null; try { draftStorage?.setItem(DRAFTS_KEY, JSON.stringify(drafts)); } catch {} };
-  const queueDraft = (id: string, text: string) => { const target = key(id); if (text) drafts[target] = text; else delete drafts[target]; if (persistTimer) clearTimeout(persistTimer); persistTimer = setTimeout(persistDrafts, 120); };
   const persistDefault = (id: string, model: string) => { delete defaults[id]; defaults[id] = model; defaults = Object.fromEntries(Object.entries(defaults).slice(-DEFAULTS_LIMIT)); try { storage?.setItem(DEFAULTS_KEY, JSON.stringify(defaults)); } catch {} };
   const facade = {
     canonical(id: string) { return key(id); },
@@ -407,21 +384,21 @@ export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefi
     dispatch,
     subscribe(listener: () => void) { listeners.add(listener); return () => listeners.delete(listener); },
     activate(id: string, initialModel: RunModel = { choice: "default" }) { active = key(id); const existed = state.runs.has(active); value(active); if (!existed) dispatch({ type: "MODEL_SET", runId: active, model: initialModel }); evict(); },
-    edit(id: string, patch: { text?: string; attachments?: readonly QueuedImage[] }) { const current = value(id); const text = patch.text ?? current.text; dispatch({ type: "COMPOSER_EDIT", runId: key(id), text, ...(patch.attachments ? { attachments: patch.attachments } : {}) }); if (patch.text !== undefined) queueDraft(id, text); evict(); },
-    consumeDraft(id: string, text: string) { const current = value(id).text; const next = current.startsWith(text) ? current.slice(text.length) : current; dispatch({ type: "COMPOSER_EDIT", runId: key(id), text: next }); queueDraft(id, next); },
-    restoreDraft(id: string, text: string) { const next = restoreText(value(id).text, text); dispatch({ type: "COMPOSER_EDIT", runId: key(id), text: next }); queueDraft(id, next); },
+    edit(id: string, patch: { text?: string; attachments?: readonly QueuedImage[] }) { const current = value(id); const text = patch.text ?? current.text; dispatch({ type: "COMPOSER_EDIT", runId: key(id), text, ...(patch.attachments ? { attachments: patch.attachments } : {}) }); evict(); },
+    consumeDraft(id: string, text: string) { const current = value(id).text; const next = current.startsWith(text) ? current.slice(text.length) : current; dispatch({ type: "COMPOSER_EDIT", runId: key(id), text: next }); },
+    restoreDraft(id: string, text: string) { dispatch({ type: "COMPOSER_EDIT", runId: key(id), text: restoreText(value(id).text, text) }); },
     removeAttachment(id: string, index: number) { const image = value(id).attachments[index]; if (!image) return; URL.revokeObjectURL(image.url); dispatch({ type: "REMOVE_ATTACHMENT", runId: key(id), index }); },
     beginDelivery(id: string, delivery: Omit<PendingDelivery, "operationId" | "state">, operationId = crypto.randomUUID() as OperationId) { dispatch({ type: "DELIVERY_BEGIN", runId: key(id), delivery: { ...delivery, operationId, state: "requesting" }, operationId }); return operationId; },
     /** The delivery id for submitting this draft: the failed attempt's id when the same text and images are retried. */
-    deliveryIdFor(id: string, text: string, images: readonly QueuedImage[] = []) { const retry = value(id).retryDelivery; return retry && retry.key === deliveryKey(text, images) ? retry.id : `web-${crypto.randomUUID()}`; },
+    deliveryIdFor(id: string, text: string, images: readonly QueuedImage[] = []) { value(id); return decideSend(state, key(id), { kind: "enter", text, images }).id; },
     reconcileDeliveries(id: string) { dispatch({ type: "DELIVERY_RECONCILE", runId: key(id) }); },
     requestOpen(id: string, operationId = crypto.randomUUID() as OperationId) { const runId = key(id); if (!runId.startsWith("draft:")) dispatch({ type: "OPEN_REQUEST", runId: runId as SessionId, operationId }); return operationId; },
     startSession(id: string, choice: { model?: string; provider?: string; approval_mode?: "ask" | "allow" } = {}, operationId = crypto.randomUUID() as OperationId) { const runId = key(id); if (runId.startsWith("draft:")) dispatch({ type: "FIRST_SEND", runId: runId as DraftRunId, operationId, choice }); return operationId; },
     isCurrentOperation(id: string, operationId: OperationId) { const record = state.runs.get(key(id)); return record?.openOperation === operationId || (record?.lifecycle.kind === "creating" && record.lifecycle.operationId === operationId); },
     stop(id: string, operationId?: OperationId) { const runId = key(id); if (!runId.startsWith("draft:")) dispatch({ type: "STOP", runId: runId as SessionId, operationId }); },
     setEffectExecutor(executor: (effects: readonly WorkspaceEffect[]) => void) { executeEffects = executor; },
-    settleDelivery(id: string, deliveryId: string, status: "accepted" | "rejected") { const delivery = value(id).deliveries.get(deliveryId); if (!delivery) return; const kept = value(id).attachments.filter((image) => !delivery.images.includes(image)); if (status === "accepted") revoke(delivery.images.filter((image) => !kept.includes(image))); dispatch({ type: "DELIVERY_SETTLE", runId: key(id), intentId: deliveryId, accepted: status === "accepted" }); queueDraft(id, value(id).text); evict(); },
-    promote(from: string, to: string) { if (from === to) return; dispatch({ type: "PROMOTE", runId: from as DraftRunId, sessionId: to as SessionId }); if (drafts[from]) { drafts[to] = drafts[from]; delete drafts[from]; queueDraft(to, drafts[to]!); } if (active === from) active = to as SessionId; },
+    settleDelivery(id: string, deliveryId: string, status: "accepted" | "rejected") { const delivery = value(id).deliveries.get(deliveryId); if (!delivery) return; const kept = value(id).attachments.filter((image) => !delivery.images.includes(image)); if (status === "accepted") revoke(delivery.images.filter((image) => !kept.includes(image))); dispatch({ type: "DELIVERY_SETTLE", runId: key(id), intentId: deliveryId, accepted: status === "accepted" }); evict(); },
+    promote(from: string, to: string) { if (from === to) return; dispatch({ type: "PROMOTE", runId: from as DraftRunId, sessionId: to as SessionId }); if (active === from) active = to as SessionId; },
     setModel(id: string, model: RunModel) { dispatch({ type: "MODEL_SET", runId: key(id), model }); },
     setModelDeferred(id: string, deferred: boolean) { dispatch({ type: "MODEL_DEFERRED", runId: key(id), deferred }); },
     desireSettings(id: string, settings: WritableSessionSettings) { dispatch({ type: "SETTINGS_DESIRED", runId: key(id), ...settings }); },
@@ -430,7 +407,7 @@ export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefi
     loadCatalog(id: string | null, operationId: OperationId) { const runId = id ? key(id) : null; dispatch({ type: "CATALOG_LOAD", ...(runId && !runId.startsWith("draft:") ? { runId: runId as SessionId } : {}), operationId }); },
     dismissNotice() { dispatch({ type: "DISMISS_NOTICE" }); },
     resolveDefault(id: string, currentModel: string, createdWithDefault: boolean) { const persisted = defaults[id]; if (persisted) return facade.setModel(id, currentModel === persisted ? { choice: "default", resolvedDefault: persisted } : { choice: "explicit", model: currentModel, resolvedDefault: persisted }); if (createdWithDefault) { persistDefault(id, currentModel); return facade.setModel(id, { choice: "default", resolvedDefault: currentModel }); } facade.setModel(id, { choice: "explicit", model: currentModel }); },
-    dispose() { disposed = true; if (persistTimer) { clearTimeout(persistTimer); persistDrafts(); } const releases = [...state.runs].flatMap(([id, record]) => record.open && !id.startsWith("draft:") ? [{ type: "release-lease" as const, runId: id as SessionId }] : []); executeEffects(releases); executeEffects = () => {}; state.runs.forEach((record) => revoke(record.attachments)); state = { ...state, runs: new Map(), aliases: new Map() }; listeners.clear(); },
+    dispose() { if (persistTimer) persist(); disposed = true; const releases = [...state.runs].flatMap(([id, record]) => record.open && !id.startsWith("draft:") ? [{ type: "release-lease" as const, runId: id as SessionId }] : []); executeEffects(releases); executeEffects = () => {}; state.runs.forEach((record) => revoke(record.attachments)); state = { ...state, runs: new Map(), aliases: new Map() }; listeners.clear(); },
   };
   return facade;
 }

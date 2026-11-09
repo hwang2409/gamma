@@ -32,8 +32,15 @@ async function server(answer: (method: string, params: Record<string, unknown>) 
 }
 const ids = () => { let n = 0; return () => `id-${++n}`; };
 const ok = { result: { accepted: true } };
-/** The executor sends only for the run zeta is attached to (canDeliver); a status reply attaches "s". */
-const attach = (state: ReturnType<typeof createRunStateStore>) => { state.dispatch({ type: "RECONNECT" }); state.dispatch({ type: "STATUS", sessionId: "s" as any, turn: "idle" }); };
+/**
+ * The executor sends only for the run zeta is attached to (decideSend); a status reply attaches "s". Deliveries are asked
+ * about only once this page shows "s" live, so its open completes here too (the OPEN_OK asks about saved deliveries).
+ */
+const attach = (state: ReturnType<typeof createRunStateStore>) => {
+  state.dispatch({ type: "RECONNECT" }); state.dispatch({ type: "STATUS", sessionId: "s" as any, turn: "idle" });
+  const operationId = state.requestOpen("s");
+  state.dispatch({ type: "OPEN_OK", runId: "s" as any, operationId, open: { id: "s", lease: { release() {} } as never, stale: false, history: { messages: 0, complete: true }, syncing: false } });
+};
 const memoryStorage = () => {
   const values = new Map<string, string>();
   return { values, getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
@@ -55,7 +62,7 @@ test("fake reconnect history keeps the accepted steer and its terminal delivery 
   expect(adapted.some((event) => event.type === "error")).toBe(false);
 });
 
-test("a reload reconciles a queued steer from durable status and resends a dropped intent", async () => {
+test("a reload reconciles a queued steer from durable status; a dropped one waits for the user's resend", async () => {
   let dropped = false;
   const { client, calls } = await server((method) => method === "delivery_status" ? { result: { status: dropped ? "dropped" : "queued" } } : ok);
   const storage = memoryStorage();
@@ -69,13 +76,16 @@ test("a reload reconciles a queued steer from durable status and resends a dropp
   const after = createDeliveryManager(() => client, afterState);
   afterState.activate("s");
   attach(afterState);
-  after.reconcile("s");
+  await Bun.sleep(10);
+  // The open asks once; a reloaded page never resends by itself: the steer waits as a dropped row.
+  expect(calls.map(([method]) => method)).toEqual(["steer", "delivery_status"]);
+  expect(afterState.get("s").deliveries.get("intent-1")).toMatchObject({ state: "dropped", spent: true });
+  after.resend("s", "intent-1");
   await Bun.sleep(10);
   const retryId = (calls.at(-1)?.[1] as { delivery_id?: string }).delivery_id;
-  // The attach status asks, then the reconcile asks again; only the newest query's answer acts, so one resend.
-  expect(calls.map(([method]) => method)).toEqual(["steer", "delivery_status", "delivery_status", "send"]);
+  expect(calls.map(([method]) => method)).toEqual(["steer", "delivery_status", "send"]);
   expect(retryId).not.toBe("intent-1");
-  expect(afterState.get("s").deliveries.size).toBe(0);
+  expect(afterState.get("s").deliveries.get("intent-1")?.state).toBe("queued");
 });
 
 test("send and steer go to their methods with a delivery id when the feature is negotiated", async () => {
@@ -146,7 +156,7 @@ test("uncertain opaque delivery persists display intent and reconciles without r
   state = createRunStateStore(8, undefined, saved, { id: "e2" as any, run: "s" as any });
   state.activate("s");
   manager = createDeliveryManager(() => client, state);
-  manager.reconcile("s");
+  attach(state);
   await Bun.sleep(0);
   expect(calls).toEqual([
     ["send", { input_id: "opaque-secret", delivery_id: "delivery-1" }],
@@ -193,7 +203,7 @@ test.each(["dropped", "unknown"])("reconciled opaque %s restores with a newline 
   state = createRunStateStore(8, undefined, saved, { id: "e2" as any, run: "s" as any });
   state.activate("s"); state.edit("s", { text: "keep this draft" });
   manager = createDeliveryManager(() => client, state, undefined, undefined, (runId, text) => receipts.push([runId, text]));
-  manager.reconcile("s"); await Bun.sleep(0);
+  attach(state); await Bun.sleep(0);
   expect(state.get("s").text).toBe("/review change\nkeep this draft");
   expect(receipts).toEqual([["s", "outcome unknown; this command was not retried"]]);
   expect(calls.at(-1)).toEqual(["delivery_status", { delivery_id: "delivery-1" }]);

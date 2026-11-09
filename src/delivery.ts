@@ -1,6 +1,6 @@
 import type { RunEvent } from "@fulcrum/core";
 import type { ZetaClient } from "@fulcrum/zeta";
-import { canDeliver } from "./run-state";
+import { decideSend, type PendingDelivery } from "./delivery-owner";
 import { catalogModels, catalogProviders, settingModel } from "./settings";
 
 /** Zeta errors that mean the turn changed state between the click and the server: -32004 running, -32005 not running. */
@@ -29,7 +29,6 @@ type Method = "send" | "steer";
 const raced = (method: Method, error: unknown) => code(error) === (method === "steer" ? NO_TURN : TURN_RUNNING);
 /** A definite refusal (`accepted: false`): zeta did no work for this id, so a resend needs a new one. */
 export const refusal = (result: Accepted) => Object.assign(new Error(result.status === "dropped" ? "the server dropped this message before the turn took it; send it again" : "the server did not accept this message"), { refused: true });
-const NOT_OPEN = "this run is not open yet; your message is still in the draft";
 
 /** Performs one idempotent zeta delivery attempt and publishes its accepted user row. Durable retry and stop policy lives in RunRecord.deliveries. */
 
@@ -64,16 +63,10 @@ export function createDelivery(newId: () => string = () => `web-${crypto.randomU
   const fresh = (client: ZetaClient, text: string, deliveryId = newId()): Message =>
     ({ text, intent: deliveryId, id: client.features.includes("delivery_id") ? deliveryId : null });
   return {
-    async submit(client: ZetaClient, text: string, steer: boolean, deliveryId = newId()) {
-      const message = fresh(client, text, deliveryId);
+    /** One attempt with `deliveryId`; `intent` names the message's row when this attempt resends it. */
+    async submit(client: ZetaClient, text: string, steer: boolean, deliveryId = newId(), intent = deliveryId) {
+      const message = { ...fresh(client, text, deliveryId), intent };
       const delivered = await deliver(client, steer ? "steer" : "send", message);
-      if (delivered.result.accepted === false) throw refusal(delivered.result);
-      reconcileAccepted(message, delivered.used, delivered.result);
-      return delivered;
-    },
-    async retry(client: ZetaClient, text: string, intent: string, deliveryId = newId()) {
-      const message = { text, intent, id: client.features.includes("delivery_id") ? deliveryId : null };
-      const delivered = await deliver(client, "send", message);
       if (delivered.result.accepted === false) throw refusal(delivered.result);
       reconcileAccepted(message, delivered.used, delivered.result);
       return delivered;
@@ -104,24 +97,29 @@ function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: Del
   };
   const handleStatus = async (effect: Extract<WorkspaceEffect, { type: "delivery-status" }>) => {
     const target = client(); if (!target) return;
-    const delivery = runs.get(effect.runId).deliveries.get(effect.intentId);
-    if (!delivery || delivery.operationId !== effect.operationId) return;
+    const record = runs.get(effect.runId);
+    const delivery = record.deliveries.get(effect.intentId);
+    const retry = record.retryDelivery?.id === effect.intentId ? record.retryDelivery : undefined;
+    if (delivery ? delivery.operationId !== effect.operationId : retry?.operationId !== effect.operationId) return;
     try {
-      const result = await target.request("delivery_status", { delivery_id: delivery.attemptId }, { timeoutMs: 15_000 }) as { status?: string; outcome?: string };
+      const result = await target.request("delivery_status", { delivery_id: delivery?.attemptId ?? effect.intentId }, { timeoutMs: 15_000 }) as { status?: string; outcome?: string };
       const status = result.status === "evicted" ? result.outcome : result.status;
       const unknown = status === "unknown" || status === "not_delivered";
-      const settled = status === "delivered" ? "delivered" : status === "dropped" || (delivery.method === "opaque" && unknown) ? "dropped" : unknown && canDeliver(runs.getCatalog(), effect.runId) ? "unknown" : null; // zeta answers for its attached run only
-      if (settled) {
-        runs.dispatch({ type: "DELIVERY_STATUS", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, status: settled });
-        if (settled === "dropped" && delivery.method === "opaque") commandFailure?.(effect.runId, "outcome unknown; this command was not retried");
-      }
-    } catch { /* A reconnect or later turn end queries durable truth again. */ }
+      const settled = status === "delivered" ? "delivered" : status === "dropped" || (delivery?.method === "opaque" && unknown) ? "dropped" : unknown ? "unknown" : null;
+      if (!settled) return;
+      // zeta drops a queued steer with reason turn_end only when the turn completed (delivery.py:305-312); status says how the last turn ended.
+      const turnEnded = settled === "dropped" && delivery?.method === "steer" && delivery.here && !delivery.resent
+        ? ((await target.request("status", {}, { timeoutMs: 15_000 })) as { last_turn_outcome?: { reason?: string } | null }).last_turn_outcome?.reason === "completed" : false;
+      runs.dispatch({ type: "DELIVERY_STATUS", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, status: settled, turnEnded });
+      if (settled === "dropped" && delivery?.method === "opaque") commandFailure?.(effect.runId, "outcome unknown; this command was not retried");
+    } catch { /* A later turn end or open queries durable truth again. */ }
   };
   /** An opaque command input: exactly one `send {input_id}`, never resent after an uncertain outcome. */
-  const handleOpaqueDelivery = async (effect: Extract<WorkspaceEffect, { type: "deliver" }>, delivery: import("./run-state").PendingDelivery, target: ZetaClient | null) => {
+  const handleOpaqueDelivery = async (effect: Extract<WorkspaceEffect, { type: "deliver" }>, delivery: PendingDelivery, target: ZetaClient | null) => {
     const inputId = opaqueInputs.get(effect.operationId);
     opaqueInputs.delete(effect.operationId);
-    if (target && inputId && !canDeliver(runs.getCatalog(), effect.runId)) { runs.restoreDraft(effect.runId, delivery.text); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, failed: true }); return finish(effect.operationId, new Error(NOT_OPEN)); }
+    const decision = decideSend(runs.getCatalog(), effect.runId, { kind: "attempt", intentId: effect.intentId });
+    if (target && inputId && decision.blocked) { runs.restoreDraft(effect.runId, delivery.text); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, failed: true }); return finish(effect.operationId, new Error(decision.blocked)); }
     if (!target || !inputId) { const error = unavailable(); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, failed: true }); return finish(effect.operationId, error); }
     try {
       const result = await target.request("send", { input_id: inputId, ...(delivery.attemptId ? { delivery_id: delivery.attemptId } : {}) }, { timeoutMs: 15_000, intent: delivery.id }) as Accepted;
@@ -142,14 +140,16 @@ function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: Del
     if (!delivery || delivery.operationId !== effect.operationId) return;
     const target = client();
     if (delivery.method === "opaque") return handleOpaqueDelivery(effect, delivery, target);
-    if (!target || !canDeliver(runs.getCatalog(), effect.runId)) { const error = target ? new Error(NOT_OPEN) : unavailable(); if (delivery.state !== "retrying") runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, failed: true, refused: true }); return finish(effect.operationId, error); } // nothing reached zeta
-    const attemptId = delivery.state === "retrying" ? `web-${crypto.randomUUID()}` : delivery.attemptId;
+    const decision = decideSend(runs.getCatalog(), effect.runId, { kind: "attempt", intentId: effect.intentId });
+    const nothingSent = (error: Error) => { runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, failed: true, refused: true }); finish(effect.operationId, error); };
+    if (!target) return nothingSent(unavailable());
+    if (decision.blocked) return nothingSent(new Error(decision.blocked));
     try {
-      if (delivery.state === "retrying") await record(effect.runId).delivery.retry(target, delivery.text, delivery.id, attemptId);
-      else await record(effect.runId).delivery.submit(target, delivery.text, delivery.method === "steer", attemptId);
-      runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId, queued: target.features.includes("delivery_id") });
+      // shortcut: zeta's send has no session_id guard yet, so decideSend checks the attached session; pass session_id here once zeta ships that guard.
+      await record(effect.runId).delivery.submit(target, delivery.text, delivery.method === "steer", decision.id, delivery.id);
+      runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: decision.id, queued: target.features.includes("delivery_id") });
       finish(effect.operationId);
-    } catch (error) { if (delivery.state !== "retrying") runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId, failed: true, refused: (error as { refused?: boolean }).refused === true }); finish(effect.operationId, error); }
+    } catch (error) { runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: decision.id, failed: true, refused: (error as { refused?: boolean }).refused === true }); finish(effect.operationId, error); }
   };
   const settingsFailure = (effect: Extract<WorkspaceEffect, { type: "load-settings" | "set-settings" }>, error: unknown) => {
     runs.dispatch({ type: "SETTINGS_FAIL", runId: effect.runId, operationId: effect.operationId, error: error instanceof Error ? error.message : "settings unavailable" }); finish(effect.operationId, error);

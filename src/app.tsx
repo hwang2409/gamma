@@ -38,7 +38,12 @@ function ZetaApproval({ id }: { id: string }) {
   return <Approval id={id} onApprove={decide?.approve} onApproveAlways={always} approveAlwaysLabel="always allow" onDeny={decide?.deny} disabledReason={decide?.disabledReason} />;
 }
 // The intents of steers a stop dropped: zeta never gave them to the agent, so their rows must not look delivered.
-const DeliveryStates = createContext<ReadonlyMap<string, import("./run-state").PendingDelivery>>(new Map());
+const DeliveryStates = createContext<ReadonlyMap<string, import("./delivery-owner").PendingDelivery>>(new Map());
+const UNDELIVERED = {
+  stop: "not delivered · the stop ended the turn before zeta took this steer",
+  dropped: "not delivered · zeta did not take this message",
+  unconfirmed: "not confirmed · resend will not run it twice",
+} as const;
 const ResendDelivery = createContext<((intent: string) => void) | null>(null);
 function UserRow({ id }: { id: string }) {
   const intent = useItemSelector(id, (item) => (item?.type === "user" && item.event.type === "user_message" ? item.event.intent : undefined));
@@ -46,14 +51,16 @@ function UserRow({ id }: { id: string }) {
   const deliveries = useContext(DeliveryStates);
   const resend = useContext(ResendDelivery);
   const identity = intent ?? delivery ?? (id.startsWith("user:intent:") ? id.slice("user:intent:".length) : id.startsWith("user:delivery:") ? id.slice("user:delivery:".length) : "");
-  const state = deliveries.get(identity)?.state;
+  const pending = deliveries.get(identity);
+  const state = pending?.state;
   const lost = state === "dropped";
-  const waiting = state === "requesting" || state === "queued" || state === "retrying";
+  const waiting = state === "requesting" || state === "queued";
+  const label = state === "requesting" && pending?.resent ? "resending" : state;
   return (
     <>
       <Fallback id={id} />
-      {waiting ? <p className="queued-delivery" role="status" aria-label={`message ${state}`}>{state}</p> : null}
-      <p className="undelivered" data-empty={!lost || undefined} data-reserve={identity || undefined} data-user-id={id} role={lost ? "note" : undefined} aria-hidden={!lost || undefined}>{lost ? <>not delivered · the stop ended the turn before zeta took this steer {resend ? <button type="button" className="ghost" onClick={() => resend(identity)}>resend</button> : null}</> : "\u00a0"}</p>
+      {waiting ? <p className="queued-delivery" role="status" aria-label={`message ${label}`}>{label}</p> : null}
+      <p className="undelivered" data-empty={!lost || undefined} data-reserve={identity || undefined} data-user-id={id} role={lost ? "note" : undefined} aria-hidden={!lost || undefined}>{lost ? <>{UNDELIVERED[pending?.why ?? "dropped"]} {resend ? <button type="button" className="ghost" onClick={() => resend(identity)}>resend</button> : null}</> : "\u00a0"}</p>
     </>
   );
 }
