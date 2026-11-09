@@ -200,7 +200,7 @@ export const savedRun = (record: RunRecord): SavedRun | null => {
 };
 /** Puts a saved entry into a run this page has not held yet. What the page already holds wins. */
 export const restoreSaved = (record: RunRecord, saved: SavedRun | undefined): RunRecord => {
-  if (!saved) return record;
+  if (!saved || typeof saved !== "object") return record;
   const restored = new Map((saved.deliveries ?? []).flatMap((delivery) => delivery?.id && delivery.text && delivery.operationId && delivery.attemptId
     ? [[delivery.id, { ...delivery, images: [], state: delivery.state === "requesting" ? "queued" : delivery.state } as PendingDelivery]] : []));
   return {

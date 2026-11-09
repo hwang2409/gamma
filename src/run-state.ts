@@ -343,16 +343,16 @@ export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefi
     for (const id of held) { const record = state.runs.get(id); const entry = record && savedRun(record); if (entry) saved[id] = entry; else delete saved[id]; }
     try { draftStorage?.setItem(DRAFTS_KEY, JSON.stringify(saved)); } catch {}
   };
+  const untouched = (record: RunRecord) => !record.text && !record.attachments.length && !record.deliveries.size && !record.retryDelivery;
   /** Takes up the run on screen, and any run this page changed, restoring its saved entry once. Other runs' entries stay untouched. */
   const hold = () => {
     const selected = canonical(state, state.entry.run);
     for (const [draft, session] of state.aliases) if (held.has(draft)) held.add(session);
     let runs: Map<RunId, RunRecord> | undefined;
     for (const [id, record] of state.runs) {
-      if (held.has(id) || (id !== selected && !record.text && !record.attachments.length && !record.deliveries.size && !record.retryDelivery)) continue;
+      if (held.has(id) || (id !== selected && untouched(record))) continue;
       held.add(id);
-      const saved = readSaved()[id];
-      const restored = saved && typeof saved === "object" ? restoreSaved(record, saved) : record;
+      const restored = restoreSaved(record, readSaved()[id]);
       if (restored !== record) (runs ??= new Map(state.runs)).set(id, restored);
     }
     if (runs) state = { ...state, runs };

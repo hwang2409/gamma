@@ -98,9 +98,8 @@ try {
         if (order.indexOf("queued delayed retry") > order.indexOf("second after retry")) throw new Error(`second submit was out of order: ${JSON.stringify(order)}`);
       } finally { await cleanup(context, page); }
     });
-    // A lost reply is a wait, not an error: the draft stays (quiet tone, no raw close code) until the reopen asks zeta
-    // about its saved id; zeta took it, so the draft clears and nothing is sent again.
-    await check("lost-send-reply-is-a-quiet-wait-and-clears-once-zeta-confirms", async () => {
+    // A lost reply is a wait, not an error (quiet tone, no raw close code), and it never ends in two turns.
+    await check("lost-send-reply-is-a-quiet-wait-and-never-runs-twice", async () => {
       const { context, page } = await fresh(browser, 1440);
       try {
         await page.goto(`${origin}/?run=s-docs`); await ready(page);
@@ -113,9 +112,14 @@ try {
         const status = page.locator('[data-part="composer-status"]');
         if (await status.getAttribute("data-tone") === "danger" || /\(10\d\d\)/.test(await status.innerText())) throw new Error(`a lost reply read as an error: ${JSON.stringify(await status.innerText())}`);
         await page.screenshot({ path: join(shots, "lost-reply-wait-1440.png") });
-        for (let attempt = 0; attempt < 75 && await field.inputValue(); attempt++) await Bun.sleep(200);
-        if (await field.inputValue()) throw new Error(`after the reopen the composer still held ${JSON.stringify(await field.inputValue())}`);
-        await Bun.sleep(1_000);
+        // The reopen may ask zeta before the delayed send lands ("unknown"): the draft stays with its saved id and a quiet
+        // note; if zeta already says delivered, the draft clears. Either way Enter cannot start a second turn.
+        await Bun.sleep(3_500);
+        const kept = await field.inputValue();
+        if (kept && !(await status.innerText()).includes("Enter will not run it twice")) throw new Error(`a kept draft has no may-already-be-sent note: ${JSON.stringify(await status.innerText())}`);
+        if (kept) await field.press("Enter");
+        await Bun.sleep(1_500);
+        if (await field.inputValue()) throw new Error(`after Enter the composer still held ${JSON.stringify(await field.inputValue())}`);
         const accepted = fake.sent.filter((item) => item.text === "retry me once");
         if (accepted.length !== 1) throw new Error(`the lost reply ended with ${accepted.length} turns`);
       } finally { await cleanup(context, page); }
