@@ -86,6 +86,8 @@ try {
       const { context, page } = await fresh(browser);
       try {
         const field = await startQueued(page, "delayed retry"); fake.delayNext("send", 3_000);
+        // gamma gets no drop reason without session_history_fidelity, so the natural drop waits for the resend click.
+        await page.locator('.undelivered[role="note"]').getByRole("button", { name: "resend" }).click({ timeout: 15_000 });
         await page.getByLabel("message resending").waitFor({ timeout: 15_000 });
         const action = page.locator('[data-part="composer-submit"]');
         if (await action.getAttribute("aria-disabled") !== "true") throw new Error("submit stayed enabled during retry");
