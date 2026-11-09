@@ -11,6 +11,16 @@ const code = (error: unknown) => (error as { code?: unknown } | null)?.code;
 
 type Accepted = { accepted?: boolean; status?: string };
 
+/**
+ * A retried id whose details zeta evicted (zeta delivery.py:401-407: -32010 with `data.outcome`): the first attempt
+ * landed, and its outcome says what happened. Null for any other error.
+ */
+export const evictedResult = (error: unknown): Accepted | null => {
+  if (code(error) !== DETAILS_EVICTED) return null;
+  const outcome = (error as { data?: { outcome?: unknown } }).data?.outcome;
+  return { accepted: outcome !== "dropped", status: String(outcome) };
+};
+
 /** One message the user asked for. `intent` names it for its whole life; `id` names one attempt to deliver it. */
 type Message = { text: string; intent: string; id: string | null };
 type Method = "send" | "steer";
@@ -18,7 +28,7 @@ type Method = "send" | "steer";
 /** Whether the turn changed state between the click and the server, so the other method should run instead. */
 const raced = (method: Method, error: unknown) => code(error) === (method === "steer" ? NO_TURN : TURN_RUNNING);
 /** A definite refusal (`accepted: false`): zeta did no work for this id, so a resend needs a new one. */
-const refusal = (result: Accepted) => Object.assign(new Error(result.status === "dropped" ? "the server dropped this message before the turn took it; send it again" : "the server did not accept this message"), { refused: true });
+export const refusal = (result: Accepted) => Object.assign(new Error(result.status === "dropped" ? "the server dropped this message before the turn took it; send it again" : "the server did not accept this message"), { refused: true });
 const NOT_OPEN = "this run is not open yet; your message is still in the draft";
 
 /** Performs one idempotent zeta delivery attempt and publishes its accepted user row. Durable retry and stop policy lives in RunRecord.deliveries. */
@@ -28,9 +38,8 @@ export function createDelivery(newId: () => string = () => `web-${crypto.randomU
     try {
       return (await client.request(method, { text, ...(id ? { delivery_id: id } : {}) }, { timeoutMs: 15_000, intent })) as Accepted;
     } catch (error) {
-      // The id was accepted before, but the server no longer has its result: its outcome still says what happened.
-      const outcome = (error as { data?: { outcome?: unknown } }).data?.outcome;
-      if (code(error) === DETAILS_EVICTED) return { accepted: outcome !== "dropped", status: String(outcome) };
+      const evicted = evictedResult(error);
+      if (evicted) return evicted;
       throw error;
     }
   };
@@ -100,7 +109,8 @@ function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: Del
     try {
       const result = await target.request("delivery_status", { delivery_id: delivery.attemptId }, { timeoutMs: 15_000 }) as { status?: string; outcome?: string };
       const status = result.status === "evicted" ? result.outcome : result.status;
-      const settled = status === "delivered" ? "delivered" : status === "dropped" || (delivery.method === "opaque" && (status === "unknown" || status === "not_delivered")) ? "dropped" : null;
+      const unknown = status === "unknown" || status === "not_delivered";
+      const settled = status === "delivered" ? "delivered" : status === "dropped" || (delivery.method === "opaque" && unknown) ? "dropped" : unknown && canDeliver(runs.getCatalog(), effect.runId) ? "unknown" : null; // zeta answers for its attached run only
       if (settled) {
         runs.dispatch({ type: "DELIVERY_STATUS", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, status: settled });
         if (settled === "dropped" && delivery.method === "opaque") commandFailure?.(effect.runId, "outcome unknown; this command was not retried");

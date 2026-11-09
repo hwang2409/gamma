@@ -18,7 +18,9 @@ const rows: Record<string, unknown[]> = {
 };
 
 /** Zeta's server-side truth: one attached runtime, its accepted delivery ids per session, and every started turn. */
-type Zeta = { attached: string | null; created: number; turns: Array<{ session: string; text: string; id?: string }>; accepted: Map<string, Map<string, Record<string, unknown>>>; replies: Array<Record<string, unknown>> };
+type Zeta = { attached: string | null; created: number; turns: Array<{ session: string; text: string; id?: string }>; accepted: Map<string, Map<string, Record<string, unknown>>>; replies: Array<Record<string, unknown>>; evicted: Set<string> };
+/** sessionStorage as one browser tab keeps it across a full page back and forward. */
+const tabStorage = () => { const items = new Map<string, string>(); return { getItem: (key: string) => items.get(key) ?? null, setItem: (key: string, value: string) => void items.set(key, value) }; };
 
 function zetaHandlers(zeta: Zeta, extra: Record<string, Handler> = {}): Record<string, Handler> {
   return {
@@ -38,6 +40,8 @@ function zetaHandlers(zeta: Zeta, extra: Record<string, Handler> = {}): Record<s
       const session = zeta.attached;
       if (!session) throw { code: -32003, message: "no active session" };
       const id = params.delivery_id as string | undefined;
+      // delivery.py:401-407: an id whose details were evicted keeps only its outcome and answers -32010 with it.
+      if (id && zeta.evicted.has(id)) throw { code: -32010, message: "delivery id already used", data: { outcome: "delivered" } };
       const seen = id ? zeta.accepted.get(session)?.get(id) : undefined;
       const reply = seen ? { ...seen, duplicate: true } : { accepted: true, session_id: session };
       if (!seen) {
@@ -47,23 +51,30 @@ function zetaHandlers(zeta: Zeta, extra: Record<string, Handler> = {}): Record<s
       zeta.replies.push(reply);
       return reply;
     },
+    // delivery.py:348-368: the retained status ("delivered" for an accepted send), the outcome of an evicted id, else unknown.
+    delivery_status: (params) => {
+      const id = params.delivery_id as string;
+      if (zeta.evicted.has(id)) return { delivery_id: id, status: "evicted", outcome: "delivered" };
+      return { delivery_id: id, status: zeta.attached && zeta.accepted.get(zeta.attached)?.has(id) ? "delivered" : "unknown" };
+    },
     ...extra,
   };
 }
 
 const FEATURES = ["delivery_id"];
 
-async function world(options: { attached?: string | null; selected?: string; handlers?: (zeta: Zeta) => Record<string, Handler>; offline?: boolean } = {}) {
-  const zeta: Zeta = { attached: options.attached ?? null, created: 0, turns: [], accepted: new Map(), replies: [] };
+async function world(options: { attached?: string | null; selected?: string; handlers?: (zeta: Zeta) => Record<string, Handler>; offline?: boolean; zeta?: Zeta; tab?: ReturnType<typeof tabStorage> } = {}) {
+  const zeta: Zeta = options.zeta ?? { attached: options.attached ?? null, created: 0, turns: [], accepted: new Map(), replies: [], evicted: new Set() };
   const handlers = { ...zetaHandlers(zeta), ...options.handlers?.(zeta) };
   const fake = await server(handlers, FEATURES);
   const connection = source(options.offline ? null : fake.client);
   const first = options.selected ?? `draft:${crypto.randomUUID()}`;
-  const store = createRunStateStore(8, undefined, undefined, { id: "entry" as EntryId, run: first as RunId });
+  const store = createRunStateStore(8, undefined, options.tab, { id: "entry" as EntryId, run: first as RunId });
   const manager = createSessionManager(connection, store);
   const failures = new Map<string, string>();
   const deliveries = createDeliveryManager(() => connection.client, store, manager.execute, manager.abort, (runId, text) => failures.set(store.canonical(runId), text));
   const activate = (id: string) => store.activate(id, id.startsWith("draft:") ? { choice: "default" } : { choice: "explicit", model: "" });
+  store.get(first); // app.tsx: the first render reads the run (restoring its saved draft) before the mount effect navigates
   store.dispatch({ type: "NAVIGATED", entryId: "entry" as EntryId, runId: first as RunId });
   activate(first);
   const run = () => store.getEntry().run as string;
@@ -483,6 +494,130 @@ const table: Row[] = [
         expect(h.text("a")).toBe("for a only");
         expect(h.zeta.turns).toEqual([]);
         expect(result).toEqual({ ok: false, error: "this run is not open yet; your message is still in the draft" });
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "22 M1 page restore after zeta took the send: the delivered text never comes back as a draft; one turn",
+    async run() {
+      const tab = tabStorage();
+      const page1 = await openA({ tab });
+      const send = page1.fake.hold("send");
+      page1.type("dup check");
+      void page1.enter();
+      await send.reached;
+      await new Promise((resolve) => setTimeout(resolve, 200)); // the user presses back 200 ms later
+      page1.dispose(); // a full page navigation: zeta still takes the send, its reply reaches no page
+      send.release(); await waitFor(() => page1.zeta.turns.length === 1, 2_000);
+      const page2 = await world({ selected: "a", zeta: page1.zeta, tab });
+      try {
+        page2.start(); await page2.live("a");
+        await waitFor(() => page2.store.get("a").deliveries.size === 0, 2_000);
+        expect(page2.text("a")).toBe("");
+        if (page2.text("a")) await page2.enter(); // what the user does with a ready draft
+        expect(page2.zeta.turns).toHaveLength(1);
+        expect(page2.owner()).toMatchObject({ accept: true });
+      } finally { page2.dispose(); }
+    },
+  },
+  {
+    name: "23 M1 page restore before zeta took the send: the restored delivery is sent again with its old id, once",
+    async run() {
+      const tab = tabStorage();
+      const page1 = await openA({ tab });
+      const send = page1.fake.hold("send");
+      page1.type("never arrived");
+      void page1.enter();
+      await send.reached;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      page1.dispose();
+      send.fail({ code: -32603, message: "the page left before zeta read the frame" });
+      const first = page1.sends()[0]!.delivery_id;
+      const page2 = await world({ selected: "a", zeta: page1.zeta, tab });
+      try {
+        page2.start(); await page2.live("a");
+        await waitFor(() => page2.zeta.turns.length > 0, 2_000);
+        expect(page2.zeta.turns).toEqual([{ session: "a", text: "never arrived", id: first as string }]);
+        await waitFor(() => page2.text("a") === "", 2_000);
+        page2.deliveries.reconcile("a"); // the app reconciles on the run's next store event
+        await waitFor(() => page2.store.get("a").deliveries.size === 0, 2_000);
+        expect(page2.owner()).toMatchObject({ accept: true });
+      } finally { page2.dispose(); }
+    },
+  },
+  {
+    name: "24 a failed send's draft keeps its delivery id across a page restore; the retry is a zeta duplicate",
+    async run() {
+      const tab = tabStorage();
+      let lost = 0;
+      const page1 = await openA({ tab, handlers: (zeta) => ({ send: (params) => { const reply = zetaHandlers(zeta).send!(params); if (lost++ === 0) throw { code: -32603, message: "connection lost before the reply" }; return reply; } }) });
+      page1.type("lost reply");
+      expect((await page1.enter()).ok).toBe(false);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      page1.dispose();
+      const page2 = await world({ selected: "a", zeta: page1.zeta, tab });
+      try {
+        page2.start(); await page2.live("a");
+        expect(page2.text("a")).toBe("lost reply");
+        expect(await page2.enter()).toEqual({ ok: true });
+        expect(page2.zeta.turns).toHaveLength(1);
+        expect(page2.sends()[0]!.delivery_id).toBe(page1.sends()[0]!.delivery_id);
+        expect(page2.text("a")).toBe("");
+      } finally { page2.dispose(); }
+    },
+  },
+  {
+    name: "25 a retry of an id whose details zeta evicted (-32010 with data.outcome) settles as delivered: one turn, draft cleared",
+    async run() {
+      let lost = 0;
+      const h = await openA({ handlers: (zeta) => ({ send: (params) => { const reply = zetaHandlers(zeta).send!(params); if (lost++ === 0) { zeta.evicted.add(params.delivery_id as string); throw { code: -32603, message: "connection lost before the reply" }; } return reply; } }) });
+      try {
+        h.type("evicted");
+        expect((await h.enter()).ok).toBe(false);
+        expect(await h.enter()).toEqual({ ok: true });
+        expect(h.zeta.turns).toHaveLength(1);
+        expect(h.text()).toBe("");
+        expect(h.store.get("a").retryDelivery).toBeUndefined();
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "26 an image retry whose id zeta evicted (-32010) settles as delivered instead of failing on every Enter",
+    async run() {
+      let calls = 0;
+      const h = await openA({ handlers: (zeta) => ({ send_images: (params) => {
+        // delivery.py:383-407 via send_images: the first attempt lands and its reply is lost; the retry finds only the outcome.
+        if (calls++ === 0) { zeta.turns.push({ session: zeta.attached!, text: params.text as string, id: params.delivery_id as string }); throw { code: -32603, message: "connection lost before the reply" }; }
+        throw { code: -32010, message: "delivery id already used", data: { outcome: "delivered" } };
+      } }) });
+      try {
+        const image = { name: "a.png", mime_type: "image/png", data: "AAAA", url: "blob:a" } as unknown as import("../src/image-queue").QueuedImage;
+        h.type("pic");
+        const firstId = h.store.deliveryIdFor("a", "pic", [image]);
+        expect(await h.manager.sendImages("a", firstId, "pic", [image]).then(() => true, () => false)).toBe(false);
+        const retryId = h.store.deliveryIdFor("a", "pic", [image]);
+        expect(retryId).toBe(firstId);
+        expect(await h.manager.sendImages("a", retryId, "pic", [image]).then(() => true, () => false)).toBe(true);
+        expect(h.zeta.turns).toHaveLength(1);
+        expect(h.store.get("a").retryDelivery).toBeUndefined();
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "27 a non-busy open failure retries once when zeta reconnects (base retried on every status)",
+    async run() {
+      let failPage = true;
+      const h = await world({ attached: "a", selected: "a", handlers: (zeta) => ({ session_history: (params) => { if (failPage && params.offset === 1) throw { code: -32602, message: "bad page" }; return zetaHandlers(zeta).session_history!(params); } }) });
+      try {
+        h.start(); await waitFor(() => Boolean(h.view.openError), 2_000);
+        await h.manager.refreshStatus();
+        expect(h.view.openError?.message).toBe("bad page"); // a plain status does not retry a real failure
+        failPage = false;
+        const next = await server(zetaHandlers(h.zeta), FEATURES);
+        h.connection.set(next.client);
+        await h.live("a");
+        expect(h.view.openError).toBeNull();
+        expect(h.owner()).toMatchObject({ accept: true });
       } finally { h.dispose(); }
     },
   },

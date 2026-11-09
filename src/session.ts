@@ -2,6 +2,7 @@ import { fromZetaEvent, fromZetaHistory, type SessionLease, type ZetaClient } fr
 import type { RunEvent } from "@fulcrum/core";
 import type { hostBindings, Registration } from "./host-client";
 import type { QueuedImage } from "./image-queue";
+import { evictedResult, refusal } from "./delivery";
 import { canDeliver } from "./run-state";
 type HostBindings = typeof hostBindings;
 
@@ -358,7 +359,12 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
     try {
       await client.request("send_images", { session_id: effect.runId, text: delivery.text, images: delivery.images.map(({ name, mime_type, data }) => ({ name, mime_type, data })), delivery_id: effect.intentId }, { timeoutMs: 30_000 });
       runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false }); finish(effect.operationId, true);
-    } catch (error) { runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false, failed: true }); finish(effect.operationId, undefined, error); }
+    } catch (error) {
+      const evicted = evictedResult(error);
+      if (evicted?.accepted) { runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false }); return finish(effect.operationId, true); }
+      runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false, failed: true, refused: Boolean(evicted) });
+      finish(effect.operationId, undefined, evicted ? refusal(evicted) : error);
+    }
   };
   const executeOne = (effect: WorkspaceEffect) => {
     if (effect.type === "status") return void handleStatus(effect);

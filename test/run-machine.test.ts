@@ -17,6 +17,10 @@ class Reference {
   deliveries = new Map<string, Map<string, string>>();
   deliveryMethods = new Map<string, string>();
   deliveryOperations = new Map<string, string>();
+  lastAttached: string | null = null;
+  disconnected = false;
+  /** A delivery-status query takes a fresh operation for each queued or retrying delivery of the run. */
+  query(runId: string) { for (const [id, state] of this.deliveries.get(runId) ?? []) if (state !== "requesting" && state !== "dropped") this.deliveryOperations.set(id, "generated"); }
   stopOperations = new Map<string, string>();
   settings = new Map<string, { desired?: string; loaded?: string; pending?: string; error?: string }>();
   canonical(id: string) { return this.aliases.get(id) ?? id; }
@@ -27,8 +31,8 @@ class Reference {
       case "FIRST_SEND": if (["draft", "failed"].includes(this.lifecycle.get(event.runId)?.kind ?? "draft")) this.lifecycle.set(event.runId, { kind: "creating", operation: event.operationId }); break;
       case "NEW_SESSION_OK": if (this.lifecycle.get(event.runId)?.operation === event.operationId) { const old = this.lifecycle.get(event.runId)!; this.lifecycle.delete(event.runId); this.lifecycle.set(event.sessionId, { ...old, kind: "opening" }); const moved = this.settings.get(event.runId); this.settings.delete(event.runId); if (moved) this.settings.set(event.sessionId, moved); else this.settings.delete(event.sessionId); this.aliases.set(event.runId, event.sessionId); if (this.selected === event.runId) this.selected = event.sessionId; this.attached = event.sessionId; this.turn = "idle"; } break;
       case "NEW_SESSION_FAIL": if (this.lifecycle.get(event.runId)?.operation === event.operationId) this.lifecycle.set(event.runId, { kind: "failed" }); break;
-      case "STATUS": this.attached = event.sessionId ?? null; this.turn = event.sessionId ? event.turn : null; break;
-      case "RESUME_OK": if (![...this.lifecycle.values()].some((value) => value.kind === "creating") && (!this.attached || this.turn === "idle" || this.attached === event.runId)) { this.attached = event.runId; this.turn = "idle"; this.lifecycle.set(event.runId, { kind: "opening", operation: event.operationId }); const value = this.settings.get(event.runId) ?? {}; this.settings.set(event.runId, { ...value, pending: event.operationId, error: undefined }); } break;
+      case "STATUS": this.attached = event.sessionId ?? null; this.turn = event.sessionId ? event.turn : null; this.disconnected = false; if (event.sessionId) this.query(event.sessionId); break;
+      case "RESUME_OK": if (![...this.lifecycle.values()].some((value) => value.kind === "creating") && (!this.attached || this.turn === "idle" || this.attached === event.runId)) { this.attached = event.runId; this.turn = "idle"; this.disconnected = false; this.query(event.runId); this.lifecycle.set(event.runId, { kind: "opening", operation: event.operationId }); const value = this.settings.get(event.runId) ?? {}; this.settings.set(event.runId, { ...value, pending: event.operationId, error: undefined }); } break;
       case "RESUME_BUSY": this.lifecycle.set(event.runId, { kind: "opening", operation: event.operationId }); break;
       case "RESUME_FAIL": if (this.lifecycle.get(event.runId)?.operation === event.operationId) this.lifecycle.set(event.runId, { kind: "failed" }); break;
       case "FIRST_PAGE": if (!event.operationId || !this.lifecycle.get(event.runId)?.operation || this.lifecycle.get(event.runId)?.operation === event.operationId) this.lifecycle.set(event.runId, { kind: "open" }); break;
@@ -44,7 +48,8 @@ class Reference {
       case "SETTINGS_LOAD": case "SETTINGS_WRITE": { const value = this.settings.get(event.runId) ?? {}; this.settings.set(event.runId, { ...value, pending: event.operationId, error: undefined }); break; }
       case "SETTINGS_OK": { const value = this.settings.get(event.runId); if (value?.pending === event.operationId) this.settings.set(event.runId, { desired: value.desired, loaded: event.approval_mode, pending: undefined }); break; }
       case "SETTINGS_FAIL": { const value = this.settings.get(event.runId); if (value?.pending === event.operationId) this.settings.set(event.runId, { ...value, pending: undefined, error: event.error }); break; }
-      case "DISCONNECT": this.attached = null; this.turn = null; for (const items of this.deliveries.values()) for (const [id, state] of items) if (state === "requesting") items.set(id, "queued"); break;
+      case "RECONNECT": if (this.disconnected && this.lastAttached) this.query(this.lastAttached); break;
+      case "DISCONNECT": this.lastAttached = this.disconnected ? null : this.attached; this.disconnected = true; this.attached = null; this.turn = null; for (const items of this.deliveries.values()) for (const [id, state] of items) if (state === "requesting") items.set(id, "queued"); break;
       default: break;
     }
   }

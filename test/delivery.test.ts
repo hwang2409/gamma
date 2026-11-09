@@ -72,7 +72,8 @@ test("a reload reconciles a queued steer from durable status and resends a dropp
   after.reconcile("s");
   await Bun.sleep(10);
   const retryId = (calls.at(-1)?.[1] as { delivery_id?: string }).delivery_id;
-  expect(calls.map(([method]) => method)).toEqual(["steer", "delivery_status", "send"]);
+  // The attach status asks, then the reconcile asks again; only the newest query's answer acts, so one resend.
+  expect(calls.map(([method]) => method)).toEqual(["steer", "delivery_status", "delivery_status", "send"]);
   expect(retryId).not.toBe("intent-1");
   expect(afterState.get("s").deliveries.size).toBe(0);
 });
