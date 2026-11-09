@@ -47,6 +47,124 @@ export async function checkFidelityData(page: Page, origin: string) {
   if (JSON.stringify(reloaded) !== JSON.stringify(live)) throw new Error(`live/reload fidelity differs: ${JSON.stringify({ live, reloaded })}`);
 }
 
+const reasonWords = {
+  turn_end: "not delivered · the turn ended before zeta used this steer",
+  abort: "not delivered · the stop ended the turn before zeta took this steer",
+  clear: "not delivered · pending steers were cleared before zeta used this steer",
+  disconnect: "not delivered · the connection ended before zeta used this steer",
+  failed: "not delivered · the turn failed before zeta used this steer",
+  restart: "not delivered · zeta restarted before it used this steer",
+  future_token: "not delivered · zeta did not take this message",
+} as const;
+
+const userRow = (page: Page, text: string) => page.locator('[data-part="item"][data-kind="user"]', { hasText: text });
+
+async function openFidelityHistory(page: Page, origin: string) {
+  await page.goto(`${origin}/?theme=tokyo-night&run=${FIDELITY}`);
+  await ready(page);
+  await userRow(page, "retained dropped steer").waitFor({ timeout: 10_000 });
+}
+
+async function checkSlotNull(page: Page, origin: string) {
+  await page.goto(`${origin}/?theme=tokyo-night&run=${ACTIVE}`);
+  await ready(page);
+  const delivered = userRow(page, "the reconnect test in packages/zeta fails");
+  await delivered.waitFor({ timeout: 10_000 });
+  if (await delivered.locator('[data-part="delivery-note"]').count()) throw new Error("a delivered row has a delivery note wrapper");
+  if (await delivered.locator("xpath=following-sibling::*[contains(@class, 'undelivered')]").count()) throw new Error("a delivered row still reserves gamma's old sibling note");
+}
+
+async function checkHistoryDrop(page: Page, origin: string) {
+  await openFidelityHistory(page, origin);
+  const dropped = userRow(page, "retained dropped steer");
+  const notes = dropped.locator('[data-part="delivery-note"]');
+  if (await notes.count() !== 1) throw new Error(`history drop has ${await notes.count()} delivery notes`);
+  const note = (await notes.innerText()).replace(/\s+/g, " ").trim();
+  if (note !== reasonWords.turn_end) throw new Error(`history drop note was ${JSON.stringify(note)}`);
+  if (await dropped.getByRole("button", { name: "resend" }).count()) throw new Error("history-only drop offered resend without local owner state");
+}
+
+async function checkReasonTable(page: Page, origin: string) {
+  await openFidelityHistory(page, origin);
+  for (const [reason, words] of Object.entries(reasonWords)) {
+    const text = reason === "turn_end" ? "retained dropped steer" : `retained reason ${reason}`;
+    const row = userRow(page, text);
+    await row.waitFor({ timeout: 10_000 });
+    const note = (await row.locator('[data-part="delivery-note"]').innerText()).replace(/\s+/g, " ").trim();
+    if (note !== words) throw new Error(`${reason} note was ${JSON.stringify(note)}`);
+    if ((await row.innerText()).includes(reason)) throw new Error(`${reason} leaked into rendered row text`);
+  }
+}
+
+async function makeLocalDrop(page: Page, fake: Fake, origin: string, suffix: string) {
+  fake.clearSent();
+  await page.goto(`${origin}/?theme=tokyo-night&run=${ACTIVE}`);
+  await ready(page);
+  const field = page.locator('.dock textarea[aria-label="message"]');
+  await field.fill(`use a tool ${suffix}`);
+  await page.getByRole("button", { name: "send message" }).click();
+  await page.getByRole("button", { name: "stop the running turn" }).waitFor({ timeout: 10_000 });
+  const steer = `queued ${suffix}`;
+  await field.fill(steer);
+  await page.getByRole("button", { name: "steer the running turn" }).click();
+  await page.getByLabel(/message queued/i).waitFor({ timeout: 10_000 });
+  await page.getByRole("button", { name: "stop the running turn" }).click();
+  const row = userRow(page, steer);
+  await row.locator('[data-part="delivery-note"]').waitFor({ timeout: 10_000 });
+  return { row, steer };
+}
+
+async function checkLocalDrop(page: Page, fake: Fake, origin: string) {
+  const { row } = await makeLocalDrop(page, fake, origin, "local slot");
+  if (await row.locator('[data-part="delivery-note"]').count() !== 1) throw new Error("local-only drop does not have exactly one slotted note");
+  if (await row.getByRole("button", { name: "resend" }).count() !== 1) throw new Error("local-only drop does not have exactly one resend button");
+}
+
+async function checkOneOwner(page: Page, origin: string) {
+  await openFidelityHistory(page, origin);
+  for (const reason of Object.keys(reasonWords)) {
+    const text = reason === "turn_end" ? "retained dropped steer" : `retained reason ${reason}`;
+    const row = userRow(page, text);
+    if (await row.locator('[data-part="delivery-note"]').count() !== 1) throw new Error(`${reason} does not have exactly one note owner`);
+    const rendered = await row.innerText();
+    for (const token of [reason, "delivery_status"]) if (rendered.includes(token)) throw new Error(`raw ${token} leaked into the retained row`);
+  }
+}
+
+async function checkResendSafety(page: Page, fake: Fake, origin: string) {
+  const { row, steer } = await makeLocalDrop(page, fake, origin, "resend safety");
+  const first = fake.sent.find((item) => item.method === "steer" && item.text === steer)!;
+  await row.getByRole("button", { name: "resend" }).click();
+  await until(() => fake.sent.some((item) => item.method === "send" && item.text === steer), 10_000, "resend click");
+  const sent = fake.sent.filter((item) => item.method === "send" && item.text === steer);
+  if (sent.length !== 1 || sent[0]!.session !== ACTIVE || sent[0]!.delivery_id === first.delivery_id) throw new Error(`unsafe resend request: ${JSON.stringify(sent)}`);
+  await makeLocalDrop(page, fake, origin, "leave run");
+  const before = fake.sent.length;
+  await page.goto(`${origin}/?theme=tokyo-night&run=${FIDELITY}`);
+  await ready(page);
+  await Bun.sleep(500);
+  if (fake.sent.length !== before) throw new Error("leaving the run sent the dropped steer");
+}
+
+async function checkSlotLayout(page: Page, fake: Fake, origin: string) {
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 800 });
+    const { row } = await makeLocalDrop(page, fake, origin, `layout ${width}`);
+    const note = row.locator('[data-part="delivery-note"]');
+    const box = await note.boundingBox();
+    if (!box || box.x < 0 || box.x + box.width > width || box.y + box.height > 800) throw new Error(`delivery note clips at ${width}: ${JSON.stringify(box)}`);
+    if (width === 390) {
+      const noteLeft = await note.evaluate((node) => node.getBoundingClientRect().left);
+      const buttonLeft = await note.getByRole("button", { name: "resend" }).evaluate((node) => node.getBoundingClientRect().left);
+      if (Math.abs(noteLeft - buttonLeft) > 16) throw new Error(`mobile resend is misaligned by ${Math.abs(noteLeft - buttonLeft)}px`);
+    }
+  }
+  await page.emulateMedia({ colorScheme: "light", forcedColors: "active" });
+  await page.evaluate(() => { document.documentElement.style.zoom = "2"; });
+  const { row } = await makeLocalDrop(page, fake, origin, "forced zoom");
+  if (!await row.locator('[data-part="delivery-note"]').isVisible()) throw new Error("delivery note disappeared in forced colors at 200% zoom");
+}
+
 async function checkTurnEndResend(page: Page, fake: Fake, origin: string) {
   fake.clearSent();
   await page.goto(`${origin}/?theme=tokyo-night&run=${ACTIVE}`);
@@ -83,10 +201,21 @@ if (import.meta.main) {
     await until(() => fetch(origin).then((response) => response.ok, () => false), 60_000, "vite start");
     browser = await chromium.launch();
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
-    const selected = process.env.FIDELITY_GATE_CASE;
-    if (selected !== "auto") await checkFidelityData(page, origin);
-    if (selected !== "data") await checkTurnEndResend(page, fake, origin);
-    console.log(`fidelity gate passed: ${selected === "auto" ? "one turn-end automatic resend" : selected === "data" ? "live/reload tool data" : "live/reload tool data and one turn-end automatic resend"}`);
+    const cases = {
+      data: () => checkFidelityData(page, origin),
+      "slot-null": () => checkSlotNull(page, origin),
+      "slot-local": () => checkLocalDrop(page, fake, origin),
+      "slot-history": () => checkHistoryDrop(page, origin),
+      "slot-owner": () => checkOneOwner(page, origin),
+      "slot-reasons": () => checkReasonTable(page, origin),
+      "slot-resend": () => checkResendSafety(page, fake, origin),
+      "slot-layout": () => checkSlotLayout(page, fake, origin),
+      auto: () => checkTurnEndResend(page, fake, origin),
+    } as const;
+    const selected = process.env.FIDELITY_GATE_CASE as keyof typeof cases | undefined;
+    if (selected) await cases[selected]();
+    else for (const run of Object.values(cases)) await run();
+    console.log(`fidelity gate passed: ${selected ?? "all cases"}`);
   } finally {
     await browser?.close();
     if (vite.exitCode === null) vite.kill("SIGTERM");

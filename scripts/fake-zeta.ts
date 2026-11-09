@@ -158,6 +158,10 @@ const historySeed: Record<string, Json[]> = {
     { id: "fidelity-delivered", role: "system", event: "delivery_status", delivery_id: "fidelity-delivered", method: "steer", status: "delivered", content: [text("retained delivered steer")] },
     { id: "fidelity-dropped", role: "system", event: "delivery_status", delivery_id: "fidelity-dropped", method: "steer", status: "dropped", content: [text("retained dropped steer")], reason: "turn_end" },
     { id: "fidelity-generic-drop", role: "system", event: "delivery_status", delivery_id: "fidelity-generic-drop", method: "steer", status: "dropped", content: [text("steer dropped: turn_end")], reason: "turn_end" },
+    ...(["abort", "clear", "disconnect", "failed", "restart", "future_token"] as const).map((reason) => ({
+      id: `fidelity-reason-${reason}`, role: "system", event: "delivery_status", delivery_id: `fidelity-reason-${reason}`,
+      method: "steer", status: "dropped", content: [text(`retained reason ${reason}`)], reason,
+    })),
   ],
   "s-themes": [
     { id: "t1", role: "user", content: [text("check every theme's muted text against 4.5:1 on the surface color")], tool_result: null },
@@ -721,7 +725,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           const stored = (histories[active!] ?? []).filter((row) => approvalHistoryMode !== "not-advertised-without-rows" || (row.event !== "approval_request" && row.event !== "approval_end"));
           const rows = projectHistory(stored, socket.data.features?.includes("session_history_fidelity") === true);
           const offset = Number(params.offset ?? 0);
-          const pageSize = active === LARGE ? 128 : 8;
+          const pageSize = active === LARGE ? 128 : active === FIDELITY ? 32 : 8;
           reply({ result: { messages: rows.slice(offset, offset + pageSize), next_offset: offset + pageSize < rows.length ? offset + pageSize : null } });
           if (active === FIDELITY && socket.data.features?.includes("session_history_fidelity") && !fidelityStarted) {
             fidelityStarted = true;
