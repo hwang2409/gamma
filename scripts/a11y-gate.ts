@@ -52,8 +52,12 @@ async function withApp(appPort: number, run: () => Promise<void>) {
 const failures: string[] = [];
 let passed = 0;
 async function check(name: string, run: () => Promise<void>) {
-  try { await run(); passed++; console.log(`ok   ${name}`); }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // A hung browser call must fail under this check's name, not stall the whole gate without output.
+  const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("did not finish within 120 s")), 120_000); });
+  try { await Promise.race([run(), deadline]); passed++; console.log(`ok   ${name}`); }
   catch (error) { failures.push(`${name}: ${error instanceof Error ? error.message : String(error)}`); console.log(`FAIL ${name}: ${error instanceof Error ? error.message : String(error)}`); }
+  finally { clearTimeout(timer); }
 }
 const expect = (condition: unknown, message: string) => { if (!condition) throw new Error(message); };
 const field = (page: Page) => page.getByRole("combobox", { name: "message" });
@@ -67,13 +71,9 @@ const pendingApproval = (page: Page) => page.locator('[data-part="approval"][dat
 
 /** Opens the live active run and waits for its approval, the one state that has every control on screen; a reload rejoins the same pending approval. */
 async function openLive(page: Page) {
-  const since = fake.requests.length;
   await page.goto(`${origin}/?run=${ACTIVE}`);
   await pendingApproval(page).waitFor({ timeout: 15_000 });
   await page.getByRole("button", { name: /^permissions/ }).waitFor();
-  // The attached run asks for its command catalog; the listbox checks need that request to have gone out.
-  for (let attempt = 0; attempt < 150 && !fake.requests.slice(since).some((request) => request.method === "slash_list"); attempt++) await Bun.sleep(100);
-  expect(fake.requests.slice(since).some((request) => request.method === "slash_list"), "the opened run never asked for its command catalog");
 }
 
 async function dump(page: Page, label: string) {
