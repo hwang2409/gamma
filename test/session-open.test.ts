@@ -5,7 +5,7 @@ import { openSession } from "../src/session";
 type Json = Record<string, any>;
 type Handler = (method: string, params: Json, event: (params: Json) => void) => unknown;
 
-async function server(handler: Handler) {
+async function server(handler: Handler, features = ["delivery_id", "user_message_event", "user_message_delivery_id"]) {
   let receive!: (text: string) => void;
   const calls: Array<[string, Json]> = [];
   const transport: Transport = {
@@ -19,7 +19,7 @@ async function server(handler: Handler) {
         const event = (value: Json) => receive(JSON.stringify({ jsonrpc: "2.0", method: "event", params: { session_id: "s", ...value } }));
         try {
           const result = method === "hello"
-            ? { protocol_version: "1.2", capabilities: { features: ["delivery_id", "user_message_event", "user_message_delivery_id"] } }
+            ? { protocol_version: "1.2", capabilities: { features } }
             : await handler(method, params, event);
           receive(JSON.stringify({ jsonrpc: "2.0", id, result }));
         } catch (error) {
@@ -29,7 +29,7 @@ async function server(handler: Handler) {
     },
   };
   const client = createClient(transport, (flush) => flush());
-  await client.hello([]);
+  await client.hello(features);
   return { client, calls };
 }
 
@@ -41,6 +41,31 @@ const texts = (store: ReturnType<typeof createClient>["store"]) => items(store).
   return [];
 });
 const idleStatus = { session: { session_id: "s", created_at: "", updated_at: "" }, state: "idle", pending_approvals: [] } as const;
+const within = async <T>(promise: Promise<T>, name: string, ms = 10_000): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([promise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${name} timed out after ${ms}ms`)), ms); })]);
+  } finally { if (timer) clearTimeout(timer); }
+};
+
+for (const fidelity of [false, true]) test(`a ${fidelity ? "fidelity" : "legacy"} reload restores the stopped turn that matches zeta's served outcome`, async () => {
+  const turn = "turn-stopped";
+  const rows = [
+    { id: "failed", role: "assistant", content: [], failed_turn: { code: "provider_error", message: "provider failed" } },
+    { id: "served", role: "system", event: "served_turn_end", content: [], data: { turn_id: turn, reason: "user_stop" } },
+  ];
+  const features = ["delivery_id", "served_turn_end", ...(fidelity ? ["session_history_fidelity"] : [])];
+  const fake = await within(server((method) => {
+    if (method === "status") return { ...idleStatus, last_turn_outcome: { turn_id: turn, reason: "user_stop" } };
+    if (method === "session_history") return { messages: rows, next_offset: null };
+    throw new Error(method);
+  }, features), `${fidelity ? "fidelity" : "legacy"} test server hello`);
+
+  const opened = await within(openSession(fake.client, "s"), `${fidelity ? "fidelity" : "legacy"} stopped-turn open`);
+  await within(opened.complete, `${fidelity ? "fidelity" : "legacy"} stopped-turn replay`);
+  const errors = items(opened.lease.store).flatMap((item) => item?.type === "error" ? [item.event.error.code] : []);
+  expect(errors).toEqual(["provider_error", "aborted"]);
+});
 
 // Review 3's exact loss: both events arrive in the ambiguous first-page window and are absent from that page.
 test("an idle replay replaces quarantined live events with one fresh full snapshot", async () => {
