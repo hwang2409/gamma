@@ -57,6 +57,7 @@ async function poll(check: () => Promise<boolean>, attempts = 50) {
 for (const width of [1440, 390]) await check(`natural turn end offers the resend of a queued steer at ${width}`, async () => {
   const browser = await chromium.launch({ headless: true });
   const { context, page } = await fresh(browser, width, "/?run=s-reconnect");
+  fake.clearSent(); // the previous width's resend must not count as this one's
   try {
     await page.getByRole("button", { name: "approve", exact: true }).waitFor({ timeout: 15_000 });
     await page.locator('.dock textarea[aria-label="message"]').fill("please approve this");
