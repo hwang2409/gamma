@@ -22,7 +22,7 @@ const meta = (id: string, minutesAgo: number, extra: Json = {}) => ({
 });
 
 export const ACTIVE = "s-reconnect";
-export const FIDELITY = "s-fidelity";
+const FIDELITY = "s-fidelity";
 export const LONG = "s-long";
 export const MANY = "s-many";
 export const LARGE = "s-large-pages";
@@ -139,11 +139,13 @@ const historySeed: Record<string, Json[]> = {
   // metadata-only image blocks, and terminal steer outcomes.
   [FIDELITY]: [
     {
-      id: "fidelity-call", role: "assistant", tool_result: null, content: [toolUse("fidelity-tool", "bash", {
-        command: `printf fidelity-marker-${"nested-argument-".repeat(24)}`,
-        cwd: "/tmp",
-        options: { env: { FIDELITY: "true" } },
-      })].map((block) => block.type === "tool_use" ? { ...block, tool_call: { ...block.tool_call, arguments_truncated: true } } : block),
+      id: "fidelity-call", role: "assistant", tool_result: null, content: [{
+        type: "tool_use",
+        tool_call: {
+          id: "fidelity-tool", name: "bash", arguments_truncated: true,
+          arguments: { command: `printf fidelity-marker-${"nested-argument-".repeat(24)}`, cwd: "/tmp", options: { env: { FIDELITY: "true" } } },
+        },
+      }],
     },
     {
       id: "fidelity-result", role: "tool_result", content: [text("")], tool_result: result("fidelity-tool", "stdout:\n\nstderr:\nfailed\n", {
@@ -183,7 +185,7 @@ const createHistories = (): Record<string, Json[]> => Object.fromEntries(
 );
 
 /** Zeta projects stored rows separately for each connection's negotiated history features. */
-export function projectHistory(rows: readonly Json[], fidelity: boolean): Json[] {
+function projectHistory(rows: readonly Json[], fidelity: boolean): Json[] {
   if (fidelity) return rows.map((row) => ({ ...row }));
   return rows.flatMap((row) => {
     if (row.event === "delivery_status") return [];
