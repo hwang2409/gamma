@@ -65,16 +65,20 @@ async function queuedSteerSequence(browser: Awaited<ReturnType<typeof chromium.l
       await page.getByText(/not delivered/i).waitFor({ timeout: 15_000 });
       await page.getByRole("button", { name: "resend" }).click();
     } else {
+      // The automatic resend belongs to the view that sent the steer; leaving it in-app hands the steer to the user.
       const owner = page.url();
       await page.getByRole("button", { name: "new run" }).click();
       await page.getByText(/new run waits for the running run/i).waitFor();
-      for (let attempt = 0; attempt < 150 && !fake.sent.some((sent) => sent.method === "send" && sent.text === "queued steer natural"); attempt++) await Bun.sleep(200);
+      await page.getByText(/new run waits for the running run/i).waitFor({ state: "detached", timeout: 30_000 });
       await page.goBack(); await page.waitForURL(owner);
+      await page.getByText(/not delivered/i).waitFor({ timeout: 15_000 });
+      if (fake.sent.some((sent) => sent.method === "send" && sent.text === "queued steer natural")) throw new Error("the steer was resent without the user after its view was left");
+      await page.getByRole("button", { name: "resend" }).click();
     }
     await page.waitForFunction((text) => document.body.innerText.includes(String(text)), `queued steer ${stopped ? "stop" : "natural"}`, { timeout: 15_000 });
     for (let attempt = 0; attempt < 50 && !fake.sent.some((sent) => sent.method === "send" && sent.text === `queued steer ${stopped ? "stop" : "natural"}`); attempt++) await Bun.sleep(200);
     if (!fake.sent.some((sent) => sent.method === "steer" && sent.text === `queued steer ${stopped ? "stop" : "natural"}`)) throw new Error("steer was not queued for its owner run");
-    if (!fake.sent.some((sent) => sent.method === "send" && sent.text === `queued steer ${stopped ? "stop" : "natural"}`)) throw new Error(stopped ? "manual resend did not send the stopped steer" : "natural turn end did not resend the dropped steer");
+    if (!fake.sent.some((sent) => sent.method === "send" && sent.text === `queued steer ${stopped ? "stop" : "natural"}`)) throw new Error(stopped ? "manual resend did not send the stopped steer" : "the resend click did not send the dropped steer");
   } finally {
     const stop = page.getByRole("button", { name: "stop the running turn" });
     await stop.waitFor({ timeout: 5_000 }).then(() => stop.click()).catch(() => {});
@@ -197,8 +201,8 @@ try {
   for (let attempt = 0; ; attempt++) { if (vite.exitCode !== null) throw new Error("vite exited"); if (await fetch(origin).then((r) => r.ok, () => false)) break; if (attempt > 300) throw new Error("vite did not start"); await Bun.sleep(100); }
   const browser = await chromium.launch();
   try {
-    await check("natural-end-resends-owner-steer-at-1440", () => queuedSteerSequence(browser, 1440, false));
-    await check("natural-end-resends-owner-steer-at-390", () => queuedSteerSequence(browser, 390, false));
+    await check("natural-end-away-waits-for-resend-at-1440", () => queuedSteerSequence(browser, 1440, false));
+    await check("natural-end-away-waits-for-resend-at-390", () => queuedSteerSequence(browser, 390, false));
     await check("stop-marks-owner-steer-at-1440", () => queuedSteerSequence(browser, 1440, true));
     await check("stop-marks-owner-steer-at-390", () => queuedSteerSequence(browser, 390, true));
     await check("pending-create-history-at-1440", () => pendingCreateSequence(browser, 1440));
