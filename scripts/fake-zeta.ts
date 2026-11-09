@@ -595,6 +595,34 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     resolve("abort");
   };
 
+  const handleSessionHistory = async (socket: ServerWebSocket<SocketData>, params: Json, reply: (body: Json) => void, send: (event: Json) => void) => {
+    if (params.session_id !== active) return reply({ error: { code: -32003, message: "no active session" } });
+    if (openDelay > 0 && !delayedOpen) {
+      delayedOpen = true;
+      await wait(openDelay);
+    }
+    const stored = (histories[active!] ?? []).filter((row) => approvalHistoryMode !== "not-advertised-without-rows" || (row.event !== "approval_request" && row.event !== "approval_end"));
+    const rows = projectHistory(stored, socket.data.features?.includes("session_history_fidelity") === true);
+    const offset = Number(params.offset ?? 0);
+    const pageSize = active === LARGE ? 128 : active === FIDELITY ? 32 : 8;
+    reply({ result: { messages: rows.slice(offset, offset + pageSize), next_offset: offset + pageSize < rows.length ? offset + pageSize : null } });
+    if (active === FIDELITY && socket.data.features?.includes("session_history_fidelity") && !fidelityStarted) {
+      fidelityStarted = true;
+      queueMicrotask(() => fidelityLiveEvents.forEach((event) => socket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: event }))));
+    }
+    // Zeta 5feea2fc tests/test_server.py::test_approval_and_steer_continue_the_same_turn and
+    // ::test_resumed_approval_finishes_idle_after_terminal_event define this approval-turn lifecycle.
+    if (liveEnabled && active === ACTIVE && offset + pageSize >= rows.length && !turnStarted) {
+      turnStarted = true;
+      running = true;
+      const ask = () => new Promise<"approve" | "deny" | "abort">((resolve) => {
+        approvalAborted = false;
+        decide = (decision) => { decide = null; resolve(decision); };
+      });
+      setTimeout(() => void liveTurn(send, ask, wait, () => { composer.finishExternalTurn(ACTIVE, send); running = false; }, histories, currentHistoryMode, grantProof, (requestId, call) => { approvalRequestId = requestId; approvalCall = call as typeof approvalCall; })(), 300);
+    }
+  };
+
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port,
@@ -720,31 +748,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         if (method === "session_tree") return reply({ result: { session_id: params.session_id, branches: [{ id: "head-main", label: "main", seq: 1, current: true }, { id: "head-experiment", label: "experiment", seq: 7, current: false }] } });
         if (method === "switch_branch") return reply({ result: { session_id: params.session_id, head_id: params.head_id } });
         if (method === "session_history") {
-          if (params.session_id !== active) return reply({ error: { code: -32003, message: "no active session" } });
-          if (openDelay > 0 && !delayedOpen) {
-            delayedOpen = true;
-            await wait(openDelay);
-          }
-          const stored = (histories[active!] ?? []).filter((row) => approvalHistoryMode !== "not-advertised-without-rows" || (row.event !== "approval_request" && row.event !== "approval_end"));
-          const rows = projectHistory(stored, socket.data.features?.includes("session_history_fidelity") === true);
-          const offset = Number(params.offset ?? 0);
-          const pageSize = active === LARGE ? 128 : active === FIDELITY ? 32 : 8;
-          reply({ result: { messages: rows.slice(offset, offset + pageSize), next_offset: offset + pageSize < rows.length ? offset + pageSize : null } });
-          if (active === FIDELITY && socket.data.features?.includes("session_history_fidelity") && !fidelityStarted) {
-            fidelityStarted = true;
-            queueMicrotask(() => fidelityLiveEvents.forEach((event) => socket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: event }))));
-          }
-          // Zeta 5feea2fc tests/test_server.py::test_approval_and_steer_continue_the_same_turn and
-          // ::test_resumed_approval_finishes_idle_after_terminal_event define this approval-turn lifecycle.
-          if (liveEnabled && active === ACTIVE && offset + pageSize >= rows.length && !turnStarted) {
-            turnStarted = true;
-            running = true;
-            const ask = () => new Promise<"approve" | "deny" | "abort">((resolve) => {
-              approvalAborted = false;
-              decide = (decision) => { decide = null; resolve(decision); };
-            });
-            setTimeout(() => void liveTurn(send, ask, wait, () => { composer.finishExternalTurn(ACTIVE, send); running = false; }, histories, currentHistoryMode, grantProof, (requestId, call) => { approvalRequestId = requestId; approvalCall = call as typeof approvalCall; })(), 300);
-          }
+          await handleSessionHistory(socket, params, reply, send);
           return;
         }
         // As in zeta (server/ergonomics.py `active`): these name the active session or fail.

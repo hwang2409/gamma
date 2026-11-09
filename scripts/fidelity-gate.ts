@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chromium, type Page } from "playwright";
+import { chromium, type Locator, type Page } from "playwright";
 import { ACTIVE, startFakeZeta } from "./fake-zeta";
 
 const FIDELITY = "s-fidelity";
@@ -14,16 +14,23 @@ const until = async (test: () => boolean | Promise<boolean>, timeout: number, na
     await Bun.sleep(50);
   }
 };
-const ready = (page: Page) => page.locator('.dock textarea[aria-label^="message"]').waitFor({ timeout: 15_000 });
+const waitFor = async (locator: Locator, timeout: number, name: string) => {
+  try {
+    await locator.waitFor({ timeout });
+  } catch (error) {
+    throw new Error(`${name} timed out after ${timeout}ms`, { cause: error });
+  }
+};
+const ready = (page: Page) => waitFor(page.locator('.dock textarea[aria-label^="message"]'), 15_000, "message composer ready");
 
 async function fidelityValues(page: Page) {
   const shell = page.locator('[data-tool-view="shell"]', { hasText: "fidelity-marker" });
-  await shell.waitFor({ timeout: 10_000 });
+  await waitFor(shell, 10_000, "fidelity shell output");
   const summary = shell.locator('[data-part="tool-summary"]');
   if (await summary.getAttribute("aria-expanded") === "false") await summary.click();
-  await shell.locator('[data-stream="stderr"]', { hasText: "failed" }).waitFor({ timeout: 10_000 });
+  await waitFor(shell.locator('[data-stream="stderr"]', { hasText: "failed" }), 10_000, "fidelity stderr output");
   const image = shell.locator('[data-part="image"]', { hasText: "fidelity preview" });
-  await image.waitFor({ timeout: 10_000 });
+  await waitFor(image, 10_000, "fidelity image metadata");
   const text = (await shell.innerText()).replace(/\s+/g, " ").trim();
   if (!text.includes("exit 2") || !text.includes("/tmp")) throw new Error(`fidelity shell lost exit code or cwd: ${JSON.stringify(text)}`);
   if (!text.includes("1.2 kB")) throw new Error(`fidelity image lost its size: ${JSON.stringify(text)}`);
@@ -71,14 +78,14 @@ const userRow = (page: Page, text: string) => page.locator('[data-part="item"][d
 async function openFidelityHistory(page: Page, origin: string) {
   await page.goto(`${origin}/?theme=tokyo-night&run=${FIDELITY}`);
   await ready(page);
-  await userRow(page, "retained dropped steer").waitFor({ timeout: 10_000 });
+  await waitFor(userRow(page, "retained dropped steer"), 10_000, "fidelity history row");
 }
 
 async function checkSlotNull(page: Page, origin: string) {
   await page.goto(`${origin}/?theme=tokyo-night&run=${ACTIVE}`);
   await ready(page);
   const delivered = userRow(page, "the reconnect test in packages/zeta fails");
-  await delivered.waitFor({ timeout: 10_000 });
+  await waitFor(delivered, 10_000, "delivered message row");
   if (await delivered.locator('[data-part="delivery-note"]').count()) throw new Error("a delivered row has a delivery note wrapper");
   if (await delivered.locator("xpath=following-sibling::*[contains(@class, 'undelivered')]").count()) throw new Error("a delivered row still reserves gamma's old sibling note");
 }
@@ -97,7 +104,7 @@ async function checkReasonTable(page: Page, origin: string) {
   await openFidelityHistory(page, origin);
   for (const [reason, words] of Object.entries(reasonWords)) {
     const row = userRow(page, reasonRows[reason as keyof typeof reasonRows]);
-    await row.waitFor({ timeout: 10_000 });
+    await waitFor(row, 10_000, `${reason} history row`);
     const note = (await row.locator('[data-part="delivery-note"]').innerText()).replace(/\s+/g, " ").trim();
     if (note !== words) throw new Error(`${reason} note was ${JSON.stringify(note)}`);
   }
@@ -110,14 +117,14 @@ async function makeLocalDrop(page: Page, fake: Fake, origin: string, suffix: str
   const field = page.locator('.dock textarea[aria-label="message"]');
   await field.fill(`use a tool ${suffix}`);
   await page.getByRole("button", { name: "send message" }).click();
-  await page.getByRole("button", { name: "stop the running turn" }).waitFor({ timeout: 10_000 });
+  await waitFor(page.getByRole("button", { name: "stop the running turn" }), 10_000, "running turn stop control");
   const steer = `queued ${suffix}`;
   await field.fill(steer);
   await page.getByRole("button", { name: "steer the running turn" }).click();
-  await page.getByLabel(/message queued/i).waitFor({ timeout: 10_000 });
+  await waitFor(page.getByLabel(/message queued/i), 10_000, "queued message status");
   await page.getByRole("button", { name: "stop the running turn" }).click();
   const row = userRow(page, steer);
-  await row.locator('[data-part="delivery-note"]').waitFor({ timeout: 10_000 });
+  await waitFor(row.locator('[data-part="delivery-note"]'), 10_000, "dropped delivery note");
   return { row, steer };
 }
 
@@ -182,7 +189,7 @@ async function checkTurnEndResend(page: Page, fake: Fake, origin: string) {
   await field.fill("start the fidelity resend turn");
   await field.press("Enter");
   await until(() => fake.sent.some((item) => item.text === "start the fidelity resend turn"), 10_000, "first send");
-  await page.getByPlaceholder("steer the running turn").waitFor({ timeout: 10_000 });
+  await waitFor(page.getByPlaceholder("steer the running turn"), 10_000, "steer composer ready");
   await field.fill("automatic fidelity steer");
   await field.press("Enter");
   await until(() => fake.sent.filter((item) => item.text === "automatic fidelity steer").length === 2, 20_000, "one automatic resend");
