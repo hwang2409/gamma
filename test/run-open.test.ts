@@ -199,6 +199,7 @@ const table: Row[] = [
         const before = h.fake.calls.length;
         held.release();
         await h.live("b");
+        await waitFor(() => h.view.open?.history.complete === true, 2_000); // b's open finishes its pages (else: syncing)
         expect(targeted(h.fake.calls.slice(before), "a")).toEqual([]);
         expect(h.store.get("a").openOperation).toBeUndefined();
         expect(h.owner()).toMatchObject({ accept: true, block: null });
