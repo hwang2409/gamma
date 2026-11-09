@@ -58,8 +58,8 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .yolo-indicator { display: inline-flex; flex: none; align-items: center; min-height: var(--control); padding: 3px 8px; border: 1px solid var(--fulcrum-danger); color: var(--fulcrum-fg); font-size: 12px; font-weight: 700; white-space: nowrap; }
 /* A danger mark: fulcrum's 7 px square, ringed in bg so it reads against bg wherever it sits. The word next to it stays fg and bold:
    status tokens are marks, not text colors (test/status-color.test.ts). Wrapping notes hang their lines past the square. */
-:is(.yolo-indicator, .undelivered, .attach-error, .permissions-error, .settings-error)::before { content: ""; display: inline-block; flex: none; width: 7px; height: 7px; margin-right: 8px; vertical-align: 1px; background: var(--fulcrum-danger); outline: 1px solid var(--fulcrum-bg); }
-:is(.undelivered, .attach-error, .permissions-error, .settings-error) { text-indent: -15px; font-weight: 700; }
+:is(.yolo-indicator, [data-part="delivery-note"], .attach-error, .permissions-error, .settings-error)::before { content: ""; display: inline-block; flex: none; width: 7px; height: 7px; margin-right: 8px; vertical-align: 1px; background: var(--fulcrum-danger); outline: 1px solid var(--fulcrum-bg); }
+:is([data-part="delivery-note"], .attach-error, .permissions-error, .settings-error) { text-indent: -15px; font-weight: 700; }
 
 /* Settings: a popover under its button with the theme picker and the vim switch. */
 .settings-menu { position: relative; flex: none; }
@@ -126,14 +126,13 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .jump-lane [data-part="jump-to-latest"] { display: flex; align-items: center; min-height: var(--control); padding: 0 14px; border: 0; }
 
 /* A steer that a stop dropped: the row stays, struck through, with a danger rail and a note that says why. */
-.scroll [data-kind="user"]:has(+ .undelivered:not([data-empty])) { border-left-color: var(--fulcrum-danger); color: var(--fulcrum-muted); text-decoration: line-through; text-decoration-color: var(--fulcrum-danger); }
+.scroll [data-kind="user"]:has([data-part="delivery-note"]) { border-left-color: var(--fulcrum-danger); color: var(--fulcrum-muted); text-decoration: line-through; text-decoration-color: var(--fulcrum-danger); }
 /* The square sits under the row's rail; the words keep the 14 px indent. */
-.undelivered { margin: 4px 0 0; padding-left: 14px; color: var(--fulcrum-fg); font-size: 12px; font-weight: 700; text-indent: -14px; }
-.undelivered::before { margin-right: 7px; }
+[data-part="delivery-note"] { margin: 4px 0 0; padding-left: 14px; color: var(--fulcrum-fg); font-size: 12px; font-weight: 700; text-indent: -14px; }
+[data-part="delivery-note"]::before { margin-right: 7px; }
 /* The resend's own result and its button sit under the note's words, on the same 14 px indent. */
-.undelivered > .resend-failure { display: block; font-weight: 400; text-indent: 0; }
-.undelivered > .ghost { text-indent: 0; }
-.undelivered[data-empty] { display: none; }
+[data-part="delivery-note"] > .resend-failure { display: block; font-weight: 400; text-indent: 0; }
+[data-part="delivery-note"] > .ghost { text-indent: 0; }
 .queued-delivery { margin: 4px 0 0; padding-left: 14px; color: var(--fulcrum-muted); font-size: 12px; font-weight: 700; }
 
 /* Notices and empty states. */
@@ -219,7 +218,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
   .dock .command-option:hover { outline: 2px solid CanvasText; outline-offset: -2px; }
   .dock .command-option[aria-selected="true"] { forced-color-adjust: none; background: Highlight; color: HighlightText; }
   .dock .command-option[aria-selected="true"] :is(.command-name, .command-description, .command-source) { color: HighlightText; }
-  :is(.yolo-indicator, .undelivered, .attach-error, .permissions-error, .settings-error)::before { forced-color-adjust: none; background: CanvasText; outline-color: Canvas; }
+  :is(.yolo-indicator, [data-part="delivery-note"], .attach-error, .permissions-error, .settings-error)::before { forced-color-adjust: none; background: CanvasText; outline-color: Canvas; }
 }
 .command-name { font-weight: 700; }
 .gamma-tool { position: relative; }
@@ -352,8 +351,8 @@ button:active:not(:disabled) { transform: scale(0.97); }
   .command-description { grid-column: auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .inspector-backdrop { padding: 0; }
   .artifacts { padding-inline-start: 8px; }
-  .undelivered:not([data-empty]) { min-height: 3.2em; }
-  .undelivered > .ghost { display: flex; width: fit-content; margin-top: 4px; }
+  [data-part="delivery-note"] { min-height: 3.2em; }
+  [data-part="delivery-note"] > .ghost { display: flex; width: fit-content; margin-top: 4px; }
   .new-run-label { display: none; }
   .new-run-short { display: inline; font-size: 18px; }
 }
