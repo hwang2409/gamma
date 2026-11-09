@@ -115,21 +115,24 @@ function ComposerBody({ field: { id, state, vimOn, vim, text, input, completion,
 
 function useComposerDraft(vimOn: boolean, text: string, onChange: (text: string) => void) {
   const input = useRef<HTMLTextAreaElement>(null);
-  const cursor = useRef<number | null>(null);
+  // The caret to set once React commits this text; a commit with other text (the user typed first) drops it.
+  const pending = useRef<{ value: string; caret: number } | null>(null);
   const [vim, setVim] = useState<Vim>(() => startVim({ text, cursor: text.length }));
   const normal = vimOn && vim.mode === "normal";
   useEffect(() => { if (!vimOn) setVim(startVim({ text: "", cursor: 0 })); }, [vimOn]);
   useLayoutEffect(() => {
     const field = input.current;
-    if (!field || cursor.current === null) return;
-    const at = cursor.current;
-    cursor.current = null;
+    if (!field || !pending.current) return;
+    const { value, caret: at } = pending.current;
+    pending.current = null;
+    if (field.value !== value) return;
     const block = normal && at < field.value.length && field.value[at] !== "\n" ? 1 : 0;
     field.setSelectionRange(at, at + block);
   });
-  const apply = ({ vim: next, draft }: Step) => { setVim(next); onChange(draft.text); cursor.current = draft.cursor; };
+  const place = (value: string, caret: number) => { onChange(value); pending.current = { value, caret }; };
+  const apply = ({ vim: next, draft }: Step) => { setVim(next); place(draft.text, draft.cursor); };
   const current = (): Draft => ({ text, cursor: input.current?.selectionStart ?? text.length });
-  return { input, text, setText: onChange, vim, normal, apply, current };
+  return { input, text, setText: onChange, place, vim, normal, apply, current };
 }
 
 function useAttachments(input: RefObject<HTMLTextAreaElement | null>, images: readonly QueuedImage[], onChange: (images: readonly QueuedImage[]) => void, onRemove: (index: number) => void) {
@@ -267,8 +270,7 @@ export function GammaComposer({ state, reason, blockedReason, vim: vimOn, comman
   const applyCompletion = (accepted: { value: string; caret: number } | undefined) => {
     if (!accepted) return;
     draft.input.current?.focus({ preventScroll: true });
-    draft.setText(accepted.value);
-    requestAnimationFrame(() => { draft.input.current?.focus({ preventScroll: true }); draft.input.current?.setSelectionRange(accepted.caret, accepted.caret); });
+    draft.place(accepted.value, accepted.caret);
   };
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     const choice = completions.key(event.key, event.nativeEvent.isComposing || event.keyCode === 229, event.shiftKey || event.altKey || event.ctrlKey || event.metaKey);

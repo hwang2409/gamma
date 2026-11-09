@@ -133,6 +133,34 @@ const openList = async (page: Page) => {
   await settle(page);
 };
 const closeList = async (page: Page) => { await page.mouse.move(0, 0); await field(page).press("Escape"); await field(page).fill(""); };
+/**
+ * Tab accepts /status, then the user selects all and retypes /st with one animation frame between the selection and
+ * the typing (Playwright's fill does the same, and a loaded CI runner lands a frame there). The frames are held until
+ * then, so a caret the composer set a frame late collapses the selection and the text lands after "/status ".
+ */
+async function retypeAfterTab(page: Page) {
+  await field(page).fill("/st");
+  const listbox = page.getByRole("listbox", { name: "command suggestions" });
+  await step(page, "typing /st opens the list", () => listbox.waitFor());
+  await field(page).evaluate(() => {
+    const held = new Map<number, FrameRequestCallback>();
+    const real = { request: requestAnimationFrame, cancel: cancelAnimationFrame };
+    let id = 0;
+    window.requestAnimationFrame = (callback) => { held.set(++id, callback); return id; };
+    window.cancelAnimationFrame = (handle) => { held.delete(handle); };
+    (window as unknown as { releaseFrames(): void }).releaseFrames = () => {
+      Object.assign(window, { requestAnimationFrame: real.request, cancelAnimationFrame: real.cancel });
+      for (const callback of held.values()) callback(performance.now());
+    };
+  });
+  await field(page).press("Tab");
+  const accepted = await field(page).inputValue();
+  await field(page).evaluate((node: HTMLTextAreaElement) => { node.select(); (window as unknown as { releaseFrames(): void }).releaseFrames(); });
+  await page.keyboard.insertText("/st");
+  const value = await field(page).inputValue();
+  if (accepted !== "/status " || value !== "/st") throw new Error(`tab accepted ${JSON.stringify(accepted)}, then select-all, a frame, and typing /st left ${JSON.stringify(value)}`);
+  await step(page, "retyping /st after tab acceptance reopens the list", () => listbox.waitFor());
+}
 async function listGeometry(page: Page) {
   try {
     await openList(page);
@@ -268,6 +296,7 @@ try {
       await check("webkit edge shades stay visible over the active and the hovered edge row", () => listShades(other, "webkit"));
       await check("webkit free wheel scrolling rests on whole rows", () => listWheel(other, "webkit"));
       await check("webkit receipt text lines up with its dismiss button", () => receiptAlignment(other, "webkit"));
+      await check("webkit retyping after tab acceptance replaces the selection and reopens the list", async () => { await retypeAfterTab(other); await closeList(other); });
     } finally { await safari.close(); }
   }
 
@@ -537,9 +566,8 @@ try {
       const box = await listbox.boundingBox();
       const composer = await page.locator('[data-part="composer-field"]').boundingBox();
       if (!box || !composer || box.y + box.height > composer.y + 1) throw new Error("listbox overlaps the composer field");
-      await field(page).press("ArrowDown"); await field(page).press("ArrowUp"); await field(page).press("Tab");
-      if (await field(page).inputValue() !== "/status ") throw new Error("tab did not accept the active option");
-      await field(page).fill("/st"); await step(page, "retyping /st after tab acceptance reopens the list", () => listbox.waitFor());
+      await field(page).press("ArrowDown"); await field(page).press("ArrowUp");
+      await retypeAfterTab(page);
       await option.click();
       await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
       const pointerValue = await field(page).inputValue();
