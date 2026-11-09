@@ -21,12 +21,12 @@ async function fidelityValues(page: Page) {
   await shell.waitFor({ timeout: 10_000 });
   const summary = shell.locator('[data-part="tool-summary"]');
   if (await summary.getAttribute("aria-expanded") === "false") await summary.click();
-  await shell.getByText("failed", { exact: true }).waitFor({ timeout: 10_000 });
+  await shell.locator('[data-stream="stderr"]', { hasText: "failed" }).waitFor({ timeout: 10_000 });
   const image = shell.locator('[data-part="image"]', { hasText: "fidelity preview" });
   await image.waitFor({ timeout: 10_000 });
   const text = (await shell.innerText()).replace(/\s+/g, " ").trim();
   if (!text.includes("exit 2") || !text.includes("/tmp")) throw new Error(`fidelity shell lost exit code or cwd: ${JSON.stringify(text)}`);
-  if (!text.includes("1.2 KB")) throw new Error(`fidelity image lost its size: ${JSON.stringify(text)}`);
+  if (!text.includes("1.2 kB")) throw new Error(`fidelity image lost its size: ${JSON.stringify(text)}`);
   if (await image.getAttribute("data-size") !== "known") throw new Error("fidelity image lost its dimensions");
   return {
     command: (await summary.innerText()).replace(/\s+/g, " ").trim(),
@@ -55,7 +55,7 @@ async function checkTurnEndResend(page: Page, fake: Fake, origin: string) {
   await field.fill("start the fidelity resend turn");
   await field.press("Enter");
   await until(() => fake.sent.some((item) => item.text === "start the fidelity resend turn"), 10_000, "first send");
-  await page.locator('.dock textarea[aria-label^="steer"]').waitFor({ timeout: 10_000 });
+  await page.getByPlaceholder("steer the running turn").waitFor({ timeout: 10_000 });
   await field.fill("automatic fidelity steer");
   await field.press("Enter");
   await until(() => fake.sent.filter((item) => item.text === "automatic fidelity steer").length === 2, 20_000, "one automatic resend");
@@ -75,7 +75,7 @@ if (import.meta.main) {
   const fake = await startFakeZeta({ origins: [origin], live: false });
   const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], {
     cwd: root,
-    env: { ...process.env, FAKE_ZETA_WORD_MS: "5", ZETA_HOME: fake.home, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin, VITE_ZETA_PORT: String(fake.port) },
+    env: { ...process.env, FAKE_ZETA_WORD_MS: "30", ZETA_HOME: fake.home, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin, VITE_ZETA_PORT: String(fake.port) },
     stdio: "ignore",
   });
   let browser;
@@ -83,9 +83,10 @@ if (import.meta.main) {
     await until(() => fetch(origin).then((response) => response.ok, () => false), 60_000, "vite start");
     browser = await chromium.launch();
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
-    await checkFidelityData(page, origin);
-    await checkTurnEndResend(page, fake, origin);
-    console.log("fidelity gate passed: live/reload tool data and one turn-end automatic resend");
+    const selected = process.env.FIDELITY_GATE_CASE;
+    if (selected !== "auto") await checkFidelityData(page, origin);
+    if (selected !== "data") await checkTurnEndResend(page, fake, origin);
+    console.log(`fidelity gate passed: ${selected === "auto" ? "one turn-end automatic resend" : selected === "data" ? "live/reload tool data" : "live/reload tool data and one turn-end automatic resend"}`);
   } finally {
     await browser?.close();
     if (vite.exitCode === null) vite.kill("SIGTERM");

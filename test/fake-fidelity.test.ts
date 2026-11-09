@@ -9,7 +9,7 @@ const bounded = <T>(promise: Promise<T>, label: string) => Promise.race([
   Bun.sleep(10_000).then((): T => { throw new Error(`timed out waiting for ${label}`); }),
 ]);
 
-async function history(features: string[]) {
+async function history(features: string[], session = "s-fidelity") {
   const origin = "http://127.0.0.1:4225";
   const fake = await startFakeZeta({ origins: [origin], port: 0, live: false });
   const discovery = JSON.parse(await readFile(join(fake.home, "run", "serve.ws.json"), "utf8")) as { controller_token: string };
@@ -33,8 +33,8 @@ async function history(features: string[]) {
       socket.addEventListener("error", () => reject(new Error("socket failed")), { once: true });
     }), "socket open");
     expect((await request("hello", { protocol_version: "1.2", client_version: "1.2", role: "controller", features })).error).toBeUndefined();
-    expect((await request("resume", { session_id: "s-fidelity" })).error).toBeUndefined();
-    const reply = await request("session_history", { session_id: "s-fidelity" });
+    expect((await request("resume", { session_id: session })).error).toBeUndefined();
+    const reply = await request("session_history", { session_id: session });
     expect(reply.error).toBeUndefined();
     return reply.result?.messages ?? [];
   } finally {
@@ -42,6 +42,12 @@ async function history(features: string[]) {
     await fake.close();
   }
 }
+
+test("a client without fidelity still opens legacy history without fidelity-only rows", async () => {
+  const rows = await history([], "s-reconnect");
+  expect(rows.some((row) => row.id === "h1")).toBe(true);
+  expect(rows.some((row) => row.event === "delivery_status")).toBe(false);
+});
 
 test("fake history projects legacy and fidelity rows per negotiated socket", async () => {
   const legacy = await history([]);
