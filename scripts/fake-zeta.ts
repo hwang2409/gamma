@@ -35,6 +35,83 @@ const seeded = [
   meta("s-untitled", 60 * 24 * 40),
 ];
 
+/**
+ * The params real zeta 169fb144 rejects with -32602, for every request the fake serves after hello. `required` params
+ * must be nonempty strings, `oneOf` needs exactly one of its keys, a present `nonblank` param needs a non-space
+ * character, a `lists` param must be a list of that many items, and a `gated` param needs every listed feature.
+ * Order matters when zeta checks state between params, so a rule has up to three stages, as in zeta: the top level is
+ * checked on dispatch, `afterSession` once the active session check (-32003) passed, and `afterTurn` once the turn
+ * check passed (-32004 busy, or -32005 for steer with no turn); the handler runs the later stages at those points.
+ * Unknown params are accepted, as in zeta: its only unknown-param rejections are session_grants and
+ * revoke_session_grants (server/control.py:1062-1100, owned by `handleGrantRequest` below), backward session_history
+ * (server/ergonomics.py:1073, never negotiated here), content_read (connections.py:1011), and the project methods
+ * (project_requests.py:485, entry_project_views.py:279), which the fake does not serve.
+ * Zeta maps ValueError and ProtocolError(INVALID_PARAMS) to -32602 (server/server.py:439-444).
+ */
+type ParamChecks = { required?: readonly string[]; oneOf?: readonly string[]; nonblank?: readonly string[]; lists?: Readonly<Record<string, readonly [number, number]>>; gated?: Readonly<Record<string, readonly string[]>> };
+type ParamRule = ParamChecks & { afterSession?: ParamChecks; afterTurn?: ParamChecks };
+export const PARAM_RULES: Readonly<Record<string, ParamRule>> = {
+  // server.py:630 + :827-831 (host_commands), then the busy check (:631, control.py:208-210), then :633-634 (cwd).
+  // approval_mode is gated only when it is not null (server.py:624-626, `_optional_string`), so the handler checks it.
+  new_session: { gated: { host_commands: ["session_host_commands"] }, afterTurn: { gated: { cwd: ["session_cwd"] } } },
+  // server.py:662 (host_commands), :663 -> control.py:209-213 (busy: -32004), then :664 (session_id). The fake checks
+  // session_id on dispatch, so a busy resume without session_id gets -32602 where zeta answers -32004; both reject.
+  resume: { required: ["session_id"], gated: { host_commands: ["session_host_commands"] } },
+  // server.py:1077-1084.
+  list_sessions: { gated: { offset: ["list_sessions_paging"], limit: ["list_sessions_paging"], project_id: ["projects"] } },
+  status: {},
+  // delivery.py:53-54 (no active session), :55 + :370-381 (delivery_id), :61-64 (busy), then :65 -> :529-545 (exactly
+  // one of text or input_id; text must have a non-space character; input_id needs model_input_ids).
+  send: { afterSession: { gated: { delivery_id: ["delivery_id"] } }, afterTurn: { oneOf: ["text", "input_id"], nonblank: ["text"], gated: { input_id: ["model_input_ids"] } } },
+  // delivery.py:226-227 (no active session), :228 (delivery_id), :233-234 (no turn: -32005), then :235 (text).
+  steer: { afterSession: { gated: { delivery_id: ["delivery_id"] } }, afterTurn: { required: ["text"] } },
+  // delivery.py:353 (the method itself needs the delivery_id feature: protocol.py:301, :553-554 answer -32601 first).
+  delivery_status: { required: ["delivery_id"] },
+  // server.py:923 -> ergonomics.py:85-93 (session_id), delivery.py:131-133 (delivery_id needs both features), :136-139
+  // (busy), then :142 -> image_delivery.py:128 -> :49-57 (1 to 4 images).
+  send_images: { required: ["session_id"], afterSession: { gated: { delivery_id: ["delivery_id", "send_images_delivery_id"] } }, afterTurn: { lists: { images: [1, 4] } } },
+  // server.py:728-747.
+  approve: { required: ["request_id"] },
+  deny: { required: ["request_id"] },
+  // server.py:748-751 -> abort_scope.py:32-45.
+  abort: { gated: { scope: ["abort_scope"] } },
+  // connections.py:1021-1022 -> ergonomics.py:85-93; ergonomics.py:1114-1119 (backward keys).
+  session_history: { required: ["session_id"], gated: { before: ["session_history_backward"], history_validator: ["session_history_backward"] } },
+  session_tree: { required: ["session_id"] },
+  // server.py:900-906: session_id (:903), then ergonomics.py:79-80 (name must be a string); no busy check.
+  rename_session: { required: ["session_id"] },
+  // server.py:923, then :956 (busy) before :973 (head_id). The fake does not model a busy switch_branch, so while a turn
+  // runs it answers -32602 for a missing head_id where zeta answers -32004; both reject.
+  switch_branch: { required: ["session_id", "head_id"] },
+  // server.py:923 (session_id), :956 (busy), then :959-960 (model, approval_mode).
+  set_settings: { required: ["session_id"], afterTurn: { required: ["model", "approval_mode"] } },
+  session_settings: { required: ["session_id"] },
+  model_catalog: {},
+  slash_list: { required: ["session_id"] },
+  slash_run: { required: ["session_id", "text"] },
+};
+/** The -32602 message real zeta would send for these params at this stage, or null when it accepts them. */
+function invalidParams(method: string, checks: ParamChecks | undefined, params: Json, features: readonly string[]): string | null {
+  if (!checks) return null;
+  for (const name of checks.required ?? []) if (typeof params[name] !== "string" || !params[name]) return `${name} must be a nonempty string`;
+  if (checks.oneOf && checks.oneOf.filter((name) => name in params).length !== 1) return `${method} requires exactly one of ${checks.oneOf.join(" or ")}`;
+  for (const name of checks.nonblank ?? []) {
+    const value = params[name];
+    if (name in params && (typeof value !== "string" || !value.trim())) return `${name} must be a nonempty string`;
+  }
+  for (const [name, [min, max]] of Object.entries(checks.lists ?? {})) {
+    const value = params[name];
+    if (!Array.isArray(value) || value.length < min || value.length > max) return `${method} needs ${min} to ${max} ${name}`;
+  }
+  for (const [name, needs] of Object.entries(checks.gated ?? {})) {
+    const missing = needs.find((feature) => !features.includes(feature));
+    if (name in params && missing) return `${name} requires the negotiated ${missing} feature`;
+  }
+  return null;
+}
+
+const SETTINGS_REQUESTS = ["model_catalog", "session_settings", "set_settings", "send_images"];
+
 // Opaque command inputs by id. Zeta echoes an opaque input's display_text, the typed command line, as the user
 // message (zeta dcc4ce9 src/zeta/core/slash.py:767 display_text=value; src/zeta/server/delivery.py:107-108).
 const opaqueInputs = new Map<string, string>();
@@ -198,17 +275,27 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
     running.set(false);
     e("agent_end");
   };
-  const deliver = (requested: "send" | "steer" | "send_images", params: Json, active: string | null, send: Send): Json => {
+  // In zeta's order (see PARAM_RULES): active session, delivery_id, duplicate (send_images: after its payload checks,
+  // delivery.py:150-153), turn state, then the remaining params.
+  const deliver = (requested: "send" | "steer" | "send_images", params: Json, active: string | null, send: Send, features: readonly string[]): Json => {
     const method = requested === "steer" ? "steer" : "send";
-    const images = requested === "send_images" ? (params.images as Json[]) : [];
+    const rule = PARAM_RULES[requested]!;
     const delivery = typeof params.delivery_id === "string" ? params.delivery_id : null;
     // Zeta src/zeta/server/delivery.py:48-58 and :383-408, docs/serve-protocol.md:497-520: ids are retained per
     // session (the attached runtime's store), the lookup runs after the no-active-session check and before turn checks.
     const seen = delivery && active ? deliveries.get(`${active}\u0000${delivery}`) : undefined;
-    if (seen) return { result: statuses.get(delivery!) === "dropped" ? { accepted: false, duplicate: true, status: "dropped" } : { ...seen, duplicate: true } };
+    const duplicate = (): Json => ({ result: statuses.get(delivery!) === "dropped" ? { accepted: false, duplicate: true, status: "dropped" } : { ...seen, duplicate: true } });
+    const invalid = (checks: ParamChecks | undefined): Json | null => { const message = invalidParams(requested, checks, params, features); return message ? { error: { code: -32602, message } } : null; };
     if (!active) return { error: { code: -32003, message: "no active session" } };
+    const late = invalid(rule.afterSession);
+    if (late) return late;
+    if (seen && requested !== "send_images") return duplicate();
     if (method === "send" && running.get()) return { error: { code: -32004, message: "a turn is already running" } };
     if (method === "steer" && !running.get()) return { error: { code: -32005, message: "no turn is running for steering" } };
+    const later = invalid(rule.afterTurn);
+    if (later) return later;
+    if (seen) return duplicate();
+    const images = requested === "send_images" ? (params.images as Json[]) : [];
     const value = typeof params.input_id === "string" ? opaqueInputs.get(params.input_id) ?? "" : String(params.text ?? "");
     sent.push({ method, text: value, delivery_id: delivery });
     const userMessage = { event: "user_message", session_id: active, text: value, mode: method, attachments: images.map((image) => ({ name: image.name, mime_type: image.mime_type, size: Math.floor(String(image.data).length * 3 / 4) })), ...(delivery ? { delivery_id: delivery } : {}) };
@@ -270,12 +357,13 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
       chat.aborted = true; chat = null; running.set(false);
     },
     /** The reply body for a composer method, or undefined for any other method. */
-    handle(method: string, params: Json, active: string | null, send: Send): Json | undefined {
-      if (method === "send" || method === "steer" || method === "send_images") return deliver(method, params, active, send);
+    handle(method: string, params: Json, active: string | null, send: Send, features: readonly string[]): Json | undefined {
+      if (method === "send" || method === "steer" || method === "send_images") return deliver(method, params, active, send, features);
       if (method === "abort") return abort(send);
       if (method !== "delivery_status") return undefined;
       const status = statuses.get(String(params.delivery_id));
-      return status ? { result: { delivery_id: params.delivery_id, status } } : { error: { code: -32602, message: "unknown delivery_id" } };
+      // zeta 169fb144 src/zeta/server/delivery.py:368 answers an id it never saw with status "unknown".
+      return { result: { delivery_id: params.delivery_id, status: status ?? "unknown" } };
     },
   };
 }
@@ -459,7 +547,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           if (mode === "slow") await wait(helloDelay);
           if (!sockets.has(socket)) return;
           if (socket.data.role === "controller") controller = socket;
-          const features = protocolVersion === "1.0" ? [] : (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (name === "model_input_ids" && modelInputIds) || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings) || (name === "session_grants" && sessionGrants)) ?? [];
+          const features = protocolVersion === "1.0" ? [] : (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "send_images_delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || (name === "model_input_ids" && modelInputIds) || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings) || (name === "session_grants" && sessionGrants)) ?? [];
           socket.data.features = features;
           const reconnect = features.includes("approval_reconnect");
           if (reconnect) reconnectControllers.add(socket as object);
@@ -476,19 +564,32 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           }
           return;
         }
-        if (omittedRequests.has(method)) return reply({ error: { code: -32601, message: `method not found: ${method}` } });
+        // zeta lists the settings requests under hello's `requests`; an older zeta does not know them.
+        // delivery_status needs the delivery_id feature itself (zeta 169fb144 src/zeta/server/protocol.py:301, :553-554).
+        if (omittedRequests.has(method) || (!settingsEnabled && SETTINGS_REQUESTS.includes(method)) || (method === "delivery_status" && !socket.data.features?.includes("delivery_id"))) return reply({ error: { code: -32601, message: `method not found: ${method}` } });
+        const invalid = invalidParams(method, PARAM_RULES[method], params, socket.data.features ?? []);
+        if (invalid) return reply({ error: { code: -32602, message: invalid } });
         const override = resultOverrides.get(method);
         if (override) return reply({ result: override(params) });
         if (method === "new_session") {
           // Zeta 5feea2fc src/zeta/server/server.py:561-593 creates and activates this metadata;
           // src/zeta/server/control.py:160-180 makes a reserved or running turn return -32004 first.
+          // Zeta 169fb144 server.py:623-629: a non-null approval_mode needs new_session_settings and a concrete model,
+          // and both are validated, before the busy check; a null approval_mode is no approval_mode.
+          const approvalMode = params.approval_mode ?? undefined;
+          const validModels = ["claude-sonnet-5", "claude-opus-4-6", "gpt-5.1-codex"];
+          const invalidModel = typeof params.model !== "undefined" && !validModels.includes(String(params.model));
+          if (approvalMode !== undefined) {
+            if (!socket.data.features?.includes("new_session_settings")) return reply({ error: { code: -32602, message: "approval_mode requires the negotiated new_session_settings feature" } });
+            if (typeof params.model !== "string") return reply({ error: { code: -32602, message: "model is required with approval_mode" } });
+            if (invalidModel || !["ask", "allow", "deny"].includes(String(approvalMode))) return reply({ error: { code: -32602, message: "invalid model or approval_mode" } });
+          }
           const busy = transientBusy.get(method) ?? 0;
           if (busy > 0) { transientBusy.set(method, busy - 1); return reply({ error: { code: -32004, message: "a turn is already running" } }); }
           if (running || rejectCreate) return reply({ error: { code: -32004, message: "a turn is already running" } });
-          const validModels = ["claude-sonnet-5", "claude-opus-4-6", "gpt-5.1-codex"];
-          // real zeta requires a concrete model whenever new_session_settings carries approval_mode
-          if (typeof params.approval_mode !== "undefined" && typeof params.model !== "string") return reply({ error: { code: -32602, message: "model is required with approval_mode" } });
-          if (typeof params.model !== "undefined" && (!validModels.includes(String(params.model)) || (typeof params.approval_mode !== "undefined" && !["ask", "allow", "deny"].includes(String(params.approval_mode))))) return reply({ error: { code: -32602, message: "invalid model or approval_mode" } });
+          const lateInvalid = invalidParams(method, PARAM_RULES.new_session!.afterTurn, params, socket.data.features ?? []);
+          if (lateInvalid) return reply({ error: { code: -32602, message: lateInvalid } });
+          if (invalidModel) return reply({ error: { code: -32602, message: "invalid model or approval_mode" } });
           const createdSettings: Settings = { model: typeof params.model === "string" ? params.model : defaultSettings.model, approval_mode: typeof params.approval_mode === "string" ? params.approval_mode as Settings["approval_mode"] : defaultSettings.approval_mode, plan_mode: false };
           const created = meta(`s-new-${sessions.length}`, 0, { created_at: at(0), model: createdSettings.model, approval_mode: createdSettings.approval_mode, cwd: "/Users/dev/me/fun/fulcrum", retained_tail: 8, compaction_budget: 262144, override_audit: [], context_files: [], skill_catalog: [], agent_catalog: [], plan_mode: false, project_id: null, tool_allow: null, tool_deny: [] });
           sessions.unshift(created);
@@ -525,8 +626,9 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         }
         if (method === "rename_session") {
           const session = sessions.find((candidate) => candidate.session_id === params.session_id);
-          if (!session || typeof params.name !== "string" || !params.name) return reply({ error: { code: -32602, message: "name must be nonempty" } });
-          session.name = params.name;
+          // ergonomics.py:79-80: name must be a string; core/session.py:788-794: a blank name clears it.
+          if (!session || typeof params.name !== "string") return reply({ error: { code: -32602, message: "name must be a string" } });
+          session.name = params.name.trim() ? params.name : "";
           return reply({ result: { session } });
         }
         if (method === "session_tree") return reply({ result: { session_id: params.session_id, branches: [{ id: "head-main", label: "main", seq: 1, current: true }, { id: "head-experiment", label: "experiment", seq: 7, current: false }] } });
@@ -555,12 +657,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           return;
         }
         // As in zeta (server/ergonomics.py `active`): these name the active session or fail.
-        if (["model_catalog", "session_settings", "set_settings", "send_images"].includes(method)) {
-          // zeta lists these under hello's `requests`; an older zeta does not know them.
-          if (!settingsEnabled) return reply({ error: { code: -32601, message: "method not found" } });
-          if (method !== "model_catalog" && (typeof params.session_id !== "string" || !params.session_id)) return reply({ error: { code: -32602, message: "session_id must be a nonempty string" } });
-          if (method !== "model_catalog" && params.session_id !== active) return reply({ error: { code: -32003, message: "session is not active" } });
-        }
+        if (SETTINGS_REQUESTS.includes(method) && method !== "model_catalog" && params.session_id !== active) return reply({ error: { code: -32003, message: "session is not active" } });
         if (method === "slash_list") return reply({ result: { commands: params.include_unavailable === true ? completeSlashCatalog : defaultSlashCatalog, notices: [] } });
         const failure = failures.get(method)?.shift();
         if (failure) return reply({ error: { code: -32000, message: failure } });
@@ -608,6 +705,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         if (method === "session_settings") return reply({ result: activeSettings() });
         if (method === "set_settings") {
           if (running) return reply({ error: { code: -32004, message: "a turn is already running" } });
+          const lateInvalid = invalidParams(method, PARAM_RULES.set_settings!.afterTurn, params, socket.data.features ?? []);
+          if (lateInvalid) return reply({ error: { code: -32602, message: lateInvalid } });
           const current = activeSettings();
           const settings: Settings = { model: String(params.model), approval_mode: params.approval_mode as Settings["approval_mode"], plan_mode: current.plan_mode };
           settingsBySession.set(String(active), settings);
@@ -615,7 +714,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         }
         if (method === "send_images") {
           imageSends.push(params);
-          const handled = composer.handle("send_images", params, active, send);
+          const handled = composer.handle("send_images", params, active, send, socket.data.features ?? []);
           return reply(handled!);
         }
         if (method === "approve" || method === "deny") {
@@ -641,7 +740,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           resolve("abort");
           return reply({ result: { aborted: true } });
         }
-        const handled = composer.handle(method, params, active, send);
+        const handled = composer.handle(method, params, active, send, socket.data.features ?? []);
         if (handled) return reply(handled);
         reply({ error: { code: -32601, message: `method not found: ${method}` } });
         });
