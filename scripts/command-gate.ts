@@ -625,12 +625,12 @@ try {
       if (early.length) throw new Error(`enter during the attach showed a receipt: ${JSON.stringify(early)}`);
       if (await field(page).inputValue() !== "/status") throw new Error("enter during the attach dropped the draft");
       await step(page, "the composer says sending waits for the run", () => page.locator('[data-part="composer-message"]', { hasText: "sending is paused until the run opens" }).waitFor({ timeout: 2_000 }));
-      await step(page, "one message names the wait: the panel says zeta has not attached the run yet", () => page.locator(".panel").getByText("waiting for zeta to attach this run", { exact: true }).waitFor({ timeout: 2_000 }));
-      if (await page.locator(".dock .status-line").count()) throw new Error(`the dock repeats the opening panel: ${JSON.stringify(await page.locator(".dock .status-line").innerText())}`);
       // A model or approval change before the run opens has no attached session to reach (zeta server.py:949 ergonomics.active), so it would be lost.
       for (const control of [page.getByRole("button", { name: /^model:/ }), page.locator("button.approval-mode")]) {
         if (!await control.isDisabled()) throw new Error(`${await control.getAttribute("aria-label")} stays enabled while the run opens, so a change there would be lost`);
       }
+      await step(page, "one message names the wait: the panel says zeta has not attached the run yet", () => page.locator(".panel").getByText("waiting for zeta to attach this run", { exact: true }).waitFor({ timeout: 2_000 }));
+      if (await page.locator(".dock .status-line").count()) throw new Error(`the dock repeats the opening panel: ${JSON.stringify(await page.locator(".dock .status-line").innerText())}`);
       await step(page, "the attach reply arrives", () => until(() => status()?.replied !== undefined, 10_000));
       await step(page, "the attached run asks for its command catalog", () => until(() => fake.requests.slice(since).some((request) => request.method === "slash_list" && request.replied !== undefined), 10_000));
       const late = await page.locator(".command-receipt-text").allInnerTexts();
