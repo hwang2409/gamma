@@ -15,7 +15,7 @@ export type Submit = (action: ComposerAction, images: readonly QueuedImage[], in
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error)) || "unknown error";
 /** A failure that kept the draft's delivery id is safe to retry: zeta dedupes the id if the first attempt landed. */
-export const submitFailureText = (steer: boolean, failure: unknown, retrySafe: boolean) => {
+const submitFailureText = (steer: boolean, failure: unknown, retrySafe: boolean) => {
   const verb = steer ? "steer" : "send";
   return retrySafe ? `${verb} not confirmed: the draft is kept, and a retry will not run it twice (${errorText(failure)})` : `could not ${verb}: ${errorText(failure)}`;
 };
