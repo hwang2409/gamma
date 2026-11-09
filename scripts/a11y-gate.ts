@@ -287,7 +287,8 @@ async function journey(browserType: BrowserType, name: string) {
   const browser = await browserType.launch({ headless: true });
   try {
     const page = await browser.newPage();
-    page.on("pageerror", (error) => failures.push(`${name} page error: ${error.message}`));
+    // WebKit reports a poll that a navigation cancels as "... due to access control checks"; host-client catches that rejection.
+    page.on("pageerror", (error) => { if (!/due to access control checks/.test(error.message)) failures.push(`${name} page error: ${error.message}`); });
     await namesAndApproval(page, name, 1440, 900);
     await namesAndApproval(page, name, 390, 844);
     await disabledReason(page, name);
