@@ -3,7 +3,7 @@ import { createDeliveryManager } from "../src/delivery";
 import * as RunState from "../src/run-state";
 import { createRunStateStore, workspaceRunState, type DraftRunId, type EntryId, type RunId } from "../src/run-state";
 import { createSessionManager } from "../src/session";
-import { meta, server, source, waitFor, type Handler } from "./zeta-harness";
+import { meta, server, source, waitFor, type Handler, type Hold } from "./zeta-harness";
 
 /**
  * The one table for "which run is open, and can it take input". Each row drives the public factories the app wires
@@ -31,6 +31,18 @@ const endTurn = (zeta: Zeta, reason: "completed" | "user_stop" | "error" | "disc
 const tabStorage = () => { const items = new Map<string, string>(); return { items, getItem: (key: string) => items.get(key) ?? null, setItem: (key: string, value: string) => void items.set(key, value) }; };
 /** Waits for a state without failing, so the row's next assertion names what did not happen. */
 const until = async (check: () => boolean, timeout = 2_000) => { for (const end = Date.now() + timeout; !check() && Date.now() < end;) await new Promise((resolve) => setTimeout(resolve, 5)); };
+/** Bounds every test-controlled request latch and releases the held request when the expected arrival is missing. */
+const waitForHold = async (name: string, hold: Hold, timeout = 10_000) => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([hold.reached, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`timed out waiting for ${name}`)), timeout); })]);
+  } catch (error) {
+    hold.release();
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
 
 /**
  * zeta 1bf97c3c protocol.py:560-583 (delivery_session_guard): a send or steer whose session_id is not the attached
@@ -187,7 +199,7 @@ const table: Row[] = [
       const h = await world({ attached: "b", selected: "a" });
       try {
         const status = h.fake.hold("status");
-        h.start(); await status.reached;
+        h.start(); await waitForHold("status request", status);
         h.type("typed in the attach window");
         const result = await h.enter();
         expect(h.sends()).toEqual([]);
@@ -208,7 +220,7 @@ const table: Row[] = [
       const h = await world({ attached: "b", selected: "a" });
       try {
         const held = h.fake.hold(method, nth);
-        h.start(); await held.reached;
+        h.start(); await waitForHold("held request", held);
         h.select("b");
         const before = h.fake.calls.length;
         held.release();
@@ -226,7 +238,7 @@ const table: Row[] = [
       const h = await world({ attached: "b", selected: "a" });
       try {
         const held = h.fake.hold("resume");
-        h.start(); await held.reached;
+        h.start(); await waitForHold("held request", held);
         h.newRun();
         const before = h.fake.calls.length;
         held.release(); await new Promise((resolve) => setTimeout(resolve, 50));
@@ -305,7 +317,7 @@ const table: Row[] = [
       const h = await world({ attached: "a", selected: "a" });
       try {
         const held = h.fake.hold("session_history");
-        h.start(); await held.reached;
+        h.start(); await waitForHold("held request", held);
         const next = await server(zetaHandlers(h.zeta), FEATURES);
         h.connection.set(next.client);
         expect(h.owner()).toMatchObject({ accept: false });
@@ -342,7 +354,7 @@ const table: Row[] = [
         h.newRun();
         // The reopen's replay disposes the old store before its first history page.
         const page = h.fake.hold("session_history");
-        h.select("a"); await page.reached;
+        h.select("a"); await waitForHold("session history request", page);
         expect(h.view.open).toBeNull();
         expect(h.view.opening).not.toBeNull();
         expect(h.owner()).toMatchObject({ accept: false, block: "opening" });
@@ -462,7 +474,7 @@ const table: Row[] = [
       const h = await world({ attached: "b", selected: "a" });
       try {
         const held = h.fake.hold("session_history");
-        h.start(); await held.reached;
+        h.start(); await waitForHold("held request", held);
         h.select("b"); h.select("a");
         held.release();
         await h.live("a");
@@ -480,7 +492,7 @@ const table: Row[] = [
         const send = h.fake.hold("send");
         h.type("from a");
         const sent = h.enter();
-        await send.reached;
+        await waitForHold("send request", send);
         h.select("b");
         send.release();
         expect(await sent).toEqual({ ok: true });
@@ -500,7 +512,7 @@ const table: Row[] = [
         const created = h.fake.hold("new_session");
         h.type("first message");
         const id = h.manager.create(draft);
-        await created.reached;
+        await waitForHold("new session request", created);
         h.select("b");
         created.release();
         const session = await id;
@@ -549,7 +561,7 @@ const table: Row[] = [
       const send = page1.fake.hold("send");
       page1.type("dup check");
       void page1.enter();
-      await send.reached;
+      await waitForHold("send request", send);
       await new Promise((resolve) => setTimeout(resolve, 200)); // the user presses back 200 ms later
       page1.dispose(); // a full page navigation: zeta still takes the send, its reply reaches no page
       send.release(); await waitFor(() => page1.zeta.turns.length === 1, 2_000);
@@ -575,7 +587,7 @@ const table: Row[] = [
       const send = page1.fake.hold("send");
       page1.type("never arrived");
       void page1.enter();
-      await send.reached;
+      await waitForHold("send request", send);
       await new Promise((resolve) => setTimeout(resolve, 200));
       page1.dispose();
       send.fail({ code: -32603, message: "the page left before zeta read the frame" });
@@ -732,7 +744,7 @@ const owner: Row[] = [
       try {
         const send = h.fake.hold("send");
         h.type("hello"); const sent = h.enter();
-        const params = await send.reached;
+        const params = await waitForHold("send request", send);
         expect(saved(tab)).toContain(params.delivery_id as string);
         send.release(); expect(await sent).toEqual({ ok: true });
         expect(h.landed()).toEqual(["a"]);
@@ -760,7 +772,7 @@ const owner: Row[] = [
       const tab = tabStorage();
       const page1 = await openA({ tab });
       const send = page1.fake.hold("send");
-      page1.type("asked twice"); void page1.enter(); await send.reached;
+      page1.type("asked twice"); void page1.enter(); await waitForHold("send request", send);
       page1.dispose(); send.fail({ code: -32603, message: "the page left" });
       const id = page1.sends()[0]!.delivery_id as string;
       const page2 = await world({ selected: "a", zeta: page1.zeta, tab, handlers: (zeta) => { let lost = 0; return { delivery_status: (params) => { if (lost++ === 0) throw { code: -32603, message: "lost" }; return zetaHandlers(zeta).delivery_status!(params); } }; } });
@@ -785,7 +797,7 @@ const owner: Row[] = [
       const tab = tabStorage();
       const page1 = await openA({ tab });
       const send = page1.fake.hold("send");
-      page1.type("retry later"); const first = page1.enter(); await send.reached;
+      page1.type("retry later"); const first = page1.enter(); await waitForHold("send request", send);
       send.fail({ code: -32603, message: "connection lost before the reply" });
       expect((await first).ok).toBe(false);
       const id = page1.sends()[0]!.delivery_id as string;
@@ -809,7 +821,7 @@ const owner: Row[] = [
       const pageA = await world({ attached: "b", selected: "a", tab });
       pageA.start(); await pageA.live("a");
       const send = pageA.fake.hold("send");
-      pageA.type("unknown check"); void pageA.enter(); await send.reached;
+      pageA.type("unknown check"); void pageA.enter(); await waitForHold("send request", send);
       pageA.dispose(); send.fail({ code: -32603, message: "the frame never reached zeta" });
       const id = pageA.sends()[0]!.delivery_id as string;
       expect(saved(tab)).toContain(id);
@@ -907,7 +919,7 @@ const owner: Row[] = [
       try {
         const send = h.fake.hold("send");
         const intent = await steerThenEnd(h, "late steer", "completed");
-        const params = await send.reached;
+        const params = await waitForHold("send request", send);
         expect(params.delivery_id).not.toBe(intent);
         expect(saved(tab)).toContain(params.delivery_id as string);
         send.release(); await settledSends(h, 1);
@@ -969,9 +981,9 @@ const owner: Row[] = [
       try {
         const status = h.fake.hold("delivery_status");
         const intent = await steerThenEnd(h, "steer, then b attaches", "completed");
-        await status.reached;
+        await waitForHold("status request", status);
         const reopen = h.fake.hold("resume"); // gamma's reopen of a waits, so zeta keeps b attached when it answers
-        h.zeta.attached = "b"; await h.manager.refreshStatus(); await reopen.reached;
+        h.zeta.attached = "b"; await h.manager.refreshStatus(); await waitForHold("resume request", reopen);
         status.release(); await new Promise((resolve) => setTimeout(resolve, 50));
         expect(h.sends()).toEqual([]);
         expect(h.zeta.turns).toEqual([]);
@@ -1097,7 +1109,7 @@ const owner: Row[] = [
         h.type("keep my id"); expect((await h.enter()).ok).toBe(false); // zeta took it; the reply was lost
         const id = h.sends()[0]!.delivery_id as string;
         const reopen = h.fake.hold("resume"); // zeta keeps b attached while gamma waits to reopen a
-        h.zeta.attached = "b"; await h.manager.refreshStatus(); await reopen.reached;
+        h.zeta.attached = "b"; await h.manager.refreshStatus(); await waitForHold("resume request", reopen);
         expect((await h.enter()).ok).toBe(false);
         expect(h.sends()).toHaveLength(1);
         reopen.release(); await h.live("a");
@@ -1315,7 +1327,7 @@ const fix3: Row[] = [
       const h = await openA();
       try {
         const reopen = h.fake.hold("resume"); // gamma knows zeta attached b and waits to reopen a
-        h.zeta.attached = "b"; await h.manager.refreshStatus(); await reopen.reached;
+        h.zeta.attached = "b"; await h.manager.refreshStatus(); await waitForHold("resume request", reopen);
         h.store.edit("a", { text: "look at this", attachments: [QUEUED_IMAGE as never] });
         const failed = await h.manager.sendImages("a", "img-2", "look at this", [QUEUED_IMAGE as never]).then(() => null, (error: Error) => error.message);
         expect(h.fake.calls.filter(([method]) => method === "send_images")).toEqual([]);
