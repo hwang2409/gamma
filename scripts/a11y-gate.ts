@@ -7,6 +7,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, webkit, type Browser, type BrowserType, type Page } from "playwright";
+import { glyphNames, unnamed } from "./a11y-names";
 import { ACTIVE, startFakeZeta } from "./fake-zeta";
 
 const root = new URL("..", import.meta.url).pathname;
@@ -60,6 +61,8 @@ const focused = (page: Page) => page.evaluate(() => {
   const node = document.activeElement as HTMLElement | null;
   return node ? `${node.tagName.toLowerCase()}${node.getAttribute("aria-label") ? `[${node.getAttribute("aria-label")}]` : ""}:${(node.textContent ?? "").trim().slice(0, 40)}` : "none";
 });
+// macOS WebKit tabs to buttons only with Option held; other platforms tab to them plainly.
+const webkitTab = (name: string, key: string) => name === "webkit" && process.platform === "darwin" ? `Alt+${key}` : key;
 const pendingApproval = (page: Page) => page.locator('[data-part="approval"][data-state="pending"]');
 
 /** Opens the live active run and waits for its approval, the one state that has every control on screen; a reload rejoins the same pending approval. */
@@ -67,15 +70,6 @@ async function openLive(page: Page) {
   await page.goto(`${origin}/?run=${ACTIVE}`);
   await pendingApproval(page).waitFor({ timeout: 15_000 });
   await page.getByRole("button", { name: /^permissions/ }).waitFor();
-}
-
-/** Lines of an ARIA snapshot for an interactive role with no accessible name, which a screen reader reads as just "button". */
-function unnamed(snapshot: string) {
-  return snapshot.split("\n").filter((line) => /^\s*- (button|link|textbox|combobox|checkbox|switch|option|listbox|dialog|slider|menuitem|tab)(\s*\[[^\]]*\])*:?\s*$/.test(line));
-}
-/** Control names that end in a decorative arrow, which screen readers read out as "downwards arrow". */
-function glyphNames(snapshot: string) {
-  return snapshot.split("\n").filter((line) => /^\s*- '?(button|link|option) "[^"]*[\u2190-\u21ff\u2b00-\u2bff]"/.test(line));
 }
 
 async function dump(page: Page, label: string) {
@@ -172,7 +166,7 @@ async function popovers(page: Page, name: string) {
       await page.waitForFunction((label) => document.activeElement?.closest(`[role="dialog"][aria-label="${label}"]`) !== null, dialog, { timeout: 5_000 })
         .catch(async () => { throw new Error(`opening did not move focus inside: ${await focused(page)}`); });
       for (let index = 0; index < 12; index++) {
-        await page.keyboard.press(name === "webkit" ? "Alt+Tab" : "Tab");
+        await page.keyboard.press(webkitTab(name, "Tab"));
         const inside = await popover.evaluate((node) => node.contains(document.activeElement)).catch(() => false);
         // A popover may let Tab leave, but then it must close: an open popover must never sit over the focused control.
         if (!inside) { expect(await popover.count() === 0, `Tab left the open popover for ${await focused(page)}, and it stayed open`); break; }
@@ -196,7 +190,7 @@ async function keyboardComposer(page: Page, name: string) {
     const remove = page.getByRole("button", { name: "remove a11y.png" });
     await remove.waitFor();
     await field(page).focus();
-    for (let index = 0; index < 12 && !await remove.evaluate((node) => node === document.activeElement); index++) await page.keyboard.press(name === "webkit" ? "Alt+Shift+Tab" : "Shift+Tab");
+    for (let index = 0; index < 12 && !await remove.evaluate((node) => node === document.activeElement); index++) await page.keyboard.press(webkitTab(name, "Shift+Tab"));
     expect(await remove.evaluate((node) => node === document.activeElement), `keyboard did not reach remove; focus on ${await focused(page)}`);
     await page.keyboard.press("Enter");
     await remove.waitFor({ state: "detached" });
