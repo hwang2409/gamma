@@ -22,12 +22,14 @@ const meta = (id: string, minutesAgo: number, extra: Json = {}) => ({
 });
 
 export const ACTIVE = "s-reconnect";
+export const FIDELITY = "s-fidelity";
 export const LONG = "s-long";
 export const MANY = "s-many";
 export const LARGE = "s-large-pages";
 const seeded = [
   meta(ACTIVE, 2, { name: "fix the flaky reconnect test in packages/zeta" }),
   meta("s-themes", 45, { first_message_preview: "check every theme's muted text against 4.5:1 on the surface color" }),
+  meta(FIDELITY, 50, { name: "session history fidelity fixture" }),
   meta(LONG, 60 * 5, { first_message_preview: "profile the virtual timeline with 400 rows of history" }),
   meta("s-child", 3, { parent_session_id: ACTIVE, first_message_preview: "worker: run the zeta tests" }),
   meta("s-markdown", 60 * 26, { name: "streaming markdown: nested lists in block quotes", model: "gpt-5.1-codex" }),
@@ -132,6 +134,29 @@ const historySeed: Record<string, Json[]> = {
       )],
     },
   ],
+  // Zeta 92ccf67a src/zeta/server/handlers/history_projection.py:346-353,464-520 and
+  // src/zeta/server/event_contract.py:11-60: fidelity history retains bounded arguments, structured bash fields,
+  // metadata-only image blocks, and terminal steer outcomes.
+  [FIDELITY]: [
+    {
+      id: "fidelity-call", role: "assistant", tool_result: null, content: [toolUse("fidelity-tool", "bash", {
+        command: `printf fidelity-marker-${"nested-argument-".repeat(24)}`,
+        cwd: "/tmp",
+        options: { env: { FIDELITY: "true" } },
+      })].map((block) => block.type === "tool_use" ? { ...block, tool_call: { ...block.tool_call, arguments_truncated: true } } : block),
+    },
+    {
+      id: "fidelity-result", role: "tool_result", content: [text("")], tool_result: result("fidelity-tool", "stdout:\n\nstderr:\nfailed\n", {
+        is_error: true,
+        structured_content: { exit_code: 2, stdout: "", stderr: "failed\n", stdout_truncated: false, stderr_truncated: false, cwd_after: "/tmp" },
+        structured_content_truncated: false,
+        content_blocks: [{ type: "image", mimeType: "image/png", caption: "fidelity preview", width: 640, height: 360, size: 1234, data_omitted: true }],
+      }),
+    },
+    { id: "fidelity-delivered", role: "system", event: "delivery_status", delivery_id: "fidelity-delivered", method: "steer", status: "delivered", content: [text("retained delivered steer")] },
+    { id: "fidelity-dropped", role: "system", event: "delivery_status", delivery_id: "fidelity-dropped", method: "steer", status: "dropped", content: [text("retained dropped steer")], reason: "turn_end" },
+    { id: "fidelity-generic-drop", role: "system", event: "delivery_status", delivery_id: "fidelity-generic-drop", method: "steer", status: "dropped", content: [text("steer dropped: turn_end")], reason: "turn_end" },
+  ],
   "s-themes": [
     { id: "t1", role: "user", content: [text("check every theme's muted text against 4.5:1 on the surface color")], tool_result: null },
     { id: "t1b", role: "assistant", content: [toolUse("t-ls", "bash")], tool_result: null },
@@ -145,9 +170,34 @@ const historySeed: Record<string, Json[]> = {
     ? { id: `l${index}`, role: "user", content: [text(`step ${index / 2 + 1}: measure frame ${index}`)], tool_result: null }
     : { id: `l${index}`, role: "assistant", content: [text(`frame ${index} took **${(index % 7) + 3} ms**; \`content-visibility\` skipped ${index * 3} rows.`)], tool_result: null }),
 };
+// Zeta 92ccf67a src/zeta/server/event_contract.py:156-226: fidelity live tool frames retain bounded
+// arguments/data and structured bash results, with explicit truncation fields.
+const fidelityLiveEvents = [
+  { event: "tool_start", session_id: FIDELITY, tool_call: (historySeed[FIDELITY]![0]!.content as Json[])[0]!.tool_call, data: { request: { marker: "fidelity-marker", nested: "bounded" } } },
+  { event: "tool_output", session_id: FIDELITY, tool_call: (historySeed[FIDELITY]![0]!.content as Json[])[0]!.tool_call, output: "failed\n", data: { stderr: "failed\n" } },
+  { event: "tool_end", session_id: FIDELITY, tool_call: (historySeed[FIDELITY]![0]!.content as Json[])[0]!.tool_call, tool_result: historySeed[FIDELITY]![1]!.tool_result, data: {} },
+] satisfies Json[];
+
 const createHistories = (): Record<string, Json[]> => Object.fromEntries(
   Object.entries(historySeed).map(([sessionId, rows]) => [sessionId, [...rows]]),
 );
+
+/** Zeta projects stored rows separately for each connection's negotiated history features. */
+export function projectHistory(rows: readonly Json[], fidelity: boolean): Json[] {
+  if (fidelity) return rows.map((row) => ({ ...row }));
+  return rows.flatMap((row) => {
+    if (row.event === "delivery_status") return [];
+    const content = Array.isArray(row.content) ? row.content.map((block) => {
+      if (!block || typeof block !== "object" || (block as Json).type !== "tool_use") return block;
+      const call = (block as Json).tool_call as Json;
+      const { arguments_truncated: _, ...legacyCall } = call;
+      return { ...(block as Json), tool_call: { ...legacyCall, arguments: {} } };
+    }) : row.content;
+    if (row.role !== "tool_result" || !row.tool_result || typeof row.tool_result !== "object") return [{ ...row, content }];
+    const { structured_content_truncated: _, ...legacyResult } = row.tool_result as Json;
+    return [{ ...row, content, tool_result: { ...legacyResult, structured_content: null, content_blocks: [] } }];
+  });
+}
 
 /** The live turn that runs when the active session opens: prose, code, a shell call, an approval, then a summary. */
 const liveTurn = (send: (event: Json) => void, ask: () => Promise<"approve" | "deny" | "abort">, wait: (ms: number) => Promise<void>, done: () => void, histories: Record<string, Json[]>, historyMode: HistoryMode, grantProof = false, setPending: (requestId: string, call: Json) => void = () => {}) => async () => {
@@ -420,6 +470,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   ];
   let decide: ((decision: "approve" | "deny" | "abort") => void) | null = null;
   let turnStarted = false;
+  let fidelityStarted = false;
   let approvalAborted = false;
   let running = false;
   let rejectCreate = false;
@@ -665,10 +716,15 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
             delayedOpen = true;
             await wait(openDelay);
           }
-          const rows = (histories[active!] ?? []).filter((row) => approvalHistoryMode !== "not-advertised-without-rows" || (row.event !== "approval_request" && row.event !== "approval_end"));
+          const stored = (histories[active!] ?? []).filter((row) => approvalHistoryMode !== "not-advertised-without-rows" || (row.event !== "approval_request" && row.event !== "approval_end"));
+          const rows = projectHistory(stored, socket.data.features?.includes("session_history_fidelity") === true);
           const offset = Number(params.offset ?? 0);
           const pageSize = active === LARGE ? 128 : 8;
           reply({ result: { messages: rows.slice(offset, offset + pageSize), next_offset: offset + pageSize < rows.length ? offset + pageSize : null } });
+          if (active === FIDELITY && socket.data.features?.includes("session_history_fidelity") && !fidelityStarted) {
+            fidelityStarted = true;
+            queueMicrotask(() => fidelityLiveEvents.forEach((event) => socket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: event }))));
+          }
           // Zeta 5feea2fc tests/test_server.py::test_approval_and_steer_continue_the_same_turn and
           // ::test_resumed_approval_finishes_idle_after_terminal_event define this approval-turn lifecycle.
           if (liveEnabled && active === ACTIVE && offset + pageSize >= rows.length && !turnStarted) {

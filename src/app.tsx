@@ -230,6 +230,7 @@ export function App() {
     writeEntry(next, "push"); runState.dispatch({ type: "NAVIGATED", entryId: next.gammaEntryId as EntryId, runId: id as RunId }); runState.activate(id, { choice: "explicit", model: "" });
   }, [runState]);
   const client = state.phase === "connected" ? connection.client : null;
+  const resendDelivery = useCallback((intent: string) => void deliveries.resend(browserEntry.run, intent), [deliveries, browserEntry.run]);
 
   return (
     <HighlightContext value={highlight}>
@@ -237,7 +238,7 @@ export function App() {
         <RunProvider store={store} highlight={highlight} onRetry={client && open ? () => client.retrySession(open.id) : undefined}>
           <DeliveryStates value={deliveryStates}>
           <RetryTurn value={retryTurn}>
-            <ResendDelivery value={(intent) => void deliveries.resend(browserEntry.run, intent)}>
+            <ResendDelivery value={resendDelivery}>
             <div className="app">
               <header className="topbar">
                 <span className="brand"><span className="brand-mark" aria-hidden="true" /><span className="brand-name">gamma</span></span>
