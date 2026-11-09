@@ -125,6 +125,7 @@ export function RunSettings({ available, disabledReason, deliveries, sessionId, 
       <button ref={approvalButton} type="button" className="composer-tool approval-mode" data-yolo={yolo || undefined} aria-pressed={yolo} aria-label={yolo ? "approval mode: YOLO, tools run without asking" : "approval mode: Ask, tools ask before they run"} title={disabledReason ?? (yolo ? "tools run without asking · press to ask again" : "tools ask before they run · press for YOLO")} disabled={Boolean(disabledReason)} onClick={toggle}>
         {yolo ? "YOLO" : "Ask"}
       </button>
+      {disabledReason ? <span className="settings-blocked">{disabledReason}</span> : null}
       {record.model.deferred ? <span className="model-deferred" role="status">model applies to the next turn</span> : null}
       {settings.error ? <span className="settings-error" role="alert" title={settings.error}>{settings.error}</span> : null}
       {confirmYolo ? <div ref={confirmRef} className="confirm-popover" role="dialog" aria-label="allow tools without asking" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setConfirmYolo(false); }}>

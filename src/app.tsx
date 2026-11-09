@@ -238,7 +238,7 @@ export function App() {
             <div className="app">
               <header className="topbar">
                 <span className="brand"><span className="brand-mark" aria-hidden="true" /><span className="brand-name">gamma</span></span>
-                <RunTitle session={view.session} blank={!view.selected} />
+                <RunTitle session={view.session} blank={!view.selected} opening={Boolean(view.opening)} />
                 <YoloIndicator className="topbar-yolo" />
                 <button type="button" className="ghost new-run" aria-label="new run" onClick={() => void newRun()}><span className="new-run-label">new run</span><span className="new-run-short" aria-hidden="true">+</span></button>
                 <SettingsMenu>
@@ -272,13 +272,13 @@ function useFirstPrompt() {
   }, [store]));
 }
 
-function RunTitle({ session, blank }: { session: SessionMeta | null; blank: boolean }) {
+function RunTitle({ session, blank, opening }: { session: SessionMeta | null; blank: boolean; opening: boolean }) {
   const prompt = useFirstPrompt();
   const title = sessionTitle(session) ?? prompt;
   useEffect(() => { document.title = title ? `${title} · gamma` : "gamma"; }, [title]);
   return (
     <div className="run-title">
-      <h1 title={title ?? undefined}>{title ?? (blank ? "untitled run" : "run")}</h1>
+      <h1 title={title ?? undefined}>{title ?? (blank ? "untitled run" : opening ? "opening…" : "run")}</h1>
     </div>
   );
 }
@@ -517,7 +517,8 @@ function Dock({ state, view, connection, runs, vim, setVim, theme, setTheme, onN
       onAccepted();
       return result;
     } catch (error) {
-      setReceipt(error instanceof Error ? error.message : String(error), "error");
+      // A send whose draft kept its delivery id is a wait (the composer's delivery note), not a second error banner.
+      if (runState.get(runId).retryDelivery?.id !== deliveryId) setReceipt(error instanceof Error ? error.message : String(error), "error");
       throw error;
     }
   }, [approvalDisabledReason, approvalStore, client, connection, deliveries, grants, onAccepted, onCreated, onNewRun, present.session, receipts, record.model, requests, runId, runState, runs, sessionId, setTheme, setVim, theme, yolo]);

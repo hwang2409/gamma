@@ -49,10 +49,15 @@ try {
   for (let attempt = 0; ; attempt++) { if (vite.exitCode !== null) throw new Error("vite exited"); if (await fetch(origin).then((response) => response.ok, () => false)) break; if (attempt > 300) throw new Error("vite did not start"); await Bun.sleep(100); }
   const browser = await chromium.launch();
   try {
-    await check("queued-reload-natural-drop-resends-once", async () => {
+    // Only the view that sent a steer resends it by itself; after a reload the dropped steer waits for the user's resend.
+    await check("queued-reload-natural-drop-waits-for-resend", async () => {
       const { context, page } = await fresh(browser);
-      try { await startQueued(page, "reload natural"); await page.reload(); await ready(page); await waitForSent("queued reload natural"); }
-      finally { await cleanup(context, page); }
+      try {
+        await startQueued(page, "reload natural"); await page.reload(); await ready(page);
+        await page.locator('.undelivered[role="note"]').waitFor({ timeout: 15_000 });
+        if (fake.sent.some((item) => item.method === "send" && item.text === "queued reload natural")) throw new Error("a reloaded page resent the steer without the user");
+        await page.getByRole("button", { name: "resend" }).click(); await waitForSent("queued reload natural");
+      } finally { await cleanup(context, page); }
     });
     for (const width of [1440, 390]) await check(`explicit-stop-mark-survives-navigation-and-reload-${width}`, async () => {
       const { context, page } = await fresh(browser, width);
@@ -67,11 +72,13 @@ try {
         await page.getByRole("button", { name: "resend" }).click(); await waitForSent("queued explicit stop");
       } finally { await cleanup(context, page); }
     });
-    await check("disconnect-spanning-turn-end-resends-once", async () => {
+    await check("disconnect-dropped-steer-waits-for-resend", async () => {
       const { context, page } = await fresh(browser);
       try {
         await startQueued(page, "disconnect"); fake.drop(); await page.reload(); await ready(page);
-        await waitForSent("queued disconnect");
+        await page.locator('.undelivered[role="note"]').waitFor({ timeout: 15_000 });
+        if (fake.sent.some((item) => item.method === "send" && item.text === "queued disconnect")) throw new Error("a steer dropped by a disconnect was resent without the user");
+        await page.getByRole("button", { name: "resend" }).click(); await waitForSent("queued disconnect");
         if ((await page.locator("body").innerText()).includes("content must be an array")) throw new Error("terminal delivery history failed fulcrum adaptation");
       } finally { await cleanup(context, page); }
     });
@@ -79,7 +86,7 @@ try {
       const { context, page } = await fresh(browser);
       try {
         const field = await startQueued(page, "delayed retry"); fake.delayNext("send", 3_000);
-        await page.getByLabel("message retrying").waitFor({ timeout: 15_000 });
+        await page.getByLabel("message resending").waitFor({ timeout: 15_000 });
         const action = page.locator('[data-part="composer-submit"]');
         if (await action.getAttribute("aria-disabled") !== "true") throw new Error("submit stayed enabled during retry");
         await field.fill("second after retry"); await action.click({ force: true }); await Bun.sleep(300);
@@ -91,7 +98,9 @@ try {
         if (order.indexOf("queued delayed retry") > order.indexOf("second after retry")) throw new Error(`second submit was out of order: ${JSON.stringify(order)}`);
       } finally { await cleanup(context, page); }
     });
-    await check("lost-send-reply-keeps-the-draft-and-says-a-retry-is-safe", async () => {
+    // A lost reply is a wait, not an error: the draft stays (quiet tone, no raw close code) until the reopen asks zeta
+    // about its saved id; zeta took it, so the draft clears and nothing is sent again.
+    await check("lost-send-reply-is-a-quiet-wait-and-clears-once-zeta-confirms", async () => {
       const { context, page } = await fresh(browser, 1440);
       try {
         await page.goto(`${origin}/?run=s-docs`); await ready(page);
@@ -100,14 +109,15 @@ try {
         fake.delayNext("send", 2_500);
         await field.fill("retry me once"); await field.press("Enter");
         await Bun.sleep(500); fake.drop(); // zeta takes the send; its reply is lost with the socket
-        const note = page.locator('[data-part="composer-message"]');
-        await note.filter({ hasText: "will not run it twice" }).waitFor({ timeout: 15_000 }).catch(async () => { throw new Error(`composer note after a lost reply: ${JSON.stringify(await note.innerText().catch(() => ""))}`); });
-        if (!(await note.innerText()).includes("the draft is kept") || await field.inputValue() !== "retry me once") throw new Error("the note does not say where the message is");
-        await page.screenshot({ path: join(shots, "lost-reply-note-1440.png") });
-        await page.getByRole("button", { name: /send message|steer the running turn/ }).click();
-        await Bun.sleep(1_500);
+        await Bun.sleep(300);
+        const status = page.locator('[data-part="composer-status"]');
+        if (await status.getAttribute("data-tone") === "danger" || /\(10\d\d\)/.test(await status.innerText())) throw new Error(`a lost reply read as an error: ${JSON.stringify(await status.innerText())}`);
+        await page.screenshot({ path: join(shots, "lost-reply-wait-1440.png") });
+        for (let attempt = 0; attempt < 75 && await field.inputValue(); attempt++) await Bun.sleep(200);
+        if (await field.inputValue()) throw new Error(`after the reopen the composer still held ${JSON.stringify(await field.inputValue())}`);
+        await Bun.sleep(1_000);
         const accepted = fake.sent.filter((item) => item.text === "retry me once");
-        if (accepted.length !== 1) throw new Error(`the retry after a lost reply started ${accepted.length} turns`);
+        if (accepted.length !== 1) throw new Error(`the lost reply ended with ${accepted.length} turns`);
       } finally { await cleanup(context, page); }
     });
   } finally { await browser.close(); }
@@ -139,6 +149,41 @@ try {
           await Bun.sleep(1_500);
           const turns = fake.sent.filter((item) => item.text === text);
           if (turns.length !== 1 || restored) throw new Error(`after page back and forward the draft held ${JSON.stringify(restored)} and zeta accepted ${turns.length} turns`);
+        } finally { await cleanup(context, page); }
+      });
+      // B1: a page for another run never queries or resends this run's saved delivery; only Enter sends it, in its own run.
+      await check(`unconfirmed-send-is-not-resent-by-another-run-${name}`, async () => {
+        const context = await other.newContext({ viewport: { width: 1440, height: 900 } });
+        const page = await context.newPage();
+        let dropFrame = false;
+        await page.routeWebSocket(new RegExp(`:${fake.port}`), (ws) => {
+          const server = ws.connectToServer();
+          ws.onMessage((frame) => { if (dropFrame && typeof frame === "string" && /"method":"send"/.test(frame)) { dropFrame = false; return; } server.send(frame); });
+          server.onMessage((frame) => ws.send(frame));
+        });
+        try {
+          await page.goto(`${origin}/?run=s-markdown`); await ready(page);
+          await page.goto(`${origin}/?run=s-docs`); await ready(page);
+          await page.locator('.status-line[data-state="ready"]').waitFor({ timeout: 15_000 });
+          const text = `unknown check ${name}`;
+          const field = page.locator('.dock textarea[aria-label="message"]');
+          dropFrame = true; // the page leaves before the frame reaches zeta
+          await field.fill(text); await field.press("Enter");
+          await Bun.sleep(200);
+          const since = fake.requests.length;
+          await page.goBack(); await page.waitForURL(/run=s-markdown/); await ready(page);
+          await page.locator('.status-line[data-state="ready"]').waitFor({ timeout: 15_000 });
+          await Bun.sleep(2_500);
+          const onBack = fake.requests.slice(since).map((request) => request.method);
+          if (onBack.includes("send") || onBack.includes("delivery_status") || fake.sent.some((item) => item.text === text)) throw new Error(`the s-markdown page acted on s-docs's delivery: ${JSON.stringify(onBack)}`);
+          await page.goForward(); await page.waitForURL(/run=s-docs/); await ready(page);
+          await page.locator('[data-part="composer-message"]', { hasText: "Enter will not run it twice" }).waitFor({ timeout: 15_000 });
+          if (await field.inputValue() !== text || fake.sent.some((item) => item.text === text)) throw new Error("the forward page did not restore the unsent draft, or sent it by itself");
+          await page.screenshot({ path: join(shots, `unconfirmed-forward-${name}.png`) });
+          await field.press("Enter");
+          await waitForSent(text);
+          const landed = fake.sent.filter((item) => item.text === text).map((item) => item.session);
+          if (JSON.stringify(landed) !== JSON.stringify(["s-docs"])) throw new Error(`the message landed in ${JSON.stringify(landed)}`);
         } finally { await cleanup(context, page); }
       });
     } finally { await other.close(); }

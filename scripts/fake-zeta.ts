@@ -229,6 +229,8 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
   const withheldHistory: Array<() => void> = [];
   let chat: { session: string; sendDelivery: string | null; steers: string[]; aborted: boolean } | null = null;
   const externalSteers: Array<{ id: string; session: string }> = [];
+  // docs/serve-protocol.md:791-808 (served_turn_end): status.last_turn_outcome.reason of the last whole turn.
+  let lastTurn: "completed" | "user_stop" | "error" | "disconnect" | null = null;
   type Send = (event: Json) => void;
   const chatTurn = async (session: string, send: Send, prompt: string, sendDelivery: string | null) => {
     const turn = { session, sendDelivery, steers: [] as string[], aborted: false }; // steers holds delivery ids
@@ -237,7 +239,7 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
     const e = (event: string, body: Json = {}) => { if (!turn.aborted) send({ event, session_id: session, ...body }); };
     e("agent_start");
     e("turn_start", { data: { turn: sent.length } });
-    const finish = () => { if (turn.sendDelivery) statuses.set(turn.sendDelivery, "delivered"); e("turn_end", { data: { turn: sent.length } }); chat = null; running.set(false); e("agent_end"); };
+    const finish = () => { if (turn.sendDelivery) statuses.set(turn.sendDelivery, "delivered"); e("turn_end", { data: { turn: sent.length } }); chat = null; lastTurn = "error"; running.set(false); e("agent_end"); };
     // Prompts that steer the scripted turn, for the status line: a provider failure, and a slow tool call.
     if (prompt.includes("fail this turn")) {
       await wait(200);
@@ -265,13 +267,15 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
     }
     e("assistant_message", { message: { role: "assistant", content: [text(reply)] } });
     histories[session] = [...(histories[session] ?? []), { id: `reply-${sent.length}`, role: "assistant", content: [text(reply)], tool_result: null }];
-    // serve-protocol.md:469-475: terminal steer outcomes are durable session_history rows.
+    // serve-protocol.md:469-475: terminal steer outcomes are durable session_history rows; a completed turn drops its
+    // queued steers with reason turn_end (zeta delivery.py:305-312).
     for (const id of turn.steers) {
       statuses.set(id, "dropped");
-      histories[session]!.push({ id: `delivery-${id}`, role: "system", event: "delivery_status", delivery_id: id, method: "steer", status: "dropped", content: [text("steer dropped: abort")], reason: "abort" });
+      histories[session]!.push({ id: `delivery-${id}`, role: "system", event: "delivery_status", delivery_id: id, method: "steer", status: "dropped", content: [text("steer dropped: turn_end")], reason: "turn_end" });
     }
     e("turn_end", { data: { turn: sent.length } });
     chat = null;
+    lastTurn = "completed";
     running.set(false);
     e("agent_end");
   };
@@ -297,7 +301,7 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
     if (seen) return duplicate();
     const images = requested === "send_images" ? (params.images as Json[]) : [];
     const value = typeof params.input_id === "string" ? opaqueInputs.get(params.input_id) ?? "" : String(params.text ?? "");
-    sent.push({ method, text: value, delivery_id: delivery });
+    sent.push({ method, text: value, delivery_id: delivery, session: active });
     const userMessage = { event: "user_message", session_id: active, text: value, mode: method, attachments: images.map((image) => ({ name: image.name, mime_type: image.mime_type, size: Math.floor(String(image.data).length * 3 / 4) })), ...(delivery ? { delivery_id: delivery } : {}) };
     const emitEcho = () => send(userMessage);
     const accepted = method === "send" ? { accepted: true, session_id: active } : { accepted: true };
@@ -321,6 +325,7 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
       histories[turn.session]!.push({ id: `delivery-${id}`, role: "system", event: "delivery_status", delivery_id: id, method: "steer", status: "dropped", content: [text("steer dropped: abort")], reason: "abort" });
     }
     chat = null;
+    lastTurn = "user_stop";
     running.set(false);
     turn.aborted = true;
     aborts++;
@@ -338,13 +343,16 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
     flushEchoes() { this.persistWithheldHistory(); withheldEchoes.splice(0).forEach((send) => send()); },
     get history() { return histories[ACTIVE] ?? []; },
     get aborts() { return aborts; },
+    get lastTurnOutcome() { return lastTurn ? { turn_id: `turn-${sent.length}`, reason: lastTurn } : null; },
     finishExternalTurn(session: string) {
+      lastTurn = "completed";
       for (const steer of externalSteers.splice(0).filter((steer) => steer.session === session)) {
         statuses.set(steer.id, "dropped");
         histories[session]!.push({ id: `delivery-${steer.id}`, role: "system", event: "delivery_status", delivery_id: steer.id, method: "steer", status: "dropped", content: [text("steer dropped: turn_end")], reason: "turn_end" });
       }
     },
     disconnect() {
+      if (chat || externalSteers.length) lastTurn = "disconnect";
       for (const steer of externalSteers.splice(0)) {
         statuses.set(steer.id, "dropped");
         histories[steer.session]!.push({ id: `delivery-${steer.id}`, role: "system", event: "delivery_status", delivery_id: steer.id, method: "steer", status: "dropped", content: [text("steer dropped: disconnect")], reason: "disconnect" });
@@ -610,7 +618,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         }
         if (method === "status") {
           const pending = decide && !approvalAborted ? [{ request_id: approvalRequestId, tool_call: approvalCall, delegated: false }] : [];
-          return reply({ result: { session: active ? { ...(sessions.find((session) => session.session_id === active) ?? {}), vim_mode: vimMode, plan_mode: activeSettings().plan_mode } : null, state: running ? (decide ? "tool" : "running") : "idle", explicit_finish: false, pending_approvals: pending, usage: {}, compaction_markers: 0 } });
+          return reply({ result: { session: active ? { ...(sessions.find((session) => session.session_id === active) ?? {}), vim_mode: vimMode, plan_mode: activeSettings().plan_mode } : null, state: running ? (decide ? "tool" : "running") : "idle", explicit_finish: false, pending_approvals: pending, usage: {}, compaction_markers: 0, ...(socket.data.features?.includes("served_turn_end") ? { last_turn_outcome: composer.lastTurnOutcome } : {}) } });
         }
         if (handleGrantRequest(socket, method, params, reply)) return;
         if (method === "resume") {

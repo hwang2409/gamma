@@ -62,7 +62,7 @@ for (const width of [1440, 390]) await check(`natural turn end resends a queued 
     await page.getByRole("status", { name: "message queued" }).waitFor();
     await page.getByRole("button", { name: "approve", exact: true }).click();
     if (!await poll(() => Promise.resolve(fake.sent.some((item) => item.method === "send" && item.text === "please approve this")), 100)) throw new Error("natural turn end did not resend the dropped steer as a new message");
-    if (!await poll(async () => await page.getByRole("status", { name: /message (queued|requesting|retrying)/ }).count() === 0)) throw new Error("the accepted resend still looked queued");
+    if (!await poll(async () => await page.getByRole("status", { name: /message (queued|requesting|resending)/ }).count() === 0)) throw new Error("the accepted resend still looked queued");
     if (await page.locator('[data-part="composer-message"]', { hasText: /sending|steering/ }).count()) throw new Error("the composer still looked like it was sending");
     if (await page.locator(".status-line").getAttribute("data-state") === "ready") throw new Error("the resent turn was running but the header said ready");
   } finally { await context.close(); await browser.close(); fake.setLive(false); fake.setLive(true); fake.drop(); await Bun.sleep(300); await fake.start(); }

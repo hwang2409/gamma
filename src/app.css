@@ -232,7 +232,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 /* Footer tools are quiet outlines; only send is filled. */
 .dock [data-part="composer"] .composer-tool { --action: var(--fulcrum-border); min-width: 36px; padding: 0 10px; background: var(--fulcrum-bg); color: var(--fulcrum-fg); font-weight: 500; }
 .dock [data-part="composer"] .composer-tool:hover:not(:disabled) { border-color: var(--fulcrum-fg); }
-.dock [data-part="composer"] .composer-tool:disabled { color: var(--fulcrum-muted); }
+.dock [data-part="composer"] .composer-tool:disabled { color: var(--fulcrum-muted); border-style: dashed; background: transparent; cursor: not-allowed; }
 .dock [data-part="composer"] .attach { display: inline-flex; align-items: center; justify-content: center; padding: 0; }
 .dock [data-part="attachment"] .composer-tool { min-width: 34px; min-height: 34px; border-width: 0 0 0 1px; font-size: 16px; }
 .composer-stop-slot, [data-part="composer-stop"] { display: inline-flex; align-items: center; justify-content: center; width: 94px; min-width: 94px; min-height: var(--control); }
@@ -281,6 +281,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .model-deferred, .settings-error { flex-basis: 100%; font-size: 12px; overflow-wrap: anywhere; }
 .model-deferred { position: absolute; right: var(--inset); bottom: calc(100% + 6px); z-index: 2; padding: 4px 7px; border: 1px solid var(--fulcrum-border); background: var(--fulcrum-bg); color: var(--fulcrum-muted); }
 .settings-error { color: var(--fulcrum-danger); }
+.settings-blocked { font-size: 12px; color: var(--fulcrum-muted); }
 .dock [data-part="composer-status"][data-tone="danger"] { flex-basis: 100%; height: auto; white-space: normal; }
 .dock [data-part="composer-message"] { overflow-wrap: anywhere; white-space: normal; }
 
