@@ -74,6 +74,11 @@ async function openLive(page: Page) {
   await page.goto(`${origin}/?run=${ACTIVE}`);
   await pendingApproval(page).waitFor({ timeout: 15_000 });
   await page.getByRole("button", { name: /^permissions/ }).waitFor();
+  // Every section types or tabs from the composer, so an opened run without it is a finding, not a later fill timeout.
+  await field(page).waitFor({ timeout: 15_000 }).catch(async () => {
+    await dump(page, `open-without-composer-${Date.now()}`);
+    throw new Error(`the opened run shows its approval but no composer: ${(await page.locator(".dock").innerText().catch(() => "")).slice(0, 300)}`);
+  });
 }
 
 async function dump(page: Page, label: string) {
@@ -113,11 +118,15 @@ async function disabledReason(page: Page, name: string) {
   await openLive(page);
   await check(`${name}: reconnecting approval buttons are disabled and say why`, async () => {
     fake.drop();
-    const stale = page.locator('[data-part="approval"][data-state="reconnecting"]');
-    await stale.waitFor({ timeout: 10_000 });
-    for (const action of ["approve", "deny"]) expect(await stale.getByRole("button", { name: action, exact: true }).isDisabled(), `${action} stays enabled while reconnecting`);
-    const reason = stale.getByRole("status").filter({ hasText: /disabled/ });
-    expect(await reason.count() === 1, `no status names the disabled reason: ${await stale.innerText()}`);
+    // The reconnecting row is short-lived, so read its buttons and status in the same frame that first shows it.
+    const stale = await page.waitForFunction(() => {
+      const row = document.querySelector('[data-part="approval"][data-state="reconnecting"]');
+      if (!row) return null;
+      const button = (action: string) => row.querySelector<HTMLButtonElement>(`button[data-action="${action}"]`);
+      return { approve: button("approve")?.disabled ?? null, deny: button("deny")?.disabled ?? null, reasons: [...row.querySelectorAll('[role="status"]')].map((node) => node.textContent ?? ""), text: (row as HTMLElement).innerText };
+    }, undefined, { timeout: 10_000, polling: "raf" }).then((handle) => handle.jsonValue());
+    expect(stale && stale.approve === true && stale.deny === true, `approve or deny stays enabled while reconnecting: ${JSON.stringify(stale)}`);
+    expect(stale!.reasons.filter((text) => /disabled/.test(text)).length === 1, `no status names the disabled reason: ${JSON.stringify(stale)}`);
     await pendingApproval(page).waitFor({ timeout: 15_000 });
   });
 }
