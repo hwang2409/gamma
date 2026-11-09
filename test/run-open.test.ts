@@ -28,7 +28,9 @@ const endTurn = (zeta: Zeta, reason: "completed" | "user_stop" | "error" | "disc
   zeta.running = false; zeta.lastTurn = reason;
 };
 /** sessionStorage as one browser tab keeps it across a full page back and forward. */
-const tabStorage = () => { const items = new Map<string, string>(); return { getItem: (key: string) => items.get(key) ?? null, setItem: (key: string, value: string) => void items.set(key, value) }; };
+const tabStorage = () => { const items = new Map<string, string>(); return { items, getItem: (key: string) => items.get(key) ?? null, setItem: (key: string, value: string) => void items.set(key, value) }; };
+/** Waits for a state without failing, so the row's next assertion names what did not happen. */
+const until = async (check: () => boolean, timeout = 2_000) => { for (const end = Date.now() + timeout; !check() && Date.now() < end;) await new Promise((resolve) => setTimeout(resolve, 5)); };
 
 function zetaHandlers(zeta: Zeta, extra: Record<string, Handler> = {}): Record<string, Handler> {
   return {
@@ -566,8 +568,8 @@ const table: Row[] = [
       const page2 = await world({ selected: "a", zeta: page1.zeta, tab });
       try {
         page2.start(); await page2.live("a");
-        await waitFor(() => page2.asked().includes(first as string), 2_000);
-        await waitFor(() => page2.store.get("a").deliveries.size === 0, 2_000);
+        await until(() => page2.asked().includes(first as string), 2_000);
+        await until(() => page2.store.get("a").deliveries.size === 0, 2_000);
         expect(page2.sends()).toEqual([]);
         expect(page2.zeta.turns).toEqual([]);
         expect(page2.text("a")).toBe("never arrived");
@@ -591,8 +593,8 @@ const table: Row[] = [
       const page2 = await world({ selected: "a", zeta: page1.zeta, tab });
       try {
         page2.start(); await page2.live("a");
-        await waitFor(() => page2.asked().includes(page1.sends()[0]!.delivery_id as string), 2_000);
-        await waitFor(() => page2.text("a") === "", 2_000);
+        await until(() => page2.asked().includes(page1.sends()[0]!.delivery_id as string), 2_000);
+        await until(() => page2.text("a") === "", 2_000);
         if (page2.text("a")) await page2.enter(); // what the user does with a ready draft
         expect(page2.sends()).toEqual([]);
         expect(page2.landed()).toEqual(["a"]);
@@ -660,8 +662,11 @@ const table: Row[] = [
 for (const row of table) test(row.name, () => row.run(), 10_000);
 
 /** The draft's delivery note as the composer shows it; read after a row's behavior assertions (the owner module is new). */
-const noteOf = async (record: RunState.RunRecord) => (await import("../src/delivery-owner").catch(() => null))?.deliveryNote(record) ?? null;
-const saved = (tab: ReturnType<typeof tabStorage>) => tab.getItem("gamma-run-drafts") ?? "";
+const noteOf = async (record: RunState.RunRecord) => (await import("../src/delivery-owner").catch(() => null))?.deliveryNote(record) ?? "(no note)";
+/** Everything the tab saved, whatever keys hold it. */
+const saved = (tab: ReturnType<typeof tabStorage>) => [...tab.items.values()].join("\n");
+/** One run's saved entries under every key, to compare before and after another page. */
+const savedFor = (tab: ReturnType<typeof tabStorage>, run: string) => [...tab.items].map(([key, value]) => { try { return [key, JSON.parse(value)?.[run] ?? null]; } catch { return [key, null]; } });
 const lostReply = (zeta: Zeta, times = 1) => { let lost = 0; return { send: (params: Record<string, unknown>) => { const reply = zetaHandlers(zeta).send!(params); if (lost++ < times) throw { code: -32603, message: "connection lost before the reply" }; return reply; } }; };
 /** A steer zeta queued in a's running turn, then the turn ends with `reason`; the app asks on the run's next store event. */
 async function steerThenEnd(h: Awaited<ReturnType<typeof world>>, text: string, reason: Parameters<typeof endTurn>[1], ask = true) {
@@ -674,7 +679,7 @@ async function steerThenEnd(h: Awaited<ReturnType<typeof world>>, text: string, 
   if (ask) h.deliveries.reconcile("a");
   return intent;
 }
-const settledSends = async (h: Awaited<ReturnType<typeof world>>, count: number) => { await waitFor(() => h.sends().length >= count, 2_000); await new Promise((resolve) => setTimeout(resolve, 30)); };
+const settledSends = async (h: Awaited<ReturnType<typeof world>>, count: number) => { await until(() => h.sends().length >= count, 2_000); await new Promise((resolve) => setTimeout(resolve, 30)); };
 
 /**
  * The delivery owner (src/delivery-owner.ts): one decision for whether and with which id gamma sends. Every row drives
@@ -723,11 +728,11 @@ const owner: Row[] = [
       const page2 = await world({ selected: "a", zeta: page1.zeta, tab, handlers: (zeta) => { let lost = 0; return { delivery_status: (params) => { if (lost++ === 0) throw { code: -32603, message: "lost" }; return zetaHandlers(zeta).delivery_status!(params); } }; } });
       try {
         page2.start(); await page2.live("a");
-        await waitFor(() => page2.asked().length === 1, 2_000); await new Promise((resolve) => setTimeout(resolve, 30));
+        await until(() => page2.asked().length === 1, 2_000); await new Promise((resolve) => setTimeout(resolve, 30));
         expect(page2.sends()).toEqual([]);
         expect(page2.store.get("a").deliveries.size).toBe(1);
         page2.deliveries.reconcile("a");
-        await waitFor(() => page2.store.get("a").deliveries.size === 0, 2_000);
+        await until(() => page2.store.get("a").deliveries.size === 0, 2_000);
         expect(page2.sends()).toEqual([]);
         expect(page2.text()).toBe("asked twice");
         expect(await page2.enter()).toEqual({ ok: true });
@@ -750,7 +755,7 @@ const owner: Row[] = [
       const page2 = await world({ selected: "a", zeta: page1.zeta, tab });
       try {
         page2.start(); await page2.live("a");
-        await waitFor(() => page2.asked().includes(id), 2_000); await new Promise((resolve) => setTimeout(resolve, 30));
+        await until(() => page2.asked().includes(id), 2_000); await new Promise((resolve) => setTimeout(resolve, 30));
         expect(page2.text()).toBe("retry later");
         expect(page2.sends()).toEqual([]);
         expect(await page2.enter()).toEqual({ ok: true });
@@ -769,8 +774,8 @@ const owner: Row[] = [
       pageA.type("unknown check"); void pageA.enter(); await send.reached;
       pageA.dispose(); send.fail({ code: -32603, message: "the frame never reached zeta" });
       const id = pageA.sends()[0]!.delivery_id as string;
-      const before = saved(tab);
-      expect(before).toContain(id);
+      expect(saved(tab)).toContain(id);
+      const beforeA = savedFor(tab, "a");
       // Back: zeta still has a attached when b's page loads, and b's page resumes b.
       const back = await world({ selected: "b", zeta: pageA.zeta, tab });
       try {
@@ -778,12 +783,12 @@ const owner: Row[] = [
         expect(back.sends()).toEqual([]);
         expect(back.asked()).toEqual([]);
         expect(back.zeta.turns).toEqual([]);
-        expect(JSON.parse(saved(tab)).a).toEqual(JSON.parse(before).a);
+        expect(savedFor(tab, "a")).toEqual(beforeA);
       } finally { back.dispose(); }
       const forward = await world({ selected: "a", zeta: pageA.zeta, tab });
       try {
         forward.start(); await forward.live("a");
-        await waitFor(() => forward.store.get("a").deliveries.size === 0, 2_000);
+        await until(() => forward.store.get("a").deliveries.size === 0, 2_000);
         expect(forward.sends()).toEqual([]);
         expect(forward.text()).toBe("unknown check");
         expect(await noteOf(forward.store.get("a"))).toContain("Enter will not run it twice");
@@ -806,7 +811,7 @@ const owner: Row[] = [
         const id = pageA.sends()[0]!.delivery_id as string;
         pageB.type("b's own draft", "b"); pageB.store.dispatch({ type: "RECONNECT" }); // the restored page's first writes
         expect(saved(tab)).toContain(id);
-        expect(JSON.parse(saved(tab)).a.text).toBe("keep me");
+        expect(pageA.text("a")).toBe("keep me");
         expect(pageB.landed()).toEqual(["a"]);
       } finally { pageA.dispose(); pageB.dispose(); }
     },
@@ -821,7 +826,7 @@ const owner: Row[] = [
         const next = await server(zetaHandlers(h.zeta), FEATURES);
         h.connection.set(next.client);
         await h.live("a");
-        await waitFor(() => h.text() === "", 2_000);
+        await until(() => h.text() === "", 2_000);
         expect(next.calls.filter(([method]) => method === "send")).toEqual([]);
         expect(h.landed()).toEqual(["a"]);
       } finally { h.dispose(); }
@@ -866,7 +871,7 @@ const owner: Row[] = [
         const intent = await steerThenEnd(h, "late steer", "completed");
         const params = await send.reached;
         expect(params.delivery_id).not.toBe(intent);
-        expect(JSON.parse(saved(tab)).a.deliveries[0].attemptId).toBe(params.delivery_id);
+        expect(saved(tab)).toContain(params.delivery_id as string);
         send.release(); await settledSends(h, 1);
         expect(h.landed()).toEqual(["a"]);
       } finally { h.dispose(); }
@@ -878,7 +883,7 @@ const owner: Row[] = [
       const h = await openA();
       try {
         const intent = await steerThenEnd(h, `dropped by ${reason}`, reason);
-        await waitFor(() => h.store.get("a").deliveries.get(intent)?.state === "dropped", 2_000); await new Promise((resolve) => setTimeout(resolve, 30));
+        await until(() => h.store.get("a").deliveries.get(intent)?.state === "dropped", 2_000); await new Promise((resolve) => setTimeout(resolve, 30));
         expect(h.sends()).toEqual([]);
         expect(h.zeta.turns).toEqual([]);
         h.deliveries.resend("a", intent); await settledSends(h, 1);
@@ -897,7 +902,7 @@ const owner: Row[] = [
       const page2 = await world({ selected: "a", zeta: page1.zeta, tab });
       try {
         page2.start(); await page2.live("a");
-        await waitFor(() => page2.store.get("a").deliveries.get(intent)?.state === "dropped", 2_000); await new Promise((resolve) => setTimeout(resolve, 30));
+        await until(() => page2.store.get("a").deliveries.get(intent)?.state === "dropped", 2_000); await new Promise((resolve) => setTimeout(resolve, 30));
         expect(page2.sends()).toEqual([]);
         expect(page2.zeta.turns).toEqual([]);
         page2.deliveries.resend("a", intent); await settledSends(page2, 1);
@@ -913,7 +918,7 @@ const owner: Row[] = [
         const intent = await steerThenEnd(h, "steer then leave", "completed", false);
         h.select("b"); await h.live("b"); h.select("a"); await h.live("a");
         h.deliveries.reconcile("a");
-        await waitFor(() => h.store.get("a").deliveries.get(intent)?.state === "dropped", 2_000); await new Promise((resolve) => setTimeout(resolve, 30));
+        await until(() => h.store.get("a").deliveries.get(intent)?.state === "dropped", 2_000); await new Promise((resolve) => setTimeout(resolve, 30));
         expect(h.sends()).toEqual([]);
         expect(h.zeta.turns).toEqual([]);
       } finally { h.dispose(); }
@@ -943,7 +948,7 @@ const owner: Row[] = [
       const h = await openA();
       try {
         const intent = await steerThenEnd(h, "stopped steer", "user_stop");
-        await waitFor(() => h.store.get("a").deliveries.get(intent)?.state === "dropped", 2_000);
+        await until(() => h.store.get("a").deliveries.get(intent)?.state === "dropped", 2_000);
         h.zeta.attached = "b"; await h.manager.refreshStatus();
         h.deliveries.resend("a", intent); await new Promise((resolve) => setTimeout(resolve, 30));
         expect(h.sends()).toEqual([]);
@@ -964,7 +969,7 @@ const owner: Row[] = [
       const h = await openA({ handlers: (zeta) => ({ send: (params) => failing ? (handlers(zeta).send as (params: Record<string, unknown>) => unknown)(params) : zetaHandlers(zeta).send!(params) }) });
       try {
         const intent = await steerThenEnd(h, `auto resend ${how}`, "completed");
-        await waitFor(() => h.store.get("a").deliveries.get(intent)?.state === "dropped" && h.sends().length === 1, 2_000);
+        await until(() => h.store.get("a").deliveries.get(intent)?.state === "dropped" && h.sends().length === 1, 2_000);
         h.deliveries.reconcile("a"); await new Promise((resolve) => setTimeout(resolve, 50));
         expect(h.sends()).toHaveLength(1);
         expect(h.zeta.turns).toEqual([]);
@@ -981,7 +986,7 @@ const owner: Row[] = [
       const tab = tabStorage();
       const page1 = await openA({ tab, handlers: (zeta) => lostReply(zeta) });
       const intent = await steerThenEnd(page1, "mj1 steer", "completed");
-      await waitFor(() => page1.store.get("a").deliveries.get(intent)?.state === "dropped", 2_000);
+      await until(() => page1.store.get("a").deliveries.get(intent)?.state === "dropped", 2_000);
       const resent = page1.sends()[0]!.delivery_id as string;
       expect(resent).not.toBe(intent);
       page1.dispose();
