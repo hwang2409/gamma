@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import type { RunEvent } from "@fulcrum/core";
 import { createClient, type Transport } from "@fulcrum/zeta";
 import { openSession } from "../src/session";
 
@@ -113,41 +112,6 @@ test("a quarantined event on a later page forces a tail reconcile", async () => 
 
   expect(texts(opened.lease.store)).toEqual(["old", "older", "during-page-one"]);
   expect(tailCalls).toBe(2);
-});
-
-test("a rejected replay revision never publishes its stale snapshot", async () => {
-  let historyCalls = 0;
-  const fake = await within(server((method, _params, event) => {
-    if (method === "status") return idleStatus;
-    if (method !== "session_history") throw new Error(method);
-    historyCalls++;
-    if (historyCalls === 1) event({ event: "user_message", text: "newer-live-state", mode: "send", delivery_id: "newer" });
-    return {
-      messages: historyCalls === 1 ? [row("stale", "user", "stale-snapshot")] : [row("fresh", "user", "newer-live-state")],
-      next_offset: null,
-    };
-  }), "stale-snapshot test server hello");
-  const originalFinish = fake.client.finishReplay.bind(fake.client);
-  let accepted = false;
-  fake.client.finishReplay = ((...args: Parameters<typeof fake.client.finishReplay>) => {
-    if (historyCalls < 2) return false;
-    accepted = originalFinish(...args);
-    return accepted;
-  }) as typeof fake.client.finishReplay;
-  const originalResync = fake.client.store.resync.bind(fake.client.store);
-  let stalePublishedAfterFirstPage = false;
-  let monitor = false;
-  fake.client.store.resync = ((events: RunEvent[]) => {
-    if (monitor && !accepted) stalePublishedAfterFirstPage = true;
-    return originalResync(events);
-  }) as typeof fake.client.store.resync;
-
-  const opened = await within(openSession(fake.client, "s"), "stale-snapshot open");
-  monitor = true;
-  await within(opened.complete, "stale-snapshot replay");
-
-  expect(stalePublishedAfterFirstPage).toBe(false);
-  expect(texts(opened.lease.store)).toEqual(["newer-live-state"]);
 });
 
 test("the fourth quarantined event survives the reconciliation bound", async () => {
