@@ -102,7 +102,7 @@ try {
         await Bun.sleep(500); fake.drop(); // zeta takes the send; its reply is lost with the socket
         const note = page.locator('[data-part="composer-message"]');
         await note.filter({ hasText: "will not run it twice" }).waitFor({ timeout: 15_000 }).catch(async () => { throw new Error(`composer note after a lost reply: ${JSON.stringify(await note.innerText().catch(() => ""))}`); });
-        if (!(await note.innerText()).includes("stays in this draft") || await field.inputValue() !== "retry me once") throw new Error("the note does not say where the message is");
+        if (!(await note.innerText()).includes("the draft is kept") || await field.inputValue() !== "retry me once") throw new Error("the note does not say where the message is");
         await page.screenshot({ path: join(shots, "lost-reply-note-1440.png") });
         await page.getByRole("button", { name: /send message|steer the running turn/ }).click();
         await Bun.sleep(1_500);

@@ -17,7 +17,7 @@ const errorText = (error: unknown) => (error instanceof Error ? error.message : 
 /** A failure that kept the draft's delivery id is safe to retry: zeta dedupes the id if the first attempt landed. */
 export const submitFailureText = (steer: boolean, failure: unknown, retrySafe: boolean) => {
   const verb = steer ? "steer" : "send";
-  return retrySafe ? `could not confirm the ${verb} (${errorText(failure)}). the message stays in this draft; ${verb} again and zeta will not run it twice` : `could not ${verb}: ${errorText(failure)}`;
+  return retrySafe ? `${verb} not confirmed: the draft is kept, and a retry will not run it twice (${errorText(failure)})` : `could not ${verb}: ${errorText(failure)}`;
 };
 const attempt = (action: () => unknown) => new Promise<unknown>((resolve) => resolve(action()));
 const hasFiles = (event: DragEvent) => [...event.dataTransfer.types].includes("Files");
