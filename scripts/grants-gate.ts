@@ -111,12 +111,24 @@ try {
     await page.getByText("open this run before changing permissions", { exact: true }).waitFor();
     if (fake.requests.slice(detachedStart).some((request) => request.method === "slash_run")) throw new Error("detached /permissions reached zeta");
 
+    fake.changeSessionGrants(ACTIVE, ["bash", "read"], "grant");
     for (const width of [1440, 1024, 390]) for (const theme of themes) {
       await page.setViewportSize({ width, height: 800 });
       await page.goto(`${origin}/?run=${ACTIVE}&theme=${encodeURIComponent(theme)}`);
       await page.getByRole("button", { name: /^permissions/ }).click();
       const box = await page.getByRole("dialog", { name: "session permissions" }).boundingBox();
       if (!box || box.x < 0 || box.y < 0 || box.x + box.width > width || box.y + box.height > 800) throw new Error(`${theme} at ${width}px put the permissions popover outside the viewport: ${JSON.stringify(box)}`);
+      // The revoke button's word against the grant row it sits on (WCAG 1.4.3 text contrast).
+      const revoke = await page.getByRole("dialog", { name: "session permissions" }).getByRole("button", { name: "revoke" }).first().evaluate((button) => {
+        const rgb = (color: string) => { const parts = color.match(/[\d.]+/g)!.map(Number); const scale = color.startsWith("color(") ? 255 : 1; return { rgb: parts.slice(0, 3).map((part) => part * scale), alpha: parts[3] ?? 1 }; };
+        const luminance = (channels: number[]) => channels.map((value) => { const v = value / 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }).reduce((sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i]!, 0);
+        let node: Element | null = button; let background = "rgb(255, 255, 255)";
+        for (; node; node = node.parentElement) { const color = getComputedStyle(node).backgroundColor; if (rgb(color).alpha > 0) { background = color; break; } }
+        const text = getComputedStyle(button).color;
+        const [high, low] = [luminance(rgb(text).rgb), luminance(rgb(background).rgb)].sort((a, b) => b - a);
+        return { text, background, ratio: (high! + 0.05) / (low! + 0.05) };
+      });
+      if (revoke.ratio < 4.5) throw new Error(`${theme} at ${width}px: revoke text ${revoke.text} on ${revoke.background} is ${revoke.ratio.toFixed(2)}:1, below 4.5:1`);
     }
 
     const discovery = JSON.parse(await readFile(join(fake.home, "run", "serve.ws.json"), "utf8")) as { port: number; observer_token: string };
