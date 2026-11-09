@@ -190,6 +190,26 @@ try {
           if (JSON.stringify(landed) !== JSON.stringify(["s-docs"])) throw new Error(`the message landed in ${JSON.stringify(landed)}`);
         } finally { await cleanup(context, page); }
       });
+      // B-1: a page back from the bfcache keeps its memory but is a new page life; it never resends a steer by itself.
+      // Playwright's chromium disables the bfcache, so only webkit (macOS; CI has no webkit) reaches pageshow.persisted.
+      if (name === "webkit") await check("queued-steer-not-resent-after-bfcache-back-webkit", async () => {
+        const context = await other.newContext({ viewport: { width: 1440, height: 900 } });
+        await context.addInitScript(() => addEventListener("pageshow", (event) => { if (event.persisted) (window as Window & { __restored?: number }).__restored = ((window as Window & { __restored?: number }).__restored ?? 0) + 1; }));
+        const page = await context.newPage();
+        try {
+          await page.goto(origin); await ready(page);
+          await startQueued(page, "bfcache");
+          const owner = page.url();
+          await page.goto(`${origin}/?run=s-markdown`); await ready(page); // a real navigation away
+          await page.goBack(); await page.waitForURL(owner);
+          const restored = await page.evaluate(() => (window as Window & { __restored?: number }).__restored ?? 0);
+          if (!restored) console.log("NOTE queued-steer-not-resent-after-bfcache-back-webkit: webkit loaded the page again instead of restoring it from the bfcache");
+          await page.locator('.undelivered[role="note"]').waitFor({ timeout: 20_000 }); // the turn ended naturally and dropped the steer
+          await Bun.sleep(1_500);
+          if (fake.sent.some((item) => item.method === "send" && item.text === "queued bfcache")) throw new Error(`the page back from the bfcache (restored=${restored}) resent the steer without the user`);
+          await page.getByRole("button", { name: "resend" }).click(); await waitForSent("queued bfcache");
+        } finally { await cleanup(context, page); }
+      });
     } finally { await other.close(); }
   }
 } finally {

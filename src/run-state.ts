@@ -1,7 +1,7 @@
 import type { QueuedImage } from "./image-queue";
 import type { OpenFailure, OpenRun, SessionMeta, ServerStatus } from "./session";
 import { catalogModels, catalogProviders } from "./settings";
-import { decideSend, queryDeliveries, reduceDelivery, restoreSaved, restoreText, savedRun, showsLive, type DeliveryEvent, type PendingDelivery, type RetryDraft, type SavedRun } from "./delivery-owner";
+import { decideSend, leaveView, queryDeliveries, reduceDelivery, restoreSaved, restoreText, savedRun, showsLive, type DeliveryEvent, type PendingDelivery, type RetryDraft, type SavedRun } from "./delivery-owner";
 
 export type Brand<T, Name extends string> = T & { readonly __brand: Name };
 export type DraftRunId = Brand<`draft:${string}`, "DraftRunId">;
@@ -122,6 +122,8 @@ export type WorkspaceEvent =
   | { type: "STOP_OK" | "STOP_FAIL"; runId: SessionId; operationId: OperationId }
   | { type: "DISCONNECT" }
   | { type: "RECONNECT" }
+  /** The browser showed this page again from its back-forward cache (`pageshow` with `persisted`): a new page life. */
+  | { type: "PAGE_RESTORED" }
   | { type: "SETTINGS_OK"; runId: SessionId; operationId: OperationId; model?: string; approval_mode?: "ask" | "allow"; plan_mode?: boolean }
   | { type: "SETTINGS_FAIL"; runId: SessionId; operationId: OperationId; error: string };
 
@@ -161,7 +163,7 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
   const now = (): WorkspaceState => ({ ...state, entry, runs, aliases, attachment, connected });
   const query = (runId: RunId, withRetry = false) => { if (runs.has(canonical({ ...state, aliases }, runId))) update(runId, (record) => queryDeliveries(now(), record, effects, withRetry)); };
   /** Leaving a run ends "sent by this view": only the view that sent a steer may resend it automatically. */
-  const leaveSelected = (next: RunId) => { const selected = canonical({ ...state, aliases }, entry.run); if (selected !== next && runs.get(selected)?.deliveries.size) update(selected, (record) => ({ ...record, deliveries: new Map([...record.deliveries].map(([id, delivery]) => [id, { ...delivery, here: undefined }])) })); };
+  const leaveSelected = (next: RunId) => { const selected = canonical({ ...state, aliases }, entry.run); if (selected !== next && runs.get(selected)?.deliveries.size) update(selected, leaveView); };
   switch (event.type) {
     case "ENSURE_RUN": if (!runs.has(canonical({ ...state, aliases }, event.runId))) runs.set(event.runId, { ...blank(event.runId), ...(event.model ? { model: event.model } : {}), ...(event.text ? { text: event.text } : {}) }); break;
     case "EVICT": for (const id of event.runIds) { const record = runs.get(id); if (record?.open && !id.startsWith("draft:")) effects.push({ type: "release-lease", runId: id as SessionId }); runs.delete(id); } break;
@@ -244,6 +246,8 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
       // The old client's opens are aborted; the post-step reopens the selection after the next status.
       for (const [id, record] of runs) update(id, (current) => ({ ...current, ...(current.open ? { open: { ...current.open, stale: true } } : {}), openOperation: undefined, openingMessages: undefined, deliveries: new Map([...record.deliveries].map(([intentId, delivery]) => [intentId, delivery.state === "requesting" ? { ...delivery, state: "queued" as const } : delivery])) }));
       attachment = { kind: "disconnected", ...(attachment.kind === "attached" ? { lastAttached: attachment.sessionId, ...(attachment.turn !== "idle" ? { lastTurnOwner: attachment.sessionId } : {}) } : {}) }; break;
+    // The page left and came back: it is no longer the view that sent its steers, so none is resent automatically.
+    case "PAGE_RESTORED": for (const [id, record] of runs) if (record.deliveries.size) runs.set(id, leaveView(record)); break;
     case "RECONNECT":
       connected = true;
       // A new connection may succeed where the old one failed: the post-step tries the selected run's open once more.
@@ -335,12 +339,22 @@ export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefi
   const emit = () => listeners.forEach((listener) => listener());
   /** Runs this page holds: the run it shows, and runs it typed into or sent to. Only their saved entries are read or written. */
   const held = new Set<RunId>();
+  /** Each held run's entry as this page last read or wrote it: an entry this page did not change is not written back. */
+  const known = new Map<RunId, string>();
   // The tab's sessionStorage is shared by every page the tab loads (and a page back from the bfcache holds an old copy): read it fresh before each write.
   const readSaved = (): Record<string, SavedRun> => { try { const value = JSON.parse(draftStorage?.getItem(DRAFTS_KEY) ?? "null"); return value && typeof value === "object" ? value : {}; } catch { return {}; } };
   const persist = () => {
     if (persistTimer) { clearTimeout(persistTimer); persistTimer = null; }
     const saved = readSaved();
-    for (const id of held) { const record = state.runs.get(id); const entry = record && savedRun(record); if (entry) saved[id] = entry; else delete saved[id]; }
+    let changed = false;
+    for (const id of held) {
+      const record = state.runs.get(id); const entry = record ? savedRun(record) : null; const json = JSON.stringify(entry);
+      // Another page of this tab may have written a newer entry for this run; only this page's own change overwrites it.
+      if (known.get(id) === json) continue;
+      known.set(id, json); changed = true;
+      if (entry) saved[id] = entry; else delete saved[id];
+    }
+    if (!changed) return;
     try { draftStorage?.setItem(DRAFTS_KEY, JSON.stringify(saved)); } catch {}
   };
   const untouched = (record: RunRecord) => !record.text && !record.attachments.length && !record.deliveries.size && !record.retryDelivery;
@@ -352,7 +366,9 @@ export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefi
     for (const [id, record] of state.runs) {
       if (held.has(id) || (id !== selected && untouched(record))) continue;
       held.add(id);
-      const restored = restoreSaved(record, readSaved()[id]);
+      const entry = readSaved()[id];
+      known.set(id, JSON.stringify(entry ?? null));
+      const restored = restoreSaved(record, entry);
       if (restored !== record) (runs ??= new Map(state.runs)).set(id, restored);
     }
     if (runs) state = { ...state, runs };

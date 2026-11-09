@@ -30,7 +30,6 @@ async function server(answer: (method: string, params: Record<string, unknown>) 
   await client.hello(features);
   return { client, calls };
 }
-const ids = () => { let n = 0; return () => `id-${++n}`; };
 const ok = { result: { accepted: true } };
 /**
  * The executor sends only for the run zeta is attached to (decideSend); a status reply attaches "s". Deliveries are asked
@@ -90,23 +89,23 @@ test("a reload reconciles a queued steer from durable status; a dropped one wait
 
 test("send and steer go to their methods with a delivery id when the feature is negotiated", async () => {
   const { client, calls } = await server(() => ok);
-  const delivery = createDelivery(ids());
-  await delivery.submit(client, "hello", false);
-  await delivery.submit(client, "also this", true);
+  const delivery = createDelivery();
+  await delivery.submit(client, "hello", false, "id-1");
+  await delivery.submit(client, "also this", true, "id-2");
   expect(calls).toEqual([["send", { text: "hello", delivery_id: "id-1" }], ["steer", { text: "also this", delivery_id: "id-2" }]]);
 });
 
 test("without the feature no delivery id is sent", async () => {
   const { client, calls } = await server(() => ok, []);
-  await createDelivery(ids()).submit(client, "hello", false);
+  await createDelivery().submit(client, "hello", false, "id-1");
   expect(calls).toEqual([["send", { text: "hello" }]]);
 });
 
 test("a turn that ends before a steer lands sends it instead, and one that starts before a send steers, with the same id", async () => {
   const { client, calls } = await server((method) => (method === "steer" ? { error: { code: -32005, message: "no turn is running" } } : ok));
-  await createDelivery(ids()).submit(client, "late steer", true);
+  await createDelivery().submit(client, "late steer", true, "id-1");
   const busy = await server((method) => (method === "send" ? { error: { code: -32004, message: "a turn is already running" } } : ok));
-  await createDelivery(ids()).submit(busy.client, "early send", false);
+  await createDelivery().submit(busy.client, "early send", false, "id-1");
   expect(calls).toEqual([["steer", { text: "late steer", delivery_id: "id-1" }], ["send", { text: "late steer", delivery_id: "id-1" }]]);
   expect(busy.calls).toEqual([["send", { text: "early send", delivery_id: "id-1" }], ["steer", { text: "early send", delivery_id: "id-1" }]]);
 });
@@ -114,12 +113,12 @@ test("a turn that ends before a steer lands sends it instead, and one that start
 test("a dropped steer is an error and the retry gets a fresh id; an evicted id reports its outcome", async () => {
   let reply: Reply = { result: { accepted: false, duplicate: true, status: "dropped" } };
   const { client, calls } = await server(() => reply);
-  const delivery = createDelivery(ids());
-  await expect(delivery.submit(client, "steer me", true)).rejects.toThrow("dropped");
+  const delivery = createDelivery();
+  await expect(delivery.submit(client, "steer me", true, "id-1")).rejects.toThrow("dropped");
   reply = { error: { code: -32010, message: "evicted", data: { outcome: "delivered" } } };
-  await delivery.submit(client, "steer me", true);
+  await delivery.submit(client, "steer me", true, "id-2");
   reply = { error: { code: -32010, message: "evicted", data: { outcome: "dropped" } } };
-  await expect(delivery.submit(client, "again", true)).rejects.toThrow("dropped");
+  await expect(delivery.submit(client, "again", true, "id-3")).rejects.toThrow("dropped");
   expect(calls.map(([, params]) => params.delivery_id)).toEqual(["id-1", "id-2", "id-3"]);
 });
 
@@ -217,7 +216,7 @@ test("opaque uncertainty without delivery_id keeps display text and never retrie
   state.activate("s"); state.edit("s", { text: "/review change" });
   const manager = createDeliveryManager(() => client, state);
   attach(state);
-  await expect(manager.submitOpaque("s", "opaque-secret", "/review change")).rejects.toThrow("outcome unknown; this command was not retried");
+  await expect(manager.submitOpaque("s", "opaque-secret", "/review change", "/review change", "delivery-1")).rejects.toThrow("outcome unknown; this command was not retried");
   expect(calls).toEqual([["send", { input_id: "opaque-secret" }]]);
   expect(state.get("s").text).toBe("/review change");
   expect(state.get("s").deliveries.size).toBe(0);
@@ -235,8 +234,8 @@ test("stop is a session abort", async () => {
 test("fake zeta without an echo leaves one queued synthetic user event", async () => {
   const { client } = await server(() => ok, ["delivery_id", "user_message_event", "user_message_delivery_id"], false);
   const events: unknown[] = [];
-  const delivery = createDelivery(ids(), (event) => events.push(event));
-  await delivery.submit(client, "hello", false);
+  const delivery = createDelivery((event) => events.push(event));
+  await delivery.submit(client, "hello", false, "id-1");
   expect(events).toEqual([{ type: "user_message", text: "hello", mode: "send", intent: "id-1", delivery_id: "id-1" }]);
   expect(new Set(events.map((event) => event.intent)).size).toBe(1);
 });

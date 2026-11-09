@@ -186,8 +186,11 @@ export function App() {
       if (canonical !== raw || !state?.gammaEntryId) writeEntry(next, "replace");
       runState.dispatch({ type: "NAVIGATED", entryId: next.gammaEntryId as EntryId, runId: canonical as RunId }); activate(canonical);
     };
+    // A page back from the bfcache keeps its memory; it is a new page life, so it must not resend a steer by itself.
+    const restored = (event: PageTransitionEvent) => { if (event.persisted) runState.dispatch({ type: "PAGE_RESTORED" }); };
     addEventListener("popstate", pop);
-    return () => { removeEventListener("popstate", pop); runState.dispose(); deliveries.dispose(); receipts.dispose(); runs.dispose(); connection.stop(); };
+    addEventListener("pageshow", restored);
+    return () => { removeEventListener("popstate", pop); removeEventListener("pageshow", restored); runState.dispose(); deliveries.dispose(); receipts.dispose(); runs.dispose(); connection.stop(); };
   }, [connection, deliveries, firstEntry.run, receipts, runState, runs]);
   const state = useExternal(connection);
   const view = workspaceRunState(workspace);

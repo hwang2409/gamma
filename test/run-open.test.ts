@@ -88,11 +88,14 @@ function zetaHandlers(zeta: Zeta, extra: Record<string, Handler> = {}): Record<s
 }
 
 const FEATURES = ["delivery_id"];
+/** zeta publishes the live dropped-steer delivery_status event (with its reason) only to a controller with this feature. */
+const FIDELITY = ["delivery_id", "session_history_fidelity"];
 
-async function world(options: { attached?: string | null; selected?: string; handlers?: (zeta: Zeta) => Record<string, Handler>; offline?: boolean; zeta?: Zeta; tab?: ReturnType<typeof tabStorage> } = {}) {
+async function world(options: { attached?: string | null; selected?: string; handlers?: (zeta: Zeta) => Record<string, Handler>; offline?: boolean; zeta?: Zeta; tab?: ReturnType<typeof tabStorage>; features?: string[] } = {}) {
   const zeta: Zeta = options.zeta ?? { attached: options.attached ?? null, created: 0, turns: [], accepted: new Map(), replies: [], evicted: new Set() };
   const handlers = { ...zetaHandlers(zeta), ...options.handlers?.(zeta) };
-  const fake = await server(handlers, FEATURES);
+  const features = options.features ?? FEATURES;
+  const fake = await server(handlers, features);
   const connection = source(options.offline ? null : fake.client);
   const first = options.selected ?? `draft:${crypto.randomUUID()}`;
   const store = createRunStateStore(8, undefined, options.tab, { id: "entry" as EntryId, run: first as RunId });
@@ -105,7 +108,7 @@ async function world(options: { attached?: string | null; selected?: string; han
   activate(first);
   const run = () => store.getEntry().run as string;
   const h = {
-    zeta, fake, store, manager, deliveries, connection, failures,
+    zeta, fake, store, manager, deliveries, connection, failures, features,
     start() { manager.start(); },
     get view() { return workspaceRunState(store.getCatalog()); },
     /** The owner's answer; read only after the base-visible assertions of a row. */
@@ -676,9 +679,18 @@ async function steerThenEnd(h: Awaited<ReturnType<typeof world>>, text: string, 
   expect(await h.enter("a", text, undefined, true)).toEqual({ ok: true });
   const intent = [...h.store.get("a").deliveries.keys()][0]!;
   expect(h.store.get("a").deliveries.get(intent)?.state).toBe("queued");
-  endTurn(h.zeta, reason);
-  if (ask) h.deliveries.reconcile("a");
+  await steerEnds(h, reason, ask);
   return intent;
+}
+/** zeta ends a's running turn with `reason`, dropping its queued steers; the app asks on the run's next store event. */
+async function steerEnds(h: Awaited<ReturnType<typeof world>>, reason: Parameters<typeof endTurn>[1], ask = true) {
+  const dropped = [...h.zeta.steers!].filter(([, steer]) => steer.status === "queued").map(([id]) => id);
+  endTurn(h.zeta, reason);
+  // zeta delivery.py:305-325 (_finalize_turn): each dropped steer's event_contract.delivery_status_row (event_contract.py:11-33,
+  // with the drop reason) is published live, but publish_controller sends it only with required_feature="session_history_fidelity".
+  const wire = { completed: "turn_end", error: "failed", user_stop: "abort", disconnect: "disconnect" }[reason];
+  if (h.features.includes("session_history_fidelity")) for (const id of dropped) h.fake.event({ event: "delivery_status", session_id: "a", id: `delivery-${id}`, role: "system", delivery_id: id, method: "steer", status: "dropped", content: [{ type: "text", text: `steer dropped: ${wire}` }], reason: wire });
+  if (ask) h.deliveries.reconcile("a");
 }
 const settledSends = async (h: Awaited<ReturnType<typeof world>>, count: number) => { await until(() => h.sends().length >= count, 2_000); await new Promise((resolve) => setTimeout(resolve, 30)); };
 
@@ -866,7 +878,7 @@ const owner: Row[] = [
     name: "owner (a)+(d) a steer dropped at a natural turn end is resent once automatically, with a new id saved before the send; one turn in a",
     async run() {
       const tab = tabStorage();
-      const h = await openA({ tab });
+      const h = await openA({ tab, features: FIDELITY });
       try {
         const send = h.fake.hold("send");
         const intent = await steerThenEnd(h, "late steer", "completed");
@@ -881,7 +893,7 @@ const owner: Row[] = [
   ...(["user_stop", "error", "disconnect"] as const).map((reason): Row => ({
     name: `owner (a) a steer dropped by a turn that ended with ${reason} is not resent; the resend button sends it once; one turn in a`,
     async run() {
-      const h = await openA();
+      const h = await openA({ features: FIDELITY });
       try {
         const intent = await steerThenEnd(h, `dropped by ${reason}`, reason);
         await until(() => h.store.get("a").deliveries.get(intent)?.state === "dropped", 2_000); await new Promise((resolve) => setTimeout(resolve, 30));
@@ -897,10 +909,10 @@ const owner: Row[] = [
     name: "owner (b) after a reload a steer dropped at a natural turn end is not resent automatically; the button resends it; one turn in a",
     async run() {
       const tab = tabStorage();
-      const page1 = await openA({ tab });
+      const page1 = await openA({ tab, features: FIDELITY });
       const intent = await steerThenEnd(page1, "steer before reload", "completed", false);
       page1.dispose();
-      const page2 = await world({ selected: "a", zeta: page1.zeta, tab });
+      const page2 = await world({ selected: "a", zeta: page1.zeta, tab, features: FIDELITY });
       try {
         page2.start(); await page2.live("a");
         await until(() => page2.store.get("a").deliveries.get(intent)?.state === "dropped", 2_000); await new Promise((resolve) => setTimeout(resolve, 30));
@@ -914,7 +926,7 @@ const owner: Row[] = [
   {
     name: "owner (b) leaving the run in-app and coming back ends the automatic resend: no send, the row waits for the button; zero turns",
     async run() {
-      const h = await openA();
+      const h = await openA({ features: FIDELITY });
       try {
         const intent = await steerThenEnd(h, "steer then leave", "completed", false);
         h.select("b"); await h.live("b"); h.select("a"); await h.live("a");
@@ -928,7 +940,7 @@ const owner: Row[] = [
   {
     name: "owner (c) zeta attaches another run while the status answer is on its way: no automatic send; zero turns",
     async run() {
-      const h = await openA();
+      const h = await openA({ features: FIDELITY });
       try {
         const status = h.fake.hold("delivery_status");
         const intent = await steerThenEnd(h, "steer, then b attaches", "completed");
@@ -967,7 +979,7 @@ const owner: Row[] = [
     name: `owner one automatic resend at most: when it ${how}, the row waits for the button; one send, zero turns`,
     async run() {
       let failing = true;
-      const h = await openA({ handlers: (zeta) => ({ send: (params) => failing ? (handlers(zeta).send as (params: Record<string, unknown>) => unknown)(params) : zetaHandlers(zeta).send!(params) }) });
+      const h = await openA({ features: FIDELITY, handlers: (zeta) => ({ send: (params) => failing ? (handlers(zeta).send as (params: Record<string, unknown>) => unknown)(params) : zetaHandlers(zeta).send!(params) }) });
       try {
         const intent = await steerThenEnd(h, `auto resend ${how}`, "completed");
         await until(() => h.store.get("a").deliveries.get(intent)?.state === "dropped" && h.sends().length === 1, 2_000);
@@ -985,7 +997,7 @@ const owner: Row[] = [
     name: "owner MJ1 turn-end steer -> automatic resend -> lost reply -> reload -> explicit resend reuses the saved id; one turn in a",
     async run() {
       const tab = tabStorage();
-      const page1 = await openA({ tab, handlers: (zeta) => lostReply(zeta) });
+      const page1 = await openA({ tab, features: FIDELITY, handlers: (zeta) => lostReply(zeta) });
       const intent = await steerThenEnd(page1, "mj1 steer", "completed");
       await until(() => page1.store.get("a").deliveries.get(intent)?.state === "dropped", 2_000);
       const resent = page1.sends()[0]!.delivery_id as string;
@@ -999,6 +1011,89 @@ const owner: Row[] = [
         expect(page2.sends().map((params) => params.delivery_id)).toEqual([resent]);
         expect(page2.landed()).toEqual(["a"]);
       } finally { page2.dispose(); }
+    },
+  },
+  {
+    name: "owner m-a without session_history_fidelity zeta sends no drop reason: a steer dropped at a completed turn waits for the button (status says completed); 0 automatic sends, then one turn in a",
+    async run() {
+      const h = await openA();
+      try {
+        const intent = await steerThenEnd(h, "no reason known", "completed");
+        await until(() => h.store.get("a").deliveries.get(intent)?.state === "dropped" || h.sends().length > 0, 2_000); await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(h.sends()).toEqual([]);
+        expect(h.zeta.turns).toEqual([]);
+        expect(h.store.get("a").deliveries.get(intent)?.state).toBe("dropped");
+        h.deliveries.resend("a", intent); await settledSends(h, 1);
+        expect(h.landed()).toEqual(["a"]);
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "owner m-a the rule reads this steer's drop reason, not the last turn: dropped by a failed turn, then a later turn completed; 0 automatic sends",
+    async run() {
+      const h = await openA({ features: FIDELITY });
+      try {
+        const intent = await steerThenEnd(h, "dropped by a failure", "error", false);
+        h.zeta.lastTurn = "completed"; // a newer turn completed before gamma asked
+        h.deliveries.reconcile("a");
+        await until(() => h.store.get("a").deliveries.get(intent)?.state === "dropped" || h.sends().length > 0, 2_000); await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(h.sends()).toEqual([]);
+        expect(h.zeta.turns).toEqual([]);
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "owner B-1 a page back from the bfcache is a new page life: its steer dropped at a natural turn end is not resent by itself; the button sends it; one turn in a",
+    async run() {
+      const h = await openA({ features: FIDELITY });
+      try {
+        h.zeta.running = true;
+        h.type("steer before back-forward");
+        expect(await h.enter("a", "steer before back-forward", undefined, true)).toEqual({ ok: true });
+        const intent = [...h.store.get("a").deliveries.keys()][0]!;
+        h.store.dispatch({ type: "PAGE_RESTORED" } as RunState.WorkspaceEvent); // app.tsx: pageshow with event.persisted
+        await steerEnds(h, "completed");
+        await until(() => h.store.get("a").deliveries.get(intent)?.state === "dropped" || h.sends().length > 0, 2_000); await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(h.sends()).toEqual([]);
+        expect(h.zeta.turns).toEqual([]);
+        h.deliveries.resend("a", intent); await settledSends(h, 1);
+        expect(h.landed()).toEqual(["a"]);
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "owner m-b a blocked Enter keeps the draft's inherited retry id: after a lost reply landed, zeta attaches b, Enter is blocked, then Enter in a dedupes; one turn in a",
+    async run() {
+      // The reopen's delivery_status reply is lost too, so only the kept retry id can dedupe the next Enter.
+      const h = await openA({ handlers: (zeta) => ({ ...lostReply(zeta), delivery_status: () => { throw { code: -32603, message: "lost" }; } }) });
+      try {
+        h.type("keep my id"); expect((await h.enter()).ok).toBe(false); // zeta took it; the reply was lost
+        const id = h.sends()[0]!.delivery_id as string;
+        const reopen = h.fake.hold("resume"); // zeta keeps b attached while gamma waits to reopen a
+        h.zeta.attached = "b"; await h.manager.refreshStatus(); await reopen.reached;
+        expect((await h.enter()).ok).toBe(false);
+        expect(h.sends()).toHaveLength(1);
+        reopen.release(); await h.live("a");
+        expect(await h.enter()).toEqual({ ok: true });
+        expect(h.sends().map((params) => params.delivery_id)).toEqual([id, id]);
+        expect(h.landed()).toEqual(["a"]);
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "owner m-c two pages of one tab hold run a: the older page writes only entries it changed, so the newer page's draft for a survives",
+    async run() {
+      const tab = tabStorage();
+      const older = await world({ selected: "a", tab, offline: true });
+      const newer = await world({ selected: "a", tab, offline: true });
+      try {
+        older.type("older draft"); await new Promise((resolve) => setTimeout(resolve, 150));
+        newer.type("newer draft"); await new Promise((resolve) => setTimeout(resolve, 150));
+        expect(saved(tab)).toContain("newer draft");
+        older.type("older's own b", "b"); older.store.dispatch({ type: "RECONNECT" }); // the older page's next writes
+        expect(saved(tab)).toContain("newer draft");
+        expect(saved(tab)).not.toContain("older draft");
+      } finally { older.dispose(); newer.dispose(); }
     },
   },
 ];

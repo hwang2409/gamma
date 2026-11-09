@@ -21,7 +21,7 @@ export type PendingDelivery = {
   text: string;
   images: readonly QueuedImage[];
   state: "requesting" | "queued" | "dropped";
-  /** Sent by this page for the run it shows. A reload, a page restore, or leaving the run clears it. */
+  /** Sent by this page life for the run it shows. Never saved (a reload loses it); a bfcache restore (PAGE_RESTORED) and leaving the run clear it. */
   here?: true;
   /** zeta settled `attemptId` as dropped, so a resend needs a new id. Without it a resend reuses the id and zeta dedupes. */
   spent?: true;
@@ -40,8 +40,8 @@ export type SendRequest =
   | { kind: "attempt"; intentId: string }
   /** The user's resend click on a dropped row. */
   | { kind: "resend"; intentId: string }
-  /** zeta dropped a queued steer; `turnEnded` is true when the turn ended naturally (zeta reason `turn_end`). */
-  | { kind: "auto"; intentId: string; turnEnded: boolean };
+  /** zeta dropped a queued steer; `reason` is the drop reason zeta gave for this delivery, if this view saw it. */
+  | { kind: "auto"; intentId: string; reason?: string };
 /** `blocked` says why nothing is sent now; `id` is the delivery id the send uses. */
 export type SendDecision = { id: string; blocked?: string };
 
@@ -67,8 +67,11 @@ export function decideSend(state: WorkspaceState, runId: RunId, request: SendReq
   if (request.kind === "attempt") return { id: delivery.attemptId };
   if (delivery.method === "opaque") return { id: delivery.attemptId, blocked: MANUAL };
   if (request.kind === "resend") return delivery.state === "dropped" ? { id: delivery.spent ? newId() : delivery.attemptId } : { id: delivery.attemptId, blocked: MANUAL };
-  return delivery.method === "steer" && delivery.here && !delivery.resent && request.turnEnded ? { id: newId() } : { id: delivery.attemptId, blocked: MANUAL };
+  return delivery.method === "steer" && delivery.here && !delivery.resent && request.reason === "turn_end" ? { id: newId() } : { id: delivery.attemptId, blocked: MANUAL };
 }
+
+/** This page life no longer counts as the view that sent these deliveries, so none of them is resent automatically. */
+export const leaveView = (record: RunRecord): RunRecord => ({ ...record, deliveries: new Map([...record.deliveries].map(([id, delivery]) => [id, { ...delivery, here: undefined }])) });
 
 /** Whether this page shows `runId` live: it is the selected run, zeta has it attached, and its own open completed. */
 export const showsLive = (state: WorkspaceState, runId: RunId) => {
@@ -84,9 +87,12 @@ export const restoreText = (current: string, restored: string) => current.starts
 
 export type DeliveryEvent =
   | { type: "DELIVERY_BEGIN"; runId: RunId; delivery: PendingDelivery; operationId: OperationId }
-  | { type: "DELIVERY_ACK"; runId: RunId; intentId: string; operationId: OperationId; attemptId: string; queued?: boolean; failed?: boolean; /** zeta did no work for this id (or it never reached zeta), so a retry needs no dedupe. */ refused?: boolean }
-  /** zeta's `delivery_status` answer for a delivery or for the draft's retry id. */
-  | { type: "DELIVERY_STATUS"; runId: RunId; intentId: string; operationId: OperationId; status: "delivered" | "dropped" | "unknown"; turnEnded?: boolean }
+  | { type: "DELIVERY_ACK"; runId: RunId; intentId: string; operationId: OperationId; attemptId: string; queued?: boolean; failed?: boolean; /** zeta did no work for this id, so a retry needs a new one. */ refused?: boolean; /** Nothing left gamma: the draft's retry id stays as it was. */ blocked?: boolean }
+  /**
+   * zeta's `delivery_status` answer for a delivery or for the draft's retry id. The reply has no drop reason
+   * (zeta delivery.py:348-368); `reason` is the one zeta's live delivery_status event gave for this delivery, if this view saw it.
+   */
+  | { type: "DELIVERY_STATUS"; runId: RunId; intentId: string; operationId: OperationId; status: "delivered" | "dropped" | "unknown"; reason?: string }
   | { type: "DELIVERY_SETTLE"; runId: RunId; intentId: string; accepted: boolean }
   | { type: "DELIVERY_RESEND"; runId: RunId; intentId: string };
 
@@ -128,7 +134,7 @@ const statusOf = (state: WorkspaceState, record: RunRecord, event: Extract<Deliv
   if (event.status === "delivered") { deliveries.delete(event.intentId); return { ...consumeDelivered(record, delivery), deliveries, retryDelivery: undefined }; }
   if (delivery.method === "opaque") { deliveries.delete(event.intentId); return { ...record, text: restoreText(record.text, delivery.text), deliveries }; }
   if (event.status === "dropped") {
-    const auto = decideSend(state, record.id, { kind: "auto", intentId: event.intentId, turnEnded: event.turnEnded === true });
+    const auto = decideSend(state, record.id, { kind: "auto", intentId: event.intentId, reason: event.reason });
     if (!auto.blocked) {
       const operationId = newOperation();
       effects.push({ type: "deliver", runId: record.id, operationId, intentId: event.intentId });
@@ -158,6 +164,11 @@ export function reduceDelivery(state: WorkspaceState, record: RunRecord, event: 
       return delivery && event.accepted ? { ...consumeDelivered(record, delivery), deliveries } : { ...record, deliveries };
     case "DELIVERY_ACK": {
       if (delivery?.operationId !== event.operationId) return record;
+      // A blocked attempt never reached zeta: the row or the draft goes back as it was, and an inherited retry id stays.
+      if (event.blocked) {
+        if (delivery.resent) deliveries.set(event.intentId, { ...delivery, state: "dropped", why: delivery.why ?? "dropped" }); else deliveries.delete(event.intentId);
+        return { ...record, deliveries };
+      }
       if (!event.failed) {
         if (event.queued) deliveries.set(event.intentId, { ...delivery, attemptId: event.attemptId, state: "queued", spent: undefined, why: undefined }); else deliveries.delete(event.intentId);
         return { ...consumeDelivered(record, delivery), deliveries, retryDelivery: undefined };
