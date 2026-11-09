@@ -51,12 +51,19 @@ async function withApp(appPort: number, run: () => Promise<void>) {
 
 const failures: string[] = [];
 let passed = 0;
+class CheckTimedOut extends Error {}
+const checkFilter = process.env.A11Y_GATE_CHECKS ? new RegExp(process.env.A11Y_GATE_CHECKS) : null;
 async function check(name: string, run: () => Promise<void>) {
+  if (checkFilter && !checkFilter.test(name)) return;
   let timer: ReturnType<typeof setTimeout> | undefined;
   // A hung browser call must fail under this check's name, not stall the whole gate without output.
-  const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("did not finish within 120 s")), 120_000); });
+  const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new CheckTimedOut("did not finish within 120 s")), 120_000); });
   try { await Promise.race([run(), deadline]); passed++; console.log(`ok   ${name}`); }
-  catch (error) { failures.push(`${name}: ${error instanceof Error ? error.message : String(error)}`); console.log(`FAIL ${name}: ${error instanceof Error ? error.message : String(error)}`); }
+  catch (error) {
+    failures.push(`${name}: ${error instanceof Error ? error.message : String(error)}`); console.log(`FAIL ${name}: ${error instanceof Error ? error.message : String(error)}`);
+    // The timed-out run is still driving the page; end the journey so closing its browser stops it before another check starts.
+    if (error instanceof CheckTimedOut) throw error;
+  }
   finally { clearTimeout(timer); }
 }
 const expect = (condition: unknown, message: string) => { if (!condition) throw new Error(message); };
@@ -170,6 +177,19 @@ async function commandListbox(page: Page, name: string) {
     expect(await listbox.count() === 0 && await input.getAttribute("aria-expanded") === "false", "escape did not collapse the combobox");
     await input.fill("");
   });
+  await check(`${name}: Escape on the /status result dismisses it and returns focus to the composer`, async () => {
+    const input = field(page);
+    await input.fill("/status");
+    await input.press("Escape");
+    await input.press("Enter");
+    const result = page.getByRole("status", { name: "command result", exact: true });
+    await result.waitFor({ timeout: 10_000 });
+    await result.focus();
+    await page.keyboard.press("Escape");
+    await result.waitFor({ state: "detached", timeout: 5_000 }).catch(() => { throw new Error("Escape on the focused /status result did not dismiss it"); });
+    await page.waitForFunction(() => document.activeElement?.matches('textarea[aria-label="message"]'), undefined, { timeout: 5_000 })
+      .catch(async () => { throw new Error(`focus after dismissing the result is on ${await focused(page)}`); });
+  });
 }
 
 async function popovers(page: Page, name: string) {
@@ -186,9 +206,13 @@ async function popovers(page: Page, name: string) {
         .catch(async () => { throw new Error(`opening did not move focus inside: ${await focused(page)}`); });
       for (let index = 0; index < 12; index++) {
         await page.keyboard.press(webkitTab(name, "Tab"));
-        const inside = await popover.evaluate((node) => node.contains(document.activeElement)).catch(() => false);
+        // Read focus from the document: a locator read waits up to 30 s for a popover that Tab already closed.
+        const inside = await page.evaluate((label) => document.querySelector(`[role="dialog"][aria-label="${label}"]`)?.contains(document.activeElement) ?? false, dialog);
         // A popover may let Tab leave, but then it must close: an open popover must never sit over the focused control.
-        if (!inside) { expect(await popover.count() === 0, `Tab left the open popover for ${await focused(page)}, and it stayed open`); break; }
+        if (!inside) {
+          await popover.waitFor({ state: "detached", timeout: 5_000 }).catch(async () => { throw new Error(`Tab left the open popover for ${await focused(page)}, and it stayed open`); });
+          break;
+        }
       }
       if (!await popover.count()) { await button.focus(); await page.keyboard.press("Enter"); await popover.waitFor(); }
       await page.keyboard.press("Escape");
@@ -308,13 +332,22 @@ async function journey(browserType: BrowserType, name: string) {
   let finished = false;
   const crashed = new Promise<never>((_, reject) => browser.on("disconnected", () => { if (!finished) reject(new Error(`${name} browser process exited mid-journey`)); }));
   try { await Promise.race([sections(browser, name), crashed]); }
+  catch (error) {
+    const message = `${name} journey stopped, its remaining checks did not run: ${error instanceof Error ? error.message : String(error)}`;
+    failures.push(message); console.log(`FAIL ${message}`);
+  }
   finally { finished = true; await browser.close(); }
 }
 
 async function sections(browser: Browser, name: string) {
   const page = await browser.newPage();
-  // WebKit reports a poll that a navigation cancels as "... due to access control checks"; host-client catches that rejection.
-  page.on("pageerror", (error) => { if (!/due to access control checks/.test(error.message)) failures.push(`${name} page error: ${error.message}`); });
+  // WebKit reports the artifact poll (src/host-client.ts useArtifacts) that a navigation cancels as "... due to access control checks".
+  // Only that URL is ignored, and each ignored report is logged, so a real cross-origin failure anywhere else still fails the gate.
+  const cancelledPoll = new RegExp(`^(?:TypeError: )?Fetch API cannot load ${origin.replaceAll(".", "\\.")}/__gamma/sessions/[^/\\s]+/artifacts due to access control checks\\.$`);
+  page.on("pageerror", (error) => {
+    if (cancelledPoll.test(error.message)) console.log(`ignored ${name} cancelled artifact poll: ${error.message}`);
+    else failures.push(`${name} page error: ${error.message}`);
+  });
   await namesAndApproval(page, name, 1440, 900);
   await namesAndApproval(page, name, 390, 844);
   await disabledReason(page, name);
@@ -336,5 +369,7 @@ try {
   await rm(gammaHome, { recursive: true, force: true });
 }
 console.log(`a11y artifacts: ${artifacts}`);
+// A filter that matched nothing (a typo, a stale shell export) must fail, not report an empty pass.
+if (checkFilter && passed + failures.length === 0) failures.push(`A11Y_GATE_CHECKS=${process.env.A11Y_GATE_CHECKS} matched no check`);
 if (failures.length) { console.error(failures.join("\n")); process.exit(1); }
-console.log(`a11y gate passed: ${passed} checks`);
+console.log(`a11y gate passed: ${passed} checks${checkFilter ? ` (filtered by A11Y_GATE_CHECKS=${process.env.A11Y_GATE_CHECKS}; not a full run)` : ""}`);

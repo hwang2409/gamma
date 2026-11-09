@@ -156,6 +156,7 @@ try {
     try {
       const view = await smoke.newPage({ viewport: { width: 1440, height: 900 } });
       view.on("websocket", (socket) => socket.on("framesent", (event) => frames.push(String(event.payload))));
+      view.on("pageerror", (error) => errors.push(`${name}: ${error.message}`));
       await view.goto(`${origin}/?run=${created.session.session_id}`);
       const input = view.getByRole("combobox", { name: "message" });
       await input.waitFor({ timeout: 20_000 });
