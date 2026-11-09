@@ -43,11 +43,11 @@ test("fake reconnect history keeps the accepted steer and its terminal delivery 
   let active = false;
   const fake = composerMethods(async () => {}, { get: () => active, set: (value) => { active = value; } });
   const before = fake.history.length;
-  fake.handle("send", { text: "start", delivery_id: "fake-send" }, "s-reconnect", () => {});
+  fake.handle("send", { text: "start", delivery_id: "fake-send" }, "s-reconnect", () => {}, ["delivery_id"]);
   await Promise.resolve();
   active = true;
-  fake.handle("steer", { text: "drop me", delivery_id: "fake-steer" }, "s-reconnect", () => {});
-  fake.handle("abort", {}, "s-reconnect", () => {});
+  fake.handle("steer", { text: "drop me", delivery_id: "fake-steer" }, "s-reconnect", () => {}, ["delivery_id"]);
+  fake.handle("abort", {}, "s-reconnect", () => {}, ["delivery_id"]);
   const rows = fake.history.slice(before);
   expect(rows.some((row) => JSON.stringify(row).includes("drop me"))).toBe(true);
   const adapted = fromZetaHistory(rows);
