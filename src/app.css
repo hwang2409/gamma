@@ -272,11 +272,13 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .permission-grants ul { display: grid; gap: 4px; margin: 10px 0 0; padding: 0; list-style: none; }
 .permission-grant { display: flex; min-height: 40px; align-items: center; justify-content: space-between; gap: 12px; padding-left: 10px; background: var(--fulcrum-surface); box-shadow: inset var(--rail) 0 var(--fulcrum-accent); }
 .permission-grant code { min-width: 0; overflow-wrap: anywhere; }
-.dock .permission-grant .ghost { flex: none; min-width: 64px; min-height: 40px; }
+/* fulcrum's composer buttons are filled (bg text on the action color); revoke is an outline, so its text is fg. */
+.dock .permission-grant .ghost { flex: none; min-width: 64px; min-height: 40px; color: var(--fulcrum-fg); }
 .permissions-empty { margin-top: 10px !important; color: var(--fulcrum-muted); font-size: 12px; }
 .permissions-note { margin-top: 12px !important; color: var(--fulcrum-muted); font-size: 11px; line-height: 1.45; text-wrap: pretty; }
 .dock .permissions-clear { min-height: 40px; margin-top: 12px; padding-inline: 12px; background: transparent; color: var(--fulcrum-fg); }
-.dock .permissions-clear.confirm { border-color: var(--fulcrum-danger); font-weight: 700; }
+/* The second press clears every grant: a danger border marks it; the word stays fg. */
+.dock .permissions-clear.confirm { border: 1px solid var(--fulcrum-danger); font-weight: 700; }
 .effective-rules dl { display: grid; gap: 7px; margin: 10px 0 0; }
 .permission-rule { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px; font-size: 11px; line-height: 1.45; }
 .permission-rule dt { color: var(--fulcrum-muted); }
