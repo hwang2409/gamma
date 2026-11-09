@@ -7,11 +7,12 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { chromium, type Browser } from "playwright";
+import { chromium, webkit, type Browser, type BrowserType } from "playwright";
 import { themes } from "@fulcrum/react";
 import { createClient, webSocketTransport } from "@fulcrum/zeta";
 import { OwnedResources } from "./owned-resources";
 import { assertPrivateProofHome } from "./proof-home";
+import { glyphNames, unnamed } from "./a11y-names";
 
 const gamma = new URL("..", import.meta.url).pathname;
 const zeta = "/Users/henry/me/fun/zeta";
@@ -148,10 +149,41 @@ try {
   if (await page.evaluate(() => document.documentElement.dataset.fulcrumTheme) !== next) throw new Error(`/theme ${next} did not change the theme`);
   await dismiss();
 
+  // Accessibility smoke on the real handshake: names and focus survive it, and /status is a named, dismissible status.
+  await page.close();
+  const a11ySmoke = async (type: BrowserType, name: string) => {
+    const smoke = await type.launch({ headless: true });
+    try {
+      const view = await smoke.newPage({ viewport: { width: 1440, height: 900 } });
+      view.on("websocket", (socket) => socket.on("framesent", (event) => frames.push(String(event.payload))));
+      await view.goto(`${origin}/?run=${created.session.session_id}`);
+      const input = view.getByRole("combobox", { name: "message" });
+      await input.waitFor({ timeout: 20_000 });
+      await view.locator(".permissions-trigger").waitFor({ timeout: 10_000 });
+      await view.waitForFunction(() => document.activeElement?.matches('textarea[aria-label="message"]'), undefined, { timeout: 10_000 })
+        .catch(() => { throw new Error(`${name}: the composer lost focus through the real handshake`); });
+      const snapshot = await view.locator("body").ariaSnapshot();
+      const bad = [...unnamed(snapshot), ...glyphNames(snapshot)];
+      if (bad.length) throw new Error(`${name}: controls without a clean accessible name on real zeta: ${bad.join(" | ")}`);
+      await input.fill("/status");
+      await input.press("Escape");
+      await input.press("Enter");
+      const result = view.getByRole("status", { name: "command result", exact: true });
+      await result.waitFor({ timeout: 30_000 });
+      if (!(await result.innerText()).trim()) throw new Error(`${name}: /status showed an empty status`);
+      await result.focus();
+      await view.keyboard.press("Escape");
+      await result.waitFor({ state: "detached", timeout: 5_000 });
+      if (!await input.evaluate((node) => node === document.activeElement)) throw new Error(`${name}: Escape on the /status result did not return focus to the composer`);
+    } finally { await smoke.close(); }
+  };
+  await a11ySmoke(chromium, "chromium");
+  await a11ySmoke(webkit, "webkit");
+
   const sends = frames.map(parse).filter((frame) => frame?.method === "send" || frame?.method === "send_images" || frame?.method === "steer");
   if (sends.length) throw new Error(`a slash draft reached the model: ${JSON.stringify(sends)}`);
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
-  console.log(`real zeta compat passed: ${ref}; private home ${zetaHome}; protocol ${hello?.protocol_version}; ${runnable} runnable rows all in the menu; row fields ${fields.join(",")}; /status, unknown, /keys, /theme local; 0 sends`);
+  console.log(`real zeta compat passed: ${ref}; private home ${zetaHome}; protocol ${hello?.protocol_version}; ${runnable} runnable rows all in the menu; row fields ${fields.join(",")}; /status, unknown, /keys, /theme local; a11y smoke in chromium and webkit; 0 sends`);
 } finally {
   await browser?.close().catch(() => {});
   await resources.cleanup(
