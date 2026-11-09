@@ -369,5 +369,7 @@ try {
   await rm(gammaHome, { recursive: true, force: true });
 }
 console.log(`a11y artifacts: ${artifacts}`);
+// A filter that matched nothing (a typo, a stale shell export) must fail, not report an empty pass.
+if (checkFilter && passed + failures.length === 0) failures.push(`A11Y_GATE_CHECKS=${process.env.A11Y_GATE_CHECKS} matched no check`);
 if (failures.length) { console.error(failures.join("\n")); process.exit(1); }
-console.log(`a11y gate passed: ${passed} checks`);
+console.log(`a11y gate passed: ${passed} checks${checkFilter ? ` (filtered by A11Y_GATE_CHECKS=${process.env.A11Y_GATE_CHECKS}; not a full run)` : ""}`);
