@@ -509,6 +509,9 @@ const table: Row[] = [
       await new Promise((resolve) => setTimeout(resolve, 200)); // the user presses back 200 ms later
       page1.dispose(); // a full page navigation: zeta still takes the send, its reply reaches no page
       send.release(); await waitFor(() => page1.zeta.turns.length === 1, 2_000);
+      // Back loads B's page in the same tab; its store saves its own state into the shared sessionStorage.
+      const back = await world({ selected: "b", zeta: page1.zeta, tab });
+      back.start(); await back.live("b"); back.dispose();
       const page2 = await world({ selected: "a", zeta: page1.zeta, tab });
       try {
         page2.start(); await page2.live("a");

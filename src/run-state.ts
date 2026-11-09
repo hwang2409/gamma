@@ -353,14 +353,45 @@ export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefi
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
   let executeEffects: (effects: readonly WorkspaceEffect[]) => void = () => {};
   const emit = () => listeners.forEach((listener) => listener());
-  const persistDeliveries = () => { try { draftStorage?.setItem(DELIVERIES_KEY, JSON.stringify(Object.fromEntries([...state.runs].flatMap(([id, record]) => { const textOnly = [...record.deliveries.values()].filter((delivery) => delivery.method !== "send_images").map(({ images: _, ...delivery }) => delivery); return textOnly.length ? [[id, textOnly]] : []; })))); draftStorage?.setItem(RETRY_KEY, JSON.stringify(Object.fromEntries([...state.runs].flatMap(([id, record]) => record.retryDelivery ? [[id, record.retryDelivery]] : [])))); } catch {} };
+  // The tab's sessionStorage is shared by every page this tab loads: keep the entries of runs this page never loaded.
+  const persistDeliveries = () => {
+    for (const [id, record] of state.runs) {
+      const textOnly = [...record.deliveries.values()].filter((delivery) => delivery.method !== "send_images").map(({ images: _, ...delivery }) => delivery);
+      if (textOnly.length) persistedDeliveries[id] = textOnly; else delete persistedDeliveries[id];
+      if (record.retryDelivery) persistedRetries[id] = record.retryDelivery; else delete persistedRetries[id];
+    }
+    try { draftStorage?.setItem(DELIVERIES_KEY, JSON.stringify(persistedDeliveries)); draftStorage?.setItem(RETRY_KEY, JSON.stringify(persistedRetries)); } catch {}
+  };
   let disposed = false;
   // A late reply after dispose (the page is gone) must not rewrite the tab's saved drafts and deliveries.
-  const dispatch = (event: WorkspaceEvent, notify = true) => { if (disposed) return; const result = reduceWorkspace(state, event); state = result.state; persistDeliveries(); // A message zeta took leaves the saved draft now, not after the debounce: a page left in between must not bring it back.
-    if ((event.type === "DELIVERY_ACK" && !event.failed) || event.type === "DELIVERY_STATUS") { queueDraft(event.runId, state.runs.get(canonical(state, event.runId))?.text ?? ""); if (persistTimer) { clearTimeout(persistTimer); persistDrafts(); } } executeEffects(result.effects); if (notify) emit(); };
+  const dispatch = (event: WorkspaceEvent, notify = true) => {
+    if (disposed) return;
+    const result = reduceWorkspace(state, event);
+    state = hydrate(state, result.state);
+    persistDeliveries();
+    // A message zeta took leaves the saved draft now, not after the debounce: a page left in between must not bring it back.
+    if ((event.type === "DELIVERY_ACK" && !event.failed) || event.type === "DELIVERY_STATUS") { queueDraft(event.runId, state.runs.get(canonical(state, event.runId))?.text ?? ""); if (persistTimer) { clearTimeout(persistTimer); persistDrafts(); } }
+    executeEffects(result.effects);
+    if (notify) emit();
+  };
   const key = (id: string) => canonical(state, id as RunId);
   const restoredDeliveries = (id: string) => new Map((persistedDeliveries[id] ?? []).flatMap((delivery) => delivery?.id && delivery.text && delivery.operationId && delivery.attemptId ? [[delivery.id, { ...delivery, images: [], state: delivery.state === "requesting" ? "queued" : delivery.state } as PendingDelivery]] : []));
-  const value = (id: string): RunRecord => { const target = key(id); let current = state.runs.get(target); if (!current) { dispatch({ type: "ENSURE_RUN", runId: target, text: drafts[target] }, false); current = state.runs.get(target)!; const deliveries = restoredDeliveries(target); const retryDelivery = persistedRetries[target]; if (deliveries.size || retryDelivery) { const runs = new Map(state.runs); current = { ...current, deliveries, ...(retryDelivery?.id && retryDelivery.key ? { retryDelivery } : {}) }; runs.set(target, current); state = { ...state, runs }; } } return current; };
+  /** A run this page has not held yet takes the tab's saved draft, deliveries, and retry id, whichever event created it. */
+  const hydrate = (previous: WorkspaceState, next: WorkspaceState) => {
+    let runs: Map<RunId, RunRecord> | undefined;
+    for (const [id, record] of next.runs) {
+      if (previous.runs.has(id)) continue;
+      const restored = record.deliveries.size ? record.deliveries : restoredDeliveries(id);
+      const deliveries = restored.size ? restored : record.deliveries;
+      const retry = persistedRetries[id];
+      const retryDelivery = record.retryDelivery ?? (retry?.id && retry.key ? retry : undefined);
+      const text = record.text || drafts[id] || "";
+      if (deliveries === record.deliveries && retryDelivery === record.retryDelivery && text === record.text) continue;
+      (runs ??= new Map(next.runs)).set(id, { ...record, text, deliveries, retryDelivery });
+    }
+    return runs ? { ...next, runs } : next;
+  };
+  const value = (id: string): RunRecord => { const target = key(id); if (!state.runs.has(target)) dispatch({ type: "ENSURE_RUN", runId: target }, false); return state.runs.get(target)!; };
   const revoke = (images: readonly QueuedImage[]) => images.forEach((image) => URL.revokeObjectURL(image.url));
   const dirty = (record: RunRecord) => Boolean(record.text || record.attachments.length || record.deliveries.size || record.lifecycle.kind === "creating");
   const evict = () => { const clean = [...state.runs].filter(([id, record]) => id !== active && !dirty(record)); const evicted: RunId[] = []; while (clean.length > cleanLimit) { const [id, record] = clean.shift()!; revoke(record.attachments); evicted.push(id); } if (evicted.length) dispatch({ type: "EVICT", runIds: evicted }, false); };
