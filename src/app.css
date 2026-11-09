@@ -296,7 +296,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .settings-error { padding-left: 15px; }
 .settings-blocked { font-size: 12px; color: var(--fulcrum-muted); }
 /* An error or a note the user must read wraps whole (no clamp, no tooltip); a note is static, so it does not pulse. */
-.dock [data-part="composer-status"]:is([data-tone="danger"], [data-tone="note"]) { display: block; flex-basis: 100%; height: auto; white-space: normal; -webkit-line-clamp: unset; }
+.dock [data-part="composer-status"]:is([data-tone="danger"], [data-tone="note"]) { display: block; flex-basis: 100%; height: auto; padding-left: 15px; text-indent: -15px; white-space: normal; -webkit-line-clamp: unset; }
 .dock [data-part="composer-status"][data-tone="note"] { color: var(--fulcrum-accent); }
 .dock [data-part="composer-message"] { overflow-wrap: anywhere; white-space: normal; }
 

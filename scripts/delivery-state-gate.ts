@@ -66,6 +66,13 @@ try {
         const owner = page.url(); await page.getByRole("button", { name: "stop the running turn" }).click();
         await page.locator('.undelivered[role="note"]').waitFor({ timeout: 10_000 });
         await page.locator('.status-line[data-state="ready"]').waitFor({ timeout: 10_000 });
+        // A resend that wraps under the note lines up with the note's words, not at an odd indent.
+        const edges = await page.locator('.undelivered[role="note"]').first().evaluate((row) => {
+          const range = document.createRange(); range.selectNodeContents(row.firstChild!);
+          const words = range.getClientRects()[0]!; const button = row.querySelector("button")!.getBoundingClientRect();
+          return { words: words.left, wordsTop: words.top, button: button.left, buttonTop: button.top };
+        });
+        if (edges.buttonTop > edges.wordsTop + 4 && Math.abs(edges.button - edges.words) > 0.5) throw new Error(`the wrapped resend sits at ${edges.button}px, the note's words at ${edges.words}px`);
         if (await page.locator('[data-part="composer-message"]', { hasText: "sending" }).count()) throw new Error(`idle composer still said sending at ${width}`);
         await page.getByRole("button", { name: "new run" }).click(); await page.goBack(); await page.waitForURL(owner);
         await page.reload(); await ready(page); await page.locator('.undelivered[role="note"]').waitFor({ timeout: 10_000 });
@@ -100,6 +107,49 @@ try {
         if (order.indexOf("queued delayed retry") > order.indexOf("second after retry")) throw new Error(`second submit was out of order: ${JSON.stringify(order)}`);
       } finally { await cleanup(context, page); }
     });
+    // A session_mismatch note is static and whole at every width: no pulse, no clipped half, and no retry.
+    for (const width of [1440, 390]) await check(`mismatch-note-is-whole-and-static-${width}`, async () => {
+      const { context, page } = await fresh(browser, width);
+      try {
+        await page.goto(`${origin}/?run=s-docs`); await ready(page);
+        await page.locator('.status-line[data-state="ready"]').waitFor({ timeout: 15_000 });
+        fake.attachQuietly("s-markdown"); // zeta attached another run; gamma has not heard yet
+        const text = `mismatch note ${width}`;
+        const field = page.locator('.dock textarea[aria-label="message"]');
+        await field.fill(text); await field.press("Enter");
+        const message = page.locator('[data-part="composer-message"]', { hasText: "nothing was sent" });
+        await message.waitFor({ timeout: 10_000 });
+        await Bun.sleep(1_000);
+        await page.screenshot({ path: join(shots, `mismatch-note-${width}.png`) });
+        const status = await page.locator('[data-part="composer-status"]').evaluate((node) => ({ tone: node.getAttribute("data-tone"), clipped: node.scrollWidth > node.clientWidth + 1 || node.scrollHeight > node.clientHeight + 1, pulse: getComputedStyle(node.querySelector('[data-part="composer-message"]')!, "::before").animationName }));
+        const attempts = fake.requests.filter((request) => request.method === "send" && request.params.text === text).length;
+        if (await field.inputValue() !== text) throw new Error(`the refused message is not back in the draft: ${JSON.stringify(await field.inputValue())}`);
+        if (attempts !== 1) throw new Error(`a session_mismatch sent ${attempts} requests; only the user's Enter may send`);
+        if (status.clipped) throw new Error(`the note is clipped at ${width}: ${JSON.stringify(await message.innerText())}`);
+        if (status.tone === "busy" || status.pulse !== "none") throw new Error(`a static note pulses like work in progress (tone ${status.tone}, animation ${status.pulse})`);
+      } finally { await cleanup(context, page); }
+    });
+    // A session_mismatch on a resend click: the row keeps its reason and says why; the composer keeps its hint; one request.
+    await check("mismatch-resend-says-why-on-its-row-390", async () => {
+      const { context, page } = await fresh(browser, 390);
+      try {
+        await startQueued(page, "mismatch resend");
+        await page.getByRole("button", { name: "stop the running turn" }).click();
+        const row = page.locator('.undelivered[role="note"]');
+        await row.waitFor({ timeout: 10_000 });
+        await page.locator('.status-line[data-state="ready"]').waitFor({ timeout: 10_000 });
+        fake.attachQuietly("s-markdown");
+        await row.getByRole("button", { name: "resend" }).click();
+        await row.getByText("reopen this run and resend").waitFor({ timeout: 10_000 });
+        await Bun.sleep(1_000);
+        await page.screenshot({ path: join(shots, "mismatch-resend-row-390.png") });
+        const attempts = fake.requests.filter((request) => request.method === "send" && request.params.text === "queued mismatch resend").length;
+        if (attempts !== 1) throw new Error(`the resend sent ${attempts} requests`);
+        if (!(await row.innerText()).includes("the stop ended the turn")) throw new Error(`the row lost its reason: ${JSON.stringify(await row.innerText())}`);
+        const note = await page.locator('[data-part="composer-message"]').innerText();
+        if (note) throw new Error(`the composer shows a note for a message that is not in the draft: ${JSON.stringify(note)}`);
+      } finally { await cleanup(context, page); }
+    });
     // A lost reply is a wait, not an error (quiet tone, no raw close code), and it never ends in two turns.
     await check("lost-send-reply-is-a-quiet-wait-and-never-runs-twice", async () => {
       const { context, page } = await fresh(browser, 1440);
@@ -127,6 +177,40 @@ try {
       } finally { await cleanup(context, page); }
     });
   } finally { await browser.close(); }
+  // B-1: a page back from the bfcache keeps its memory but is a new page life; it never resends a steer by itself.
+  // Playwright launches chromium with --disable-back-forward-cache; the full chromium build without that flag restores
+  // pages for real (pageshow.persisted). The check fails when no restore happens, so it can never pass without proof.
+  await check("queued-steer-not-resent-after-bfcache-restore", async () => {
+    const restoring = await chromium.launch({ channel: "chromium", ignoreDefaultArgs: ["--disable-back-forward-cache"] });
+    try {
+      const context = await restoring.newContext({ viewport: { width: 1440, height: 900 } });
+      await context.addInitScript(() => addEventListener("pageshow", (event) => { if (event.persisted) (window as Window & { __restored?: number }).__restored = ((window as Window & { __restored?: number }).__restored ?? 0) + 1; }));
+      const page = await context.newPage();
+      // The page's socket closes when it enters the bfcache. zeta notices that only when the restored page connects again
+      // (a half-open connection), so the turn ends naturally (a turn_end drop, the one case gamma may resend by itself).
+      fake.setLateClose(true);
+      try {
+        await page.goto(origin); await ready(page);
+        await startQueued(page, "bfcache");
+        const owner = page.url();
+        await page.goto("data:text/html,<title>away</title>away"); // a real navigation to another document
+        for (let attempt = 0; attempt < 100 && fake.running; attempt++) await Bun.sleep(100); // the turn ends while the page is away
+        if (fake.running) throw new Error("the turn did not end while the page was away");
+        // A bfcache restore fires no load event, so the navigation is done at commit.
+        await page.goBack({ waitUntil: "commit" }); await page.waitForURL(owner, { waitUntil: "commit" }); await ready(page);
+        const restored = await page.evaluate(() => (window as Window & { __restored?: number }).__restored ?? 0);
+        if (!restored) throw new Error("chromium loaded the page again instead of restoring it from the bfcache (pageshow.persisted never true), so this check proves nothing");
+        // The restored page reconnects, reopens the run, and learns the drop reason (turn_end): it shows the row, or resends.
+        const resent = () => fake.sent.some((item) => item.method === "send" && item.text === "queued bfcache");
+        const row = page.locator('.undelivered[role="note"]');
+        for (let attempt = 0; attempt < 100 && !resent() && !(await row.count()); attempt++) await Bun.sleep(200);
+        await Bun.sleep(2_000);
+        if (resent()) throw new Error("the page back from the bfcache resent the steer without the user");
+        await row.waitFor({ timeout: 1_000 });
+        await page.getByRole("button", { name: "resend" }).click(); await waitForSent("queued bfcache");
+      } finally { fake.setLateClose(false); await cleanup(context, page); }
+    } finally { await restoring.close(); }
+  });
   // M1: a full page back then forward (real navigations, not pushState) must not bring a delivered send back as a
   // draft. CI installs only chromium; on macOS webkit runs too.
   for (const [name, type] of [["chromium", chromium], ...(process.platform === "darwin" ? [["webkit", webkit] as const] : [])] as const) {
@@ -195,26 +279,9 @@ try {
           if (JSON.stringify(landed) !== JSON.stringify(["s-docs"])) throw new Error(`the message landed in ${JSON.stringify(landed)}`);
         } finally { await cleanup(context, page); }
       });
-      // B-1: a page back from the bfcache keeps its memory but is a new page life; it never resends a steer by itself.
-      // Playwright's chromium disables the bfcache, so only webkit (macOS; CI has no webkit) reaches pageshow.persisted.
-      if (name === "webkit") await check("queued-steer-not-resent-after-bfcache-back-webkit", async () => {
-        const context = await other.newContext({ viewport: { width: 1440, height: 900 } });
-        await context.addInitScript(() => addEventListener("pageshow", (event) => { if (event.persisted) (window as Window & { __restored?: number }).__restored = ((window as Window & { __restored?: number }).__restored ?? 0) + 1; }));
-        const page = await context.newPage();
-        try {
-          await page.goto(origin); await ready(page);
-          await startQueued(page, "bfcache");
-          const owner = page.url();
-          await page.goto(`${origin}/?run=s-markdown`); await ready(page); // a real navigation away
-          await page.goBack(); await page.waitForURL(owner);
-          const restored = await page.evaluate(() => (window as Window & { __restored?: number }).__restored ?? 0);
-          if (!restored) console.log("NOTE queued-steer-not-resent-after-bfcache-back-webkit: webkit loaded the page again instead of restoring it from the bfcache");
-          await page.locator('.undelivered[role="note"]').waitFor({ timeout: 20_000 }); // the turn ended naturally and dropped the steer
-          await Bun.sleep(1_500);
-          if (fake.sent.some((item) => item.method === "send" && item.text === "queued bfcache")) throw new Error(`the page back from the bfcache (restored=${restored}) resent the steer without the user`);
-          await page.getByRole("button", { name: "resend" }).click(); await waitForSent("queued bfcache");
-        } finally { await cleanup(context, page); }
-      });
+      // Playwright webkit never restores a page from the bfcache (pageshow.persisted is never true, even for a static page),
+      // so a webkit run of the B-1 check could only pass without proving anything: it is excluded by name, out loud.
+      if (name === "webkit") console.log("SKIP queued-steer-not-resent-after-bfcache-restore-webkit: Playwright webkit never restores pages from the bfcache; the chromium check proves B-1");
     } finally { await other.close(); }
   }
 } finally {

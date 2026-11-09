@@ -514,6 +514,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     serialTail = next.catch(() => undefined);
     return next;
   };
+  let lateClose = false;
+  const lateClosed: Array<ServerWebSocket<SocketData>> = [];
   const releaseController = (socket: ServerWebSocket<SocketData>) => {
     if (controller !== socket) return;
     controller = null;
@@ -545,10 +547,10 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
       return bun.upgrade(request, { data: { role }, headers: { "Sec-WebSocket-Protocol": "zeta.v1" } }) ? undefined : new Response("upgrade required", { status: 426 });
     },
     websocket: {
-      open(socket) { sockets.add(socket); },
+      open(socket) { sockets.add(socket); for (const late of lateClosed.splice(0)) releaseController(late); },
       close(socket) {
         sockets.delete(socket);
-        releaseController(socket);
+        if (lateClose) lateClosed.push(socket); else releaseController(socket);
       },
       message(socket, raw) {
         const received = performance.now();
@@ -850,6 +852,10 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
       liveEnabled = next;
     },
     /** `true`: a fresh zeta home, with no sessions and no server session. `false`: the seeded sessions again. */
+    /** Attaches `sessionId` without telling any client, like another client's resume behind gamma's back. */
+    attachQuietly(sessionId: string) { active = sessionId; },
+    /** `true`: a closed socket is noticed only when the next one opens (a half-open connection), so a running turn ends naturally. */
+    setLateClose(value: boolean) { lateClose = value; },
     setEmpty(empty: boolean) { sessions = empty ? [] : [...seeded]; active = empty ? null : ACTIVE; },
     async close() { this.drop(); server.stop(true); await rm(home, { recursive: true, force: true }); },
   };
