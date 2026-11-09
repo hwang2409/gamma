@@ -130,6 +130,9 @@ button:active:not(:disabled) { transform: scale(0.97); }
 /* The square sits under the row's rail; the words keep the 14 px indent. */
 .undelivered { margin: 4px 0 0; padding-left: 14px; color: var(--fulcrum-fg); font-size: 12px; font-weight: 700; text-indent: -14px; }
 .undelivered::before { margin-right: 7px; }
+/* The resend's own result and its button sit under the note's words, on the same 14 px indent. */
+.undelivered > .resend-failure { display: block; font-weight: 400; text-indent: 0; }
+.undelivered > .ghost { text-indent: 0; }
 .undelivered[data-empty] { display: none; }
 .queued-delivery { margin: 4px 0 0; padding-left: 14px; color: var(--fulcrum-muted); font-size: 12px; font-weight: 700; }
 
@@ -292,7 +295,9 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .model-deferred { position: absolute; right: var(--inset); bottom: calc(100% + 6px); z-index: 2; padding: 4px 7px; border: 1px solid var(--fulcrum-border); background: var(--fulcrum-bg); color: var(--fulcrum-muted); }
 .settings-error { padding-left: 15px; }
 .settings-blocked { font-size: 12px; color: var(--fulcrum-muted); }
-.dock [data-part="composer-status"][data-tone="danger"] { flex-basis: 100%; height: auto; white-space: normal; }
+/* An error or a note the user must read wraps whole (no clamp, no tooltip); a note is static, so it does not pulse. */
+.dock [data-part="composer-status"]:is([data-tone="danger"], [data-tone="note"]) { display: block; flex-basis: 100%; height: auto; white-space: normal; -webkit-line-clamp: unset; }
+.dock [data-part="composer-status"][data-tone="note"] { color: var(--fulcrum-accent); }
 .dock [data-part="composer-message"] { overflow-wrap: anywhere; white-space: normal; }
 
 /* A run with no messages: a short note on the transcript's measure. */
@@ -348,6 +353,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
   .inspector-backdrop { padding: 0; }
   .artifacts { padding-inline-start: 8px; }
   .undelivered:not([data-empty]) { min-height: 3.2em; }
+  .undelivered > .ghost { display: flex; width: fit-content; margin-top: 4px; }
   .new-run-label { display: none; }
   .new-run-short { display: inline; font-size: 18px; }
 }

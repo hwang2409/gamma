@@ -7,6 +7,7 @@ import { catalogModels, catalogProviders, settingModel } from "./settings";
 const TURN_RUNNING = -32004;
 const NO_TURN = -32005;
 const DETAILS_EVICTED = -32010;
+const INTERNAL = -32603;
 const code = (error: unknown) => (error as { code?: unknown } | null)?.code;
 
 type Accepted = { accepted?: boolean; status?: string };
@@ -141,6 +142,8 @@ function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: Del
       runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, queued: Boolean(delivery.attemptId) });
       return finish(effect.operationId);
     } catch (error) {
+      // session_mismatch: zeta recorded nothing; the draft and its id stay in this run with the note, and nothing is retried.
+      if (sessionMismatch(error)) { runs.restoreDraft(effect.runId, delivery.text); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, failed: true, blocked: true, note: MISMATCH }); return finish(effect.operationId, new Error(MISMATCH)); }
       const uncertain = typeof code(error) !== "number";
       if (!uncertain || !delivery.attemptId) runs.restoreDraft(effect.runId, delivery.text);
       const failure = uncertain ? "outcome unknown; this command was not retried" : error instanceof Error ? error.message : String(error);
@@ -165,7 +168,11 @@ function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: Del
     } catch (error) {
       // session_mismatch: another run got attached between the check and zeta; nothing was recorded, so the draft goes back with its id and no retry.
       if (sessionMismatch(error)) { runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: decision.id, failed: true, blocked: true, note: MISMATCH }); return finish(effect.operationId, new Error(MISMATCH)); }
-      runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: decision.id, failed: true, refused: (error as { refused?: boolean }).refused === true }); finish(effect.operationId, error);
+      const refused = (error as { refused?: boolean }).refused === true;
+      // A refusal or a coded error is zeta's definite answer, and its message is the reason a resent row shows. An internal
+      // error (-32603) may come after zeta recorded the id, so that outcome stays unknown, like a lost reply.
+      const failure = refused || (typeof code(error) === "number" && code(error) !== INTERNAL) ? (error instanceof Error ? error.message : String((error as { message?: unknown }).message ?? error)) : undefined;
+      runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: decision.id, failed: true, refused, ...(failure ? { failure } : {}) }); finish(effect.operationId, error);
     }
   };
   const settingsFailure = (effect: Extract<WorkspaceEffect, { type: "load-settings" | "set-settings" }>, error: unknown) => {

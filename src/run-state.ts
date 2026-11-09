@@ -1,5 +1,5 @@
 import type { QueuedImage } from "./image-queue";
-import type { OpenFailure, OpenRun, SessionMeta, ServerStatus } from "./session";
+import { sessionTitle, type OpenFailure, type OpenRun, type SessionMeta, type ServerStatus } from "./session";
 import { catalogModels, catalogProviders } from "./settings";
 import { decideSend, leaveView, queryDeliveries, reduceDelivery, restoreSaved, restoreText, savedRun, showsLive, type DeliveryEvent, type PendingDelivery, type RetryDraft, type SavedRun } from "./delivery-owner";
 
@@ -304,6 +304,7 @@ export const settingsBlockText = (block: InputBlock | null) => block === "offlin
 
 export const workspaceRunState = (state: WorkspaceState) => {
   const record = selectedRun(state);
+  const active = activeRun(state);
   const selected = state.entry.run.startsWith("draft:") ? null : state.entry.run as SessionId;
   const input = runInput(state);
   return {
@@ -312,7 +313,9 @@ export const workspaceRunState = (state: WorkspaceState) => {
     opening: selected && input.opening ? { id: selected, ...input.opening } : null,
     openError: record?.openError ?? null,
     session: record?.session ?? null,
-    active: activeRun(state),
+    active,
+    /** The active run's title for notes, or its id when zeta never told gamma its name. */
+    activeTitle: active ? sessionTitle(state.runs.get(active)?.session ?? null) ?? active : null,
     attached: state.attachment.kind === "attached" ? state.attachment.sessionId : null,
   };
 };

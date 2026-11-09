@@ -29,9 +29,14 @@ export type PendingDelivery = {
   resent?: "auto" | "click";
   /** Why a dropped message was not delivered, for its row. */
   why?: "stop" | "dropped" | "unconfirmed";
+  /** Why the user's last resend of this row did not go, for its row (the composer keeps its own hint). */
+  failure?: string;
 };
-/** The delivery id of a draft whose send is not confirmed: Enter on the same text reuses it, so zeta dedupes it. */
-export type RetryDraft = { id: string; key: string; operationId?: OperationId };
+/**
+ * The delivery id of a draft whose send is not confirmed: Enter on the same text reuses it, so zeta dedupes it.
+ * `refused`: zeta recorded nothing for this id (it never left gamma, or zeta refused its session), so nothing was sent.
+ */
+export type RetryDraft = { id: string; key: string; operationId?: OperationId; refused?: true };
 
 export type SendRequest =
   /** Enter on the composer's text: which id the new delivery takes. */
@@ -46,7 +51,11 @@ export type SendRequest =
 export type SendDecision = { id: string; blocked?: string; sessionId?: SessionId };
 
 export const OTHER_SESSION = "this run is not open yet; your message is still in the draft";
-export const MISMATCH = "zeta had another run attached; nothing was sent, and your message is back in the draft";
+export const MISMATCH = "nothing was sent: zeta had another run attached · your message is back in the draft; reopen this run, then press Enter";
+const RESEND_MISMATCH = "not sent: zeta had another run attached. reopen this run and resend";
+const RESEND_WAITS = "not sent: zeta has another run attached. resend once this run reopens";
+/** The row's text for a resend that did not go: its own words, because the message stays as its row, not in the draft. */
+const resendFailure = (note?: string) => note === MISMATCH ? RESEND_MISMATCH : note === OTHER_SESSION ? RESEND_WAITS : `resend failed: ${note}`;
 /** zeta refused a delivery for a session it does not have attached (delivery_session_guard): it recorded and delivered nothing. */
 export const sessionMismatch = (error: unknown) => (error as { data?: { code?: unknown } } | null)?.data?.code === "session_mismatch";
 const MANUAL = "only the user can send this again";
@@ -65,7 +74,7 @@ export function decideSend(state: WorkspaceState, runId: RunId, request: SendReq
   }
   const delivery = record?.deliveries.get(request.intentId);
   if (!delivery) return { id: "", blocked: MANUAL };
-  // zeta's `send` has no session_id yet, so it lands in whatever run zeta has attached: that must be this draft's run.
+  // Gamma sends only into the run zeta has attached (as far as gamma knows): that must be this draft's run.
   if (!state.connected || state.attachment.kind !== "attached" || state.attachment.sessionId !== run) return { id: delivery.attemptId, blocked: OTHER_SESSION };
   // Every attempt names the run's session, so zeta (delivery_session_guard) refuses it if another run got attached since.
   if (request.kind === "attempt") return { id: delivery.attemptId, sessionId: run as SessionId };
@@ -91,7 +100,7 @@ export const restoreText = (current: string, restored: string) => current.starts
 
 export type DeliveryEvent =
   | { type: "DELIVERY_BEGIN"; runId: RunId; delivery: PendingDelivery; operationId: OperationId }
-  | { type: "DELIVERY_ACK"; runId: RunId; intentId: string; operationId: OperationId; attemptId: string; queued?: boolean; failed?: boolean; /** zeta did no work for this id, so a retry needs a new one. */ refused?: boolean; /** zeta recorded nothing for this attempt (it never left gamma, or zeta refused its session): its id stays with the draft. */ blocked?: boolean; note?: string }
+  | { type: "DELIVERY_ACK"; runId: RunId; intentId: string; operationId: OperationId; attemptId: string; queued?: boolean; failed?: boolean; /** zeta did no work for this id, so a retry needs a new one. */ refused?: boolean; /** zeta recorded nothing for this attempt (it never left gamma, or zeta refused its session): its id stays with the draft. */ blocked?: boolean; note?: string; /** zeta answered this attempt with a definite error: the short reason a resent row shows. */ failure?: string }
   /**
    * zeta's `delivery_status` answer for a delivery or for the draft's retry id. The reply has no drop reason
    * (zeta delivery.py:348-368); `reason` is the one zeta's live delivery_status event gave for this delivery, if this view saw it.
@@ -142,14 +151,15 @@ const statusOf = (state: WorkspaceState, record: RunRecord, event: Extract<Deliv
     if (!auto.blocked) {
       const operationId = newOperation();
       effects.push({ type: "deliver", runId: record.id, operationId, intentId: event.intentId });
-      return set({ attemptId: auto.id, operationId, method: "send", state: "requesting", resent: "auto", spent: undefined, why: undefined });
+      return set({ attemptId: auto.id, operationId, method: "send", state: "requesting", resent: "auto", spent: undefined, why: undefined, failure: undefined });
     }
     if (delivery.method === "steer" || delivery.resent) return set({ state: "dropped", spent: true, why: "dropped" });
     deliveries.delete(event.intentId);
     return { ...record, text: restoreText(record.text, delivery.text), deliveries, retryDelivery: undefined };
   }
   // unknown: zeta never took this id. Only the user sends it again: a resent message keeps its row; any other goes back to the draft with its id.
-  if (delivery.resent) return set({ state: "dropped", why: "unconfirmed" });
+  // A resend zeta answered with a definite error keeps its reason and failure text.
+  if (delivery.resent) return set({ state: "dropped", why: delivery.failure ? delivery.why ?? "dropped" : "unconfirmed" });
   deliveries.delete(event.intentId);
   return { ...record, text: restoreText(record.text, delivery.text), deliveries, retryDelivery: { id: delivery.attemptId, key: deliveryKey(delivery.text, delivery.images) } };
 };
@@ -170,16 +180,20 @@ export function reduceDelivery(state: WorkspaceState, record: RunRecord, event: 
       if (delivery?.operationId !== event.operationId) return record;
       // zeta recorded nothing: the row or the draft (never consumed) stays in this run, with the attempt's id and a note; no retry.
       if (event.blocked) {
-        if (delivery.resent) { deliveries.set(event.intentId, { ...delivery, state: "dropped", why: delivery.why ?? "dropped" }); return { ...record, deliveries, deliveryNote: event.note }; }
+        if (delivery.resent) { deliveries.set(event.intentId, { ...delivery, state: "dropped", why: delivery.why ?? "dropped", failure: resendFailure(event.note) }); return { ...record, deliveries }; }
         deliveries.delete(event.intentId);
-        return { ...record, deliveries, deliveryNote: event.note, retryDelivery: event.attemptId ? { id: event.attemptId, key: deliveryKey(delivery.text, delivery.images) } : record.retryDelivery };
+        // An id an earlier attempt may have delivered stays "maybe sent"; a fresh one was never sent.
+        const prior = record.retryDelivery?.id === event.attemptId ? record.retryDelivery : undefined;
+        const refused = prior ? prior.refused : true;
+        return { ...record, deliveries, deliveryNote: event.note, retryDelivery: event.attemptId ? { id: event.attemptId, key: deliveryKey(delivery.text, delivery.images), ...(refused ? { refused } : {}) } : record.retryDelivery };
       }
       if (!event.failed) {
-        if (event.queued) deliveries.set(event.intentId, { ...delivery, attemptId: event.attemptId, state: "queued", spent: undefined, why: undefined }); else deliveries.delete(event.intentId);
+        if (event.queued) deliveries.set(event.intentId, { ...delivery, attemptId: event.attemptId, state: "queued", spent: undefined, why: undefined, failure: undefined }); else deliveries.delete(event.intentId);
         return { ...consumeDelivered(record, delivery), deliveries, retryDelivery: undefined };
       }
       // A resent message lives as its row, not in the draft: it goes back to dropped, and its resend reuses the id unless zeta refused it.
-      if (delivery.resent) { deliveries.set(event.intentId, { ...delivery, state: "dropped", spent: event.refused ? true : undefined, why: event.refused ? "dropped" : "unconfirmed" }); return { ...record, deliveries }; }
+      // A definite error keeps the row's reason and says why the resend failed; only an unknown outcome is "not confirmed".
+      if (delivery.resent) { deliveries.set(event.intentId, { ...delivery, state: "dropped", spent: event.refused ? true : undefined, why: event.failure ? delivery.why ?? "dropped" : event.refused ? "dropped" : "unconfirmed", failure: event.failure ? `resend failed: ${event.failure}` : undefined }); return { ...record, deliveries }; }
       // A failure keeps the draft and its attempt id (zeta answers duplicate:true if the first one landed); only a refusal needs a new id.
       deliveries.delete(event.intentId);
       return { ...record, deliveries, retryDelivery: event.refused || !event.attemptId ? undefined : { id: event.attemptId, key: deliveryKey(delivery.text, delivery.images) } };
@@ -188,11 +202,12 @@ export function reduceDelivery(state: WorkspaceState, record: RunRecord, event: 
     case "DELIVERY_RESEND": {
       if (delivery?.state !== "dropped") return record;
       const decision = decideSend(state, record.id, { kind: "resend", intentId: event.intentId });
-      if (decision.blocked) return { ...record, deliveryNote: `resend waits: ${decision.blocked === OTHER_SESSION ? "zeta has another run attached; nothing was sent" : decision.blocked}` };
+      if (decision.blocked) { deliveries.set(event.intentId, { ...delivery, failure: resendFailure(decision.blocked) }); return { ...record, deliveries }; }
       const operationId = newOperation();
-      deliveries.set(event.intentId, { ...delivery, attemptId: decision.id, operationId, method: "send", state: "requesting", resent: "click", spent: undefined, why: undefined });
+      // The row keeps its reason (why) for the case the resend does not go either.
+      deliveries.set(event.intentId, { ...delivery, attemptId: decision.id, operationId, method: "send", state: "requesting", resent: "click", spent: undefined, failure: undefined });
       effects.push({ type: "deliver", runId: record.id, operationId, intentId: event.intentId });
-      return { ...record, deliveries, deliveryNote: undefined };
+      return { ...record, deliveries };
     }
   }
 }
@@ -202,16 +217,15 @@ export const deliveryNote = (record: RunRecord) => {
   if (record.deliveryNote) return record.deliveryNote;
   const retry = record.retryDelivery;
   if (!retry || !record.text) return null;
-  return retry.key === deliveryKey(record.text, record.attachments)
-    ? "this may already be sent · the draft is kept, and Enter will not run it twice"
-    : "edited · Enter sends this as a new message";
+  if (retry.key !== deliveryKey(record.text, record.attachments)) return "edited · Enter sends this as a new message";
+  return retry.refused ? "nothing was sent · your message is in the draft; Enter sends it" : "this may already be sent · the draft is kept, and Enter will not run it twice";
 };
 
 /** One run's entry in the tab's sessionStorage: its draft text, its unconfirmed retry id, and its open deliveries. */
 export type SavedRun = { text?: string; retry?: RetryDraft; deliveries?: Array<Omit<PendingDelivery, "images">> };
 export const savedRun = (record: RunRecord): SavedRun | null => {
   const deliveries = [...record.deliveries.values()].filter((delivery) => delivery.method !== "send_images").map(({ images: _, here: __, ...delivery }) => delivery);
-  const retry = record.retryDelivery ? { id: record.retryDelivery.id, key: record.retryDelivery.key } : undefined;
+  const retry = record.retryDelivery ? { id: record.retryDelivery.id, key: record.retryDelivery.key, ...(record.retryDelivery.refused ? { refused: true as const } : {}) } : undefined;
   return record.text || retry || deliveries.length ? { ...(record.text ? { text: record.text } : {}), ...(retry ? { retry } : {}), ...(deliveries.length ? { deliveries } : {}) } : null;
 };
 /** Puts a saved entry into a run this page has not held yet. What the page already holds wins. */
@@ -223,6 +237,6 @@ export const restoreSaved = (record: RunRecord, saved: SavedRun | undefined): Ru
     ...record,
     text: record.text || saved.text || "",
     deliveries: record.deliveries.size || !restored.size ? record.deliveries : restored,
-    retryDelivery: record.retryDelivery ?? (saved.retry?.id && saved.retry.key ? { id: saved.retry.id, key: saved.retry.key } : undefined),
+    retryDelivery: record.retryDelivery ?? (saved.retry?.id && saved.retry.key ? { id: saved.retry.id, key: saved.retry.key, ...(saved.retry.refused === true ? { refused: true as const } : {}) } : undefined),
   };
 };

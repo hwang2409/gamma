@@ -226,6 +226,8 @@ export type RunState = {
   session: SessionMeta | null;
   /** The attached run that owns zeta's active turn, independent from the selected URL. */
   active: string | null;
+  /** The active run's title (its id when gamma has no name for it), for notes a person reads. */
+  activeTitle: string | null;
   attached: string | null;
 };
 
@@ -356,7 +358,8 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
   const handleImages = async (effect: Extract<WorkspaceEffect, { type: "send-images" }>) => {
     const delivery = runs.get(effect.runId).deliveries.get(effect.intentId);
     const { blocked, sessionId } = decideSend(runs.getCatalog(), effect.runId, { kind: "attempt", intentId: effect.intentId });
-    if (!client || !delivery || blocked) { const error = new Error(client && delivery ? blocked : "session is not attached"); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false, failed: true }); finish(effect.operationId, undefined, error); return; }
+    // Nothing left gamma: the draft keeps its id and says why, the same shape as handleDelivery's pre-send block.
+    if (!client || !delivery || blocked) { const error = new Error(client && delivery ? blocked : "session is not attached"); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false, failed: true, blocked: true, note: error.message }); finish(effect.operationId, undefined, error); return; }
     try {
       await client.request("send_images", { session_id: sessionId, text: delivery.text, images: delivery.images.map(({ name, mime_type, data }) => ({ name, mime_type, data })), delivery_id: effect.intentId }, { timeoutMs: 30_000 });
       runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false }); finish(effect.operationId, true);

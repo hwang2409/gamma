@@ -53,8 +53,8 @@ function zetaHandlers(zeta: Zeta, extra: Record<string, Handler> = {}): Record<s
       return { messages: all.slice(offset, offset + 1), next_offset: offset + 1 < all.length ? offset + 1 : null };
     },
     new_session: () => { zeta.attached = `n${++zeta.created}`; return { session: meta(zeta.attached, "x") }; },
-    // zeta src/zeta/server/delivery.py:48-90: `send` has no session_id param; it targets the attached runtime and
-    // returns {accepted, session_id}. delivery.py:383-408 + docs/serve-protocol.md:509-520: a retained id on the same
+    // zeta src/zeta/server/delivery.py:48-90: `send` targets the attached runtime (the session_id param only feeds the
+    // guard above) and returns {accepted, session_id}. delivery.py:383-408 + docs/serve-protocol.md:509-520: a retained id on the same
     // session returns the original result with duplicate:true and starts no turn; the lookup runs before turn checks.
     send: (params) => {
       guard(zeta, params);
@@ -703,6 +703,20 @@ async function steerEnds(h: Awaited<ReturnType<typeof world>>, reason: Parameter
   if (h.features.includes("session_history_fidelity")) for (const id of dropped) h.fake.event({ event: "delivery_status", session_id: "a", id: `delivery-${id}`, role: "system", delivery_id: id, method: "steer", status: "dropped", content: [{ type: "text", text: `steer dropped: ${wire}` }], reason: wire });
   if (ask) h.deliveries.reconcile("a");
 }
+const QUEUED_IMAGE = { url: "blob:look", name: "look.png", mime_type: "image/png", data: "", size: 1, width: 1, height: 1 };
+/** a's running turn with one queued steer, then the user's stop: the steer's row says the stop ended the turn. */
+async function stoppedSteer(h: Awaited<ReturnType<typeof world>>, text: string) {
+  h.zeta.running = true;
+  h.type(text);
+  expect(await h.enter("a", text, undefined, true)).toEqual({ ok: true });
+  const intent = [...h.store.get("a").deliveries.keys()][0]!;
+  await h.deliveries.stop("a");
+  await until(() => h.store.get("a").deliveries.get(intent)?.state === "dropped", 2_000);
+  expect(h.store.get("a").deliveries.get(intent)?.why).toBe("stop");
+  return intent;
+}
+// zeta docs/serve-protocol.md `abort`: ends the running turn; delivery.py:305-312 drops its queued steers.
+const abortable = (zeta: Zeta) => ({ abort: () => { endTurn(zeta, "user_stop"); return {}; } });
 const settledSends = async (h: Awaited<ReturnType<typeof world>>, count: number) => { await until(() => h.sends().length >= count, 2_000); await new Promise((resolve) => setTimeout(resolve, 30)); };
 
 /**
@@ -978,12 +992,14 @@ const owner: Row[] = [
         expect(h.sends()).toEqual([]);
         expect(h.zeta.turns).toEqual([]);
         expect(h.store.get("a").deliveries.get(intent)?.state).toBe("dropped");
-        expect(await noteOf(h.store.get("a"))).toContain("zeta has another run attached; nothing was sent");
+        // The message lives as its row, so the row says why the resend did not go; the composer keeps its own hint.
+        expect(h.store.get("a").deliveries.get(intent)?.failure).toBe("not sent: zeta has another run attached. resend once this run reopens");
+        expect(await noteOf(h.store.get("a"))).toBe("(no note)");
       } finally { h.dispose(); }
     },
   },
   ...([
-    ["fails", (zeta: Zeta) => ({ send: () => { throw { code: -32602, message: "invalid params" }; } }), "unconfirmed"],
+    ["fails", (zeta: Zeta) => ({ send: () => { throw { code: -32602, message: "invalid params" }; } }), "dropped"],
     ["gets unknown", (zeta: Zeta) => ({ send: () => { throw { code: -32603, message: "the frame never reached zeta" }; } }), "unconfirmed"],
     ["is dropped", (zeta: Zeta) => ({ send: () => ({ accepted: false, duplicate: true, status: "dropped" }) }), "dropped"],
   ] as const).map(([how, handlers, why]): Row => ({
@@ -1129,4 +1145,189 @@ const owner: Row[] = [
   },
 ];
 
+const fix3: Row[] = [
+  {
+    name: "fix3 ux-m1 a session_mismatch note tells the user to reopen this run (gamma neither reopens nor retries by itself)",
+    async run() {
+      const h = await openA();
+      try {
+        h.zeta.attached = "b";
+        h.type("only for a");
+        expect((await h.enter()).ok).toBe(false);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(h.sends()).toHaveLength(1);
+        expect(targeted(h.fake.calls, "a")).not.toContain("resume");
+        expect(await noteOf(h.store.get("a"))).toContain("reopen this run");
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "fix3 M3 a session_mismatch refusal survives a reload as 'nothing was sent', not 'this may already be sent' (zeta answers unknown for the id)",
+    async run() {
+      const tab = tabStorage();
+      const page1 = await openA({ tab });
+      page1.zeta.attached = "b";
+      page1.type("only for a");
+      expect((await page1.enter()).ok).toBe(false);
+      const id = page1.sends()[0]!.delivery_id as string;
+      await new Promise((resolve) => setTimeout(resolve, 150)); // the tab save
+      page1.dispose();
+      const page2 = await world({ selected: "a", zeta: page1.zeta, tab });
+      try {
+        page2.start(); await page2.live("a");
+        await until(() => page2.asked().includes(id)); await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(page2.asked()).toContain(id); // zeta answers unknown: it never recorded this id
+        expect(page2.sends()).toEqual([]);
+        expect(page2.text("a")).toBe("only for a");
+        const note = await noteOf(page2.store.get("a"));
+        expect(note).not.toContain("may already be sent");
+        expect(note).toContain("nothing was sent");
+        expect(await page2.enter()).toEqual({ ok: true });
+        expect(page2.sends().map((params) => params.delivery_id)).toEqual([id]);
+        expect(page2.landed()).toEqual(["a"]);
+      } finally { page2.dispose(); }
+    },
+  },
+  {
+    name: "fix3 M3 guard: a refusal of an id an earlier attempt may have delivered stays 'this may already be sent' after a reload",
+    async run() {
+      const tab = tabStorage();
+      const page1 = await openA({ tab, handlers: (zeta) => lostReply(zeta) });
+      page1.type("maybe sent");
+      expect((await page1.enter()).ok).toBe(false); // zeta took it; the reply was lost
+      page1.zeta.attached = "b";
+      expect((await page1.enter()).ok).toBe(false); // the same id, refused by the guard
+      expect(page1.sends()).toHaveLength(2);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      page1.dispose();
+      const page2 = await world({ selected: "a", zeta: page1.zeta, tab, handlers: () => ({ delivery_status: () => { throw { code: -32603, message: "lost" }; } }) });
+      try {
+        page2.start(); await page2.live("a"); await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(page2.text("a")).toBe("maybe sent");
+        expect(await noteOf(page2.store.get("a"))).toContain("this may already be sent");
+      } finally { page2.dispose(); }
+    },
+  },
+  {
+    name: "fix3 M2 a session_mismatch on a resend click: the row keeps its reason and says why, the composer keeps its hint, one request, no retry",
+    async run() {
+      const h = await openA({ handlers: abortable });
+      try {
+        const intent = await stoppedSteer(h, "stopped then mismatched");
+        h.zeta.attached = "b"; // another client attached b; gamma has not heard yet
+        h.deliveries.resend("a", intent); await settledSends(h, 1); await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(h.sends()).toHaveLength(1);
+        expect(h.zeta.turns).toEqual([]);
+        const row = h.store.get("a").deliveries.get(intent);
+        expect(row?.state).toBe("dropped");
+        expect(row?.why).toBe("stop");
+        expect(row?.failure).toBe("not sent: zeta had another run attached. reopen this run and resend");
+        expect(h.text("a")).toBe("");
+        expect(await noteOf(h.store.get("a"))).toBe("(no note)");
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "fix3 ux-m2 a resend click zeta answers with a definite error: the row keeps its reason and says 'resend failed: <reason>'; no retry",
+    async run() {
+      let failing = true;
+      const h = await openA({ handlers: (zeta) => ({ ...abortable(zeta), send: (params) => { if (failing) throw { code: -32602, message: "invalid params" }; return zetaHandlers(zeta).send!(params); } }) });
+      try {
+        const intent = await stoppedSteer(h, "stopped then failed");
+        h.deliveries.resend("a", intent); await settledSends(h, 1); await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(h.sends()).toHaveLength(1);
+        const row = h.store.get("a").deliveries.get(intent);
+        expect(row?.state).toBe("dropped");
+        expect(row?.why).toBe("stop");
+        expect(row?.failure).toBe("resend failed: invalid params");
+        failing = false;
+        h.deliveries.resend("a", intent); await settledSends(h, 2);
+        expect(h.landed()).toEqual(["a"]);
+        expect(h.store.get("a").deliveries.get(intent)?.failure).toBeUndefined();
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "fix3 ux-m5 the new-run note names the active run by its title, not its session id",
+    async run() {
+      const h = await world({ attached: "b", handlers: (zeta) => ({ status: () => ({ session: meta("b", "x", { name: "the b run" }), state: "running", pending_approvals: [], last_turn_outcome: null }) }) });
+      try {
+        h.start(); await until(() => h.view.active === "b");
+        expect(h.view.active).toBe("b");
+        expect(RunState.inputBlockText("waits-for-active", (h.view as { activeTitle?: string | null }).activeTitle ?? null)).toBe("sending waits for the active run the b run");
+        expect(h.owner().block).toBe("waits-for-active");
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "fix3 review-m-1 -32003 with data.code host_binding_required is a generic failure, not the session_mismatch note",
+    async run() {
+      const h = await openA({ handlers: () => ({ send: () => { throw { code: -32003, message: "host binding required", data: { code: "host_binding_required" } }; } }) });
+      try {
+        h.type("needs a binding");
+        expect(await h.enter()).toEqual({ ok: false, error: "host binding required" });
+        expect(h.sends()).toHaveLength(1);
+        expect(h.text("a")).toBe("needs a binding");
+        expect(await noteOf(h.store.get("a"))).not.toContain("another run attached");
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "fix3 review-m-1 a send_images session_mismatch: note, draft and attachments kept, one request, no retry",
+    async run() {
+      // zeta serve-protocol.md send_images under delivery_session_guard: the same guard as send (protocol.py:560-583).
+      const h = await openA({ handlers: (zeta) => ({ send_images: (params) => { guard(zeta, params); zeta.turns.push({ session: zeta.attached!, text: params.text as string }); return { accepted: true }; } }) });
+      try {
+        h.zeta.attached = "b";
+        h.store.edit("a", { text: "look at this", attachments: [QUEUED_IMAGE as never] });
+        const failed = await h.manager.sendImages("a", "img-1", "look at this", [QUEUED_IMAGE as never]).then(() => null, (error: Error) => error.message);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(h.fake.calls.filter(([method]) => method === "send_images")).toHaveLength(1);
+        expect(h.zeta.turns).toEqual([]);
+        expect(failed).toContain("nothing was sent");
+        expect(h.text("a")).toBe("look at this");
+        expect(h.store.get("a").attachments).toHaveLength(1);
+        expect(await noteOf(h.store.get("a"))).toContain("nothing was sent");
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "fix3 review-m-2 an opaque send {input_id} session_mismatch takes the same note path: no command failure, draft back, one request",
+    async run() {
+      const h = await openA();
+      try {
+        h.zeta.attached = "b";
+        h.type("/review x");
+        const failed = await h.deliveries.submitOpaque("a", "input-1", "/review x", "/review x", "op-1").then(() => null, (error: Error) => error.message);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(h.sends()).toHaveLength(1);
+        expect(h.sends()[0]).toMatchObject({ input_id: "input-1", session_id: "a" });
+        expect(h.failures.get("a")).toBeUndefined();
+        expect(failed).toContain("nothing was sent");
+        expect(h.text("a")).toBe("/review x");
+        expect(await noteOf(h.store.get("a"))).toContain("nothing was sent");
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "fix3 review-m-3 a send_images blocked before it leaves gamma keeps the draft's id with a note, like handleDelivery",
+    async run() {
+      const h = await openA();
+      try {
+        const reopen = h.fake.hold("resume"); // gamma knows zeta attached b and waits to reopen a
+        h.zeta.attached = "b"; await h.manager.refreshStatus(); await reopen.reached;
+        h.store.edit("a", { text: "look at this", attachments: [QUEUED_IMAGE as never] });
+        const failed = await h.manager.sendImages("a", "img-2", "look at this", [QUEUED_IMAGE as never]).then(() => null, (error: Error) => error.message);
+        expect(h.fake.calls.filter(([method]) => method === "send_images")).toEqual([]);
+        expect(failed).toContain("not open yet");
+        expect(h.text("a")).toBe("look at this");
+        expect(await noteOf(h.store.get("a"))).toContain("not open yet");
+        expect(h.store.get("a").retryDelivery?.id).toBe("img-2");
+        reopen.release();
+      } finally { h.dispose(); }
+    },
+  },
+];
+
 for (const row of owner) test(row.name, () => row.run(), 10_000);
+for (const row of fix3) test(row.name, () => row.run(), 10_000);
