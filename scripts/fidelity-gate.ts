@@ -131,7 +131,10 @@ async function checkOneOwner(page: Page, origin: string) {
   await openFidelityHistory(page, origin);
   for (const reason of Object.keys(reasonWords)) {
     const row = userRow(page, reasonRows[reason as keyof typeof reasonRows]);
-    if (await row.locator('[data-part="delivery-note"]').count() !== 1) throw new Error(`${reason} does not have exactly one note owner`);
+    const note = row.locator('[data-part="delivery-note"]');
+    if (await note.count() !== 1) throw new Error(`${reason} does not have exactly one note owner`);
+    const words = (await note.innerText()).replace(/\s+/g, " ").trim();
+    if (words !== reasonWords[reason as keyof typeof reasonWords]) throw new Error(`${reason} note was ${JSON.stringify(words)}`);
     const rendered = await row.innerText();
     for (const token of ["delivery_status", "turn_end", "future_token", "abort", "clear", "disconnect", "restart"]) if (new RegExp(`(^|\\W)${token}($|\\W)`).test(rendered)) throw new Error(`raw ${token} leaked into the retained row`);
   }
