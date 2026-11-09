@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { chromium, type Page } from "playwright";
 import { themes } from "@fulcrum/react";
 import { ACTIVE, startFakeZeta } from "./fake-zeta";
+import { checkFidelityData } from "./fidelity-gate";
 
 const root = new URL("..", import.meta.url).pathname;
 const port = Number(process.env.WEB_GATE_PORT ?? 4180);
@@ -194,6 +195,8 @@ try {
         await fake.start();
       }
     });
+
+    await check("negotiated fidelity keeps tool data equivalent live and after reload", () => checkFidelityData(page, origin));
 
     // Connected: the server's active run, history, live run, approval, follow-bottom.
     await check("the server's session opens with history, markdown, highlighting, and tool cards", async () => {
