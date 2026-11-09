@@ -40,6 +40,12 @@ function useDismiss(open: boolean, root: React.RefObject<HTMLElement | null>, cl
   }, [open, root, close]);
 }
 
+/**
+ * Focus moved to a control outside this popover (Tab past its edge), so it closes without pulling focus back. A blur
+ * with no new target (a press on plain text inside, or a WebKit click that focuses nothing) keeps it open.
+ */
+const leftFor = (event: React.FocusEvent<HTMLElement>) => event.relatedTarget instanceof Node && !event.currentTarget.contains(event.relatedTarget);
+
 function ModelPicker({ value, models, resolvedDefault, allowDefault, onChange }: { value: string; models: string[]; resolvedDefault?: string; allowDefault: boolean; onChange(value: string): void }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
@@ -202,7 +208,7 @@ export function PermissionsControl({ model, openRequest }: { model: SessionGrant
     try { await model.clear(); setConfirmClear(false); focusInside(); }
     catch (error) { setActionError(error instanceof Error ? error.message : String(error)); focusInside(); }
   };
-  return <div className="permissions-control" ref={root}>
+  return <div className="permissions-control" ref={root} onBlur={(event) => { if (leftFor(event)) { setOpen(false); setConfirmClear(false); } }}>
     <button ref={button} type="button" className="composer-tool permissions-trigger" aria-haspopup="dialog" aria-expanded={open} aria-label={`permissions${grants.length ? `: ${grants.length} session grant${grants.length === 1 ? "" : "s"}` : ""}`} onClick={() => open ? close() : show()}>
       permissions{grants.length ? <span className="permissions-count" aria-hidden="true">{grants.length}</span> : null}
     </button>
@@ -218,7 +224,7 @@ export function SettingsMenu({ children }: { children: ReactNode }) {
   useDismiss(open, root, close);
   useEffect(() => { if (open) root.current?.querySelector<HTMLElement>(".settings-popover button")?.focus(); }, [open]);
   return (
-    <div className="settings-menu" ref={root}>
+    <div className="settings-menu" ref={root} onBlur={(event) => { if (leftFor(event)) setOpen(false); }}>
       <button ref={button} type="button" className="ghost" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(!open)}>settings</button>
       {open ? <div className="settings-popover" role="dialog" aria-label="settings">{children}</div> : null}
     </div>

@@ -163,7 +163,8 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .status-line[data-tone="busy"]::before { animation: pulse 1s infinite alternate; }
 .status-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .status-link { min-height: 28px; padding: 0 8px; border-color: var(--fulcrum-warn); font-size: 12px; font-weight: 700; }
-.status-link::after { content: " ↓"; }
+/* The arrow is decoration: the empty alt text keeps screen readers from reading "downwards arrow" after the link. */
+.status-link::after { content: " ↓" / ""; }
 /* A failed turn: the error row, then its one action. */
 .turn-error { display: grid; justify-items: start; gap: 6px; padding: 8px; border: 1px solid var(--fulcrum-danger); border-left-width: var(--rail); }
 /* The user's own stop is not a failure: fulcrum labels it "stopped" with its square mark, and the shell stays neutral. */
