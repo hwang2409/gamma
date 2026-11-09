@@ -304,23 +304,29 @@ async function zoom(browser: Browser, name: string) {
 
 async function journey(browserType: BrowserType, name: string) {
   const browser = await browserType.launch({ headless: true });
-  try {
-    const page = await browser.newPage();
-    // WebKit reports a poll that a navigation cancels as "... due to access control checks"; host-client catches that rejection.
-    page.on("pageerror", (error) => { if (!/due to access control checks/.test(error.message)) failures.push(`${name} page error: ${error.message}`); });
-    await namesAndApproval(page, name, 1440, 900);
-    await namesAndApproval(page, name, 390, 844);
-    await disabledReason(page, name);
-    await commandListbox(page, name);
-    await popovers(page, name);
-    await keyboardComposer(page, name);
-    // One controller at a time: leave the run before another context opens it.
-    await page.goto("about:blank", { timeout: 15_000 });
-    await zoom(browser, name);
-    await stoppedTurn(page, name);
-    await page.close();
-    await reducedMotion(browser, name);
-  } finally { await browser.close(); }
+  // A browser process that dies mid-run leaves Playwright calls pending forever; fail the journey by name instead.
+  let finished = false;
+  const crashed = new Promise<never>((_, reject) => browser.on("disconnected", () => { if (!finished) reject(new Error(`${name} browser process exited mid-journey`)); }));
+  try { await Promise.race([sections(browser, name), crashed]); }
+  finally { finished = true; await browser.close(); }
+}
+
+async function sections(browser: Browser, name: string) {
+  const page = await browser.newPage();
+  // WebKit reports a poll that a navigation cancels as "... due to access control checks"; host-client catches that rejection.
+  page.on("pageerror", (error) => { if (!/due to access control checks/.test(error.message)) failures.push(`${name} page error: ${error.message}`); });
+  await namesAndApproval(page, name, 1440, 900);
+  await namesAndApproval(page, name, 390, 844);
+  await disabledReason(page, name);
+  await commandListbox(page, name);
+  await popovers(page, name);
+  await keyboardComposer(page, name);
+  // One controller at a time: leave the run before another context opens it.
+  await page.goto("about:blank", { timeout: 15_000 });
+  await zoom(browser, name);
+  await stoppedTurn(page, name);
+  await page.close();
+  await reducedMotion(browser, name);
 }
 
 try {
