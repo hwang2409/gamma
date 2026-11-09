@@ -67,9 +67,13 @@ const pendingApproval = (page: Page) => page.locator('[data-part="approval"][dat
 
 /** Opens the live active run and waits for its approval, the one state that has every control on screen; a reload rejoins the same pending approval. */
 async function openLive(page: Page) {
+  const since = fake.requests.length;
   await page.goto(`${origin}/?run=${ACTIVE}`);
   await pendingApproval(page).waitFor({ timeout: 15_000 });
   await page.getByRole("button", { name: /^permissions/ }).waitFor();
+  // The attached run asks for its command catalog; the listbox checks need that request to have gone out.
+  for (let attempt = 0; attempt < 150 && !fake.requests.slice(since).some((request) => request.method === "slash_list"); attempt++) await Bun.sleep(100);
+  expect(fake.requests.slice(since).some((request) => request.method === "slash_list"), "the opened run never asked for its command catalog");
 }
 
 async function dump(page: Page, label: string) {
@@ -125,7 +129,12 @@ async function commandListbox(page: Page, name: string) {
     const input = field(page);
     await input.fill("/");
     const listbox = page.getByRole("listbox", { name: "command suggestions" });
-    await listbox.waitFor();
+    const opens = (step: string) => listbox.waitFor({ timeout: 10_000 }).catch(async () => {
+      await dump(page, `${name}-listbox-${step}-failure`);
+      const catalog = fake.requests.filter((request) => request.method === "slash_list").length;
+      throw new Error(`${step}: no command list; value ${JSON.stringify(await input.inputValue())}, focus on ${await focused(page)}, ${catalog} slash_list requests`);
+    });
+    await opens("typing /");
     const contract = () => input.evaluate((node) => {
       const list = document.getElementById(node.getAttribute("aria-controls") ?? "");
       const active = document.getElementById(node.getAttribute("aria-activedescendant") ?? "");
@@ -138,6 +147,7 @@ async function commandListbox(page: Page, name: string) {
     expect(moved.id !== first.id && moved.selected === "true" && moved.activeInList, `arrow down did not move the selected option: ${JSON.stringify(moved)}`);
     expect(await listbox.locator('[role="option"][aria-selected="true"]').count() === 1, "more than one option is selected");
     await input.fill("/st");
+    await opens("typing /st");
     await input.evaluate((node) => node.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true })));
     await input.dispatchEvent("keydown", { key: "Enter", code: "Enter", isComposing: true });
     expect(await input.inputValue() === "/st", "ime enter accepted a command");
@@ -146,7 +156,7 @@ async function commandListbox(page: Page, name: string) {
     await page.waitForFunction(() => (document.activeElement as HTMLTextAreaElement | null)?.value === "/status ", undefined, { timeout: 5_000 })
       .catch(async () => { throw new Error(`pointer accept left ${JSON.stringify(await input.inputValue())} with focus on ${await focused(page)}`); });
     await input.fill("/st");
-    await listbox.waitFor();
+    await opens("retyping /st after pointer accept");
     await input.press("Escape");
     expect(await listbox.count() === 0 && await input.getAttribute("aria-expanded") === "false", "escape did not collapse the combobox");
     await input.fill("");
