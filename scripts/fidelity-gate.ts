@@ -3,8 +3,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Page } from "playwright";
-import { ACTIVE, FIDELITY, startFakeZeta } from "./fake-zeta";
+import { ACTIVE, startFakeZeta } from "./fake-zeta";
 
+const FIDELITY = "s-fidelity";
 type Fake = Awaited<ReturnType<typeof startFakeZeta>>;
 const until = async (test: () => boolean | Promise<boolean>, timeout: number, name: string) => {
   const end = Date.now() + timeout;
