@@ -851,11 +851,11 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
       }
       liveEnabled = next;
     },
-    /** `true`: a fresh zeta home, with no sessions and no server session. `false`: the seeded sessions again. */
     /** Attaches `sessionId` without telling any client, like another client's resume behind gamma's back. */
     attachQuietly(sessionId: string) { active = sessionId; },
     /** `true`: a closed socket is noticed only when the next one opens (a half-open connection), so a running turn ends naturally. */
     setLateClose(value: boolean) { lateClose = value; },
+    /** `true`: a fresh zeta home, with no sessions and no server session. `false`: the seeded sessions again. */
     setEmpty(empty: boolean) { sessions = empty ? [] : [...seeded]; active = empty ? null : ACTIVE; },
     async close() { this.drop(); server.stop(true); await rm(home, { recursive: true, force: true }); },
   };

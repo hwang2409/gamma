@@ -274,7 +274,6 @@ export const activeRun = (state: WorkspaceState) => state.attachment.kind === "a
 /** Why the composer of a run cannot submit. */
 export type InputBlock = "offline" | "opening" | "reconnecting" | "open-failed" | "syncing" | "pending" | "waits-for-active";
 export type RunInput = { run: RunId; open: OpenRun | null; accept: boolean; block: InputBlock | null; /** Why the run's model and approval mode cannot change now: a change made before the run opens would be lost. */ settingsBlock: InputBlock | null; /** `loading`: zeta's history is being read; before that the run waits for zeta to attach it. */ opening: { messages: number; loading: boolean } | null };
-/** The executor guard: zeta's `send` has no session_id and goes to the attached runtime, so only that run may send. */
 /** The one answer to "which open does this run show, and can its composer submit". */
 export const runInput = (state: WorkspaceState, runId: RunId = state.entry.run): RunInput => {
   const run = canonical(state, runId);
