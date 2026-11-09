@@ -12,7 +12,7 @@ import { createSessionManager, sessionTitle, type OpenRun, type RunState, type S
 import { themeChoices, ThemePicker, useTheme, type ThemeChoice } from "./theme";
 import { GammaComposer, type Submit } from "./composer";
 import { nextRunModel, PermissionsControl, RunSettings, SettingsMenu, useVimSetting, VimToggle } from "./controls";
-import { activeRun, createRunStateStore, hasPendingDelivery, workspaceRunState, type DraftRunId, type EntryId, type RunId, type RunStateStore } from "./run-state";
+import { activeRun, createRunStateStore, inputBlockText, runInput, workspaceRunState, type DraftRunId, type EntryId, type RunId, type RunStateStore } from "./run-state";
 import { artifactContentUrl, hostBindings, useArtifacts } from "./host-client";
 import type { Artifact } from "./host/types";
 import { createCommandController, createUnavailableCommandController, isSlashCommandText, type ClientActionName, type ComposerAction } from "./commands";
@@ -362,9 +362,9 @@ async function submitRun({ text, images, steer, deliveryId, connection, runs, de
   return await runs.sendImages(id, deliveryId, text, images);
 }
 
-function dockPhase(state: ConnectionState, present: RunState, open: OpenRun | null, agent: ReturnType<typeof useAgentPhase>, starting: boolean): RunPhase {
+function dockPhase(state: ConnectionState, opening: boolean, open: OpenRun | null, agent: ReturnType<typeof useAgentPhase>, starting: boolean): RunPhase {
   if (state.phase === "connecting" || state.phase === "dropped") return { kind: state.phase === "connecting" && !state.lost ? "connecting" : "reconnecting" };
-  if ((runOpening(present, open) || open?.stale) && !starting) return { kind: open?.stale ? "reconnecting" : "opening" };
+  if ((opening || open?.stale) && !starting) return { kind: open?.stale ? "reconnecting" : "opening" };
   if (agent.kind === "approval") return { kind: "approval" };
   if (agent.kind === "running") return { kind: "running", tool: agent.tool };
   if (agent.kind === "thinking") return { kind: "thinking" };
@@ -404,15 +404,12 @@ function dockReadOnlyReason(displayed: string | null, active: string | null) {
   return active && displayed !== active ? "this run is read-only while another run has the active zeta turn; stop it or wait" : null;
 }
 
-function dockBlockedReason(state: ConnectionState, present: RunState, open: OpenRun | null, running: boolean) {
+/** Connection facts stay with the app; run facts come from the reducer's runInput. */
+function connectionBlockedReason(state: ConnectionState) {
   if (state.phase === "not_running") return "sending is paused until zeta serve runs again";
   if (state.phase !== "connected") return "sending is paused until zeta reconnects";
-  if (present.openError) return "sending is paused until the run opens";
-  return runOpening(present, open) || open?.stale || (open?.syncing && !running) ? "sending is paused until the run opens" : null;
+  return null;
 }
-
-/** A run is selected but has no lease yet: from before zeta's status reply attaches it until its history opens. */
-const runOpening = (present: RunState, open: OpenRun | null) => Boolean(present.selected) && !open;
 
 function Dock({ state, view, connection, runs, vim, setVim, theme, setTheme, onNewRun, onRetryTurn, onImageOpen, runState, runId, onCreated, onAccepted, deliveries, receipts }: {
   state: ConnectionState; view: RunState; connection: Connection; runs: SessionManager; vim: boolean; setVim(value: boolean): void; theme: ThemeChoice; setTheme(value: ThemeChoice): void; onNewRun(): void; onRetryTurn: Dispatch<SetStateAction<RetryAction | null>>; onImageOpen(block: any): void; runState: RunStateStore; runId: string; onCreated(from: string, sessionId: string): void; onAccepted(): void; deliveries: DeliveryManager; receipts: ReceiptStore;
@@ -430,7 +427,7 @@ function Dock({ state, view, connection, runs, vim, setVim, theme, setTheme, onN
   useEffect(() => { deliveries.bind(runId, open?.lease.store); }, [deliveries, runId, open?.lease.store]);
   const record = useSyncExternalStore(runState.subscribe, () => runState.get(runId));
   const starting = record.lifecycle.kind === "creating";
-  const pendingDelivery = hasPendingDelivery(record);
+  const input = runInput(runState.getCatalog(), runId as RunId);
   const sessionId = blank || starting || view.attached !== open?.id ? null : open.id;
   const grants = useMemo(() => client && sessionId && client.features.includes(SESSION_GRANTS_FEATURE) ? createSessionGrantsModel(client, sessionId) : null, [client, sessionId]);
   const [permissionsOpenRequest, setPermissionsOpenRequest] = useState(0);
@@ -524,9 +521,9 @@ function Dock({ state, view, connection, runs, vim, setVim, theme, setTheme, onN
 
   const failure = present.openError;
   const problem = (state.phase !== "connected" && state.phase !== "connecting" && state.phase !== "dropped") || Boolean(failure);
-  const phase = dockPhase(state, present, open, agent, starting);
+  const phase = dockPhase(state, Boolean(present.opening) || input.block === "opening", open, agent, starting);
   const readOnly = blank ? null : dockReadOnlyReason(open?.id ?? null, view.active);
-  const blockedReason = starting ? null : pendingDelivery ? "sending waits while the previous message is pending or retrying" : view.active && blank ? `sending waits for the active run ${view.active}` : dockBlockedReason(state, present, open, running);
+  const blockedReason = starting ? null : input.block === "pending" || input.block === "waits-for-active" ? inputBlockText(input.block, view.active) : connectionBlockedReason(state) ?? inputBlockText(input.block, view.active);
   const onPreparationFailure = useCallback((error: unknown, images: readonly import("./image-queue").QueuedImage[], text: string) => {
     const attachment = runState.getCatalog().attachment;
     const active = attachment.kind === "attached" && attachment.sessionId === runState.canonical(runId) && attachment.turn === "running";
@@ -564,7 +561,7 @@ function Body({ state, view, connection, runs, onNewRun, onSelectRun, followRequ
   const ownerActions = present.active ? <div className="actions"><button type="button" className="primary" onClick={() => onSelectRun(present.active!)}>go to running run</button><button type="button" className="ghost" onClick={() => connection.client && void stopTurn(connection.client)}>stop running run</button></div> : null;
   if (present.open) return <OpenBody state={state} connection={connection} present={present} runs={runs} followRequest={followRequest} />;
   if (offline && (state.phase !== "connecting" || state.lastFailure) && state.phase !== "dropped") return <div className="scroll"><ConnectionNotice state={state} connection={connection} /></div>;
-  if (present.selected && !present.openError && view.session?.session_id !== present.selected) return <div className="scroll"><Panel title="opening the run" tone="busy"><p>{present.active ? `this run waits while ${present.active} has the active zeta turn` : `loading history${present.opening?.messages ? ` · ${present.opening.messages.toLocaleString("en")} messages` : ""}`}</p>{ownerActions}</Panel></div>;
+  if (present.opening) return <div className="scroll"><Panel title="opening the run" tone="busy"><p>{present.active ? `this run waits while ${present.active} has the active zeta turn` : `loading history${present.opening?.messages ? ` · ${present.opening.messages.toLocaleString("en")} messages` : ""}`}</p>{ownerActions}</Panel></div>;
   if (present.openError) { const failure = present.openError; return <div className="scroll"><Panel title={failure.busy ? "another run is active" : "could not open this run"} tone={failure.busy ? "warn" : "danger"}><p className="mono">{failure.busy ? `this run waits while ${present.active ?? "another run"} has the active zeta turn` : failure.message}</p>{ownerActions}<div className="actions"><button type="button" className="primary" onClick={() => runs.retryOpen(failure.id)}>try again</button><button type="button" className="ghost" onClick={onNewRun}>new run</button></div></Panel></div>; }
   if (present.active) return <div className="scroll"><Panel title="new run waits for the running run" tone="warn"><p>you can type now. send becomes available when {present.active} finishes.</p>{ownerActions}</Panel></div>;
   return <div className="scroll"><div className="empty-run" role="note"><h2>start a conversation</h2><p>write below to start. zeta creates the run when you send the first message.</p></div></div>;

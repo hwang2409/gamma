@@ -202,7 +202,9 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
     const method = requested === "steer" ? "steer" : "send";
     const images = requested === "send_images" ? (params.images as Json[]) : [];
     const delivery = typeof params.delivery_id === "string" ? params.delivery_id : null;
-    const seen = delivery ? deliveries.get(delivery) : undefined;
+    // Zeta src/zeta/server/delivery.py:48-58 and :383-408, docs/serve-protocol.md:497-520: ids are retained per
+    // session (the attached runtime's store), the lookup runs after the no-active-session check and before turn checks.
+    const seen = delivery && active ? deliveries.get(`${active}\u0000${delivery}`) : undefined;
     if (seen) return { result: statuses.get(delivery!) === "dropped" ? { accepted: false, duplicate: true, status: "dropped" } : { ...seen, duplicate: true } };
     if (!active) return { error: { code: -32003, message: "no active session" } };
     if (method === "send" && running.get()) return { error: { code: -32004, message: "a turn is already running" } };
@@ -212,7 +214,7 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
     const userMessage = { event: "user_message", session_id: active, text: value, mode: method, attachments: images.map((image) => ({ name: image.name, mime_type: image.mime_type, size: Math.floor(String(image.data).length * 3 / 4) })), ...(delivery ? { delivery_id: delivery } : {}) };
     const emitEcho = () => send(userMessage);
     const accepted = method === "send" ? { accepted: true, session_id: active } : { accepted: true };
-    if (delivery) { deliveries.set(delivery, accepted); statuses.set(delivery, "queued"); }
+    if (delivery) { deliveries.set(`${active}\u0000${delivery}`, accepted); statuses.set(delivery, "queued"); }
     const persistHistory = () => { if (delivery && method === "send") statuses.set(delivery, "delivered"); histories[active] = [...(histories[active] ?? []), { id: `sent-${sent.length}`, role: "user", content: [text(value)], ...(delivery ? { delivery_id: delivery } : {}), tool_result: null }]; };
     if (echo) { persistHistory(); emitEcho(); } else { withheldHistory.push(persistHistory); withheldEchoes.push(emitEcho); }
     if (method === "steer") {
