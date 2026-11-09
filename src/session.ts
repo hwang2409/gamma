@@ -160,9 +160,11 @@ export async function openSession(
     for (const event of finalEvents(allRows(), status)) lease.store.dispatch(event);
     publishedPages = pages.length;
   };
-  const waitUntilIdle = async (status = initialStatus): Promise<ServerStatus> => {
+  const waitUntilIdle = async (status?: ServerStatus): Promise<ServerStatus> => {
+    const shouldWait = status !== undefined || initialStatus.state !== "idle";
+    status ??= await getStatus(client, activeSignal);
     let pending = JSON.stringify(status.pending_approvals ?? []);
-    while (status.state !== "idle") {
+    while (shouldWait && status.state !== "idle") {
       await wait(500, activeSignal);
       status = await getStatus(client, activeSignal);
       const nextPending = JSON.stringify(status.pending_approvals ?? []);
