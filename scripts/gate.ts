@@ -446,16 +446,28 @@ try {
       if ((await submit.textContent()) !== "steer") throw new Error(`action reads "${await submit.textContent()}" while running`);
       await field.fill("also check the windows path");
       await submit.click();
+      fake.dropNextSendAtTurnEnd();
       await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>(".dock textarea")?.value === "", undefined, { timeout: 3000 });
       await shoot(page, "composer-running-1440-tokyo-night");
-      // The fake turn has no tool call, so it ends with the steer still queued and drops it, as zeta does. gamma does not
-      // negotiate session_history_fidelity, so it never learns the drop reason and never resends by itself: the row offers
-      // the resend, and the click sends it as the next message, which starts a new turn.
-      const resend = page.getByRole("button", { name: "resend" });
-      await resend.waitFor({ timeout: 10_000 }); await Bun.sleep(300);
-      if (fake.sent.length !== 2) throw new Error(`the dropped steer was resent without the user: ${JSON.stringify(fake.sent)}`);
+      // The turn ends with the steer still queued. Fidelity supplies the turn_end reason, so gamma retries once in this
+      // live view with a fresh id. If that attempt also drops, the same row offers a button and does not retry itself.
+      for (let i = 0; i < 200 && fake.sent.length < 3; i++) await Bun.sleep(25);
+      if (fake.sent.length < 3) throw new Error("automatic turn-end resend timed out after 5000ms");
+      const steer = fake.sent[1]!;
+      const automatic = fake.sent[2]!;
+      if (steer.method !== "steer" || automatic.method !== "send" || automatic.text !== steer.text || automatic.session !== steer.session) throw new Error(`automatic resend changed the delivery: ${JSON.stringify({ steer, automatic })}`);
+      if (typeof steer.delivery_id !== "string" || typeof automatic.delivery_id !== "string" || automatic.delivery_id === steer.delivery_id) throw new Error("automatic resend did not use a fresh saved delivery id");
+      const steerRow = page.locator('[data-part="timeline"] [data-kind="user"]', { hasText: "also check the windows path" });
+      if (await steerRow.getByRole("button", { name: "resend" }).count()) throw new Error("the first turn-end drop offered a button instead of resending automatically");
+      const note = steerRow.locator('[data-part="delivery-note"]');
+      await note.waitFor({ timeout: 5_000 }).catch(() => { throw new Error("second dropped attempt note timed out after 5000ms"); });
+      const resend = note.getByRole("button", { name: "resend" });
+      await resend.waitFor({ timeout: 5_000 }).catch(() => { throw new Error("second dropped attempt resend button timed out after 5000ms"); });
+      await Bun.sleep(300);
+      if (fake.sent.length !== 3) throw new Error("a second automatic resend was sent");
       await resend.click();
-      for (let i = 0; i < 100 && fake.sent.length < 3; i++) await Bun.sleep(100);
+      for (let i = 0; i < 200 && fake.sent.length < 4; i++) await Bun.sleep(25);
+      if (fake.sent.length !== 4) throw new Error("manual resend timed out after 5000ms");
       await composer.and(page.locator('[data-state="steerable"]')).waitFor({ timeout: 5000 });
       // One message the user wrote is one row: the steer's row became the resent message, it was not added again.
       const steerRows = page.locator('[data-part="timeline"] [data-kind="user"]', { hasText: "also check the windows path" });
@@ -467,7 +479,7 @@ try {
       // The user's own stop is a neutral row, not an error.
       await page.locator('[data-part="timeline"] [data-kind="stopped"]').first().waitFor({ timeout: 3000 });
       const sent = fake.sent.map((entry) => `${entry.method}:${entry.text}`);
-      if (sent.join(",") !== "send:run the focused tests,steer:also check the windows path,send:also check the windows path") throw new Error(`server saw ${sent.join(", ")}`);
+      if (sent.join(",") !== "send:run the focused tests,steer:also check the windows path,send:also check the windows path,send:also check the windows path") throw new Error(`server saw ${sent.join(", ")}`);
       const ids = fake.sent.map((entry) => entry.delivery_id);
       if (ids.some((id) => typeof id !== "string" || !id) || new Set(ids).size !== ids.length) throw new Error(`delivery ids ${ids.join(", ")}`);
       if (fake.aborts !== 1) throw new Error(`${fake.aborts} aborts`);
@@ -499,9 +511,13 @@ try {
       await page.keyboard.press("Enter");
       await composer.and(page.locator('[data-state="idle"]')).waitFor({ timeout: 5000 });
       await settle(page);
-      await page.locator(".undelivered", { hasText: "not delivered" }).waitFor({ timeout: 3000 }).catch(() => { throw new Error("the dropped steer is not marked as not delivered"); });
-      const marked = await page.locator('[data-part="timeline"] [data-kind="user"]', { hasText: "steer: keep it short" }).evaluate((row) => row.nextElementSibling?.classList.contains("undelivered") ?? false);
-      if (!marked) throw new Error("the not-delivered mark is not on the steer's row");
+      const stoppedRow = page.locator('[data-part="timeline"] [data-kind="user"]', { hasText: "steer: keep it short" });
+      const stoppedNote = stoppedRow.locator('[data-part="delivery-note"]');
+      await stoppedNote.waitFor({ timeout: 3000 }).catch(() => { throw new Error("stop-drop delivery note timed out after 3000ms"); });
+      if (await stoppedRow.locator('[data-part="delivery-note"]').count() !== 1) throw new Error("the stopped steer does not have exactly one delivery note");
+      const stoppedText = await stoppedNote.textContent();
+      if (!stoppedText?.includes("not delivered") || !stoppedText.includes("the stop ended the turn")) throw new Error(`the stopped steer reason is not readable: ${JSON.stringify(stoppedText)}`);
+      if (!(await stoppedNote.getByRole("button", { name: "resend" }).count())) throw new Error("the stopped steer has no resend action");
       await Bun.sleep(300);
       if (fake.sent.filter((entry) => entry.text === "steer: keep it short").length !== 1) throw new Error("a steer the user stopped was resent");
       const active = await page.evaluate(() => document.activeElement?.tagName);

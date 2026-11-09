@@ -288,6 +288,7 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
   let aborts = 0;
   let echo = true;
   let holdTurns = false;
+  let dropNextSend = false;
   const withheldEchoes: Array<() => void> = [];
   const withheldHistory: Array<() => void> = [];
   let chat: { session: string; turnId: string; sendDelivery: string | null; steers: string[]; aborted: boolean } | null = null;
@@ -390,6 +391,16 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
     const emitEcho = () => send(userMessage);
     const accepted = method === "send" ? { accepted: true, session_id: active } : { accepted: true };
     if (delivery) { deliveries.set(`${active}\u0000${delivery}`, accepted); statuses.set(delivery, "queued"); }
+    if (requested === "send" && delivery && dropNextSend) {
+      dropNextSend = false;
+      void wait(500).then(() => {
+        statuses.set(delivery, "dropped");
+        const row = { id: `delivery-${delivery}`, role: "system", delivery_id: delivery, method: "steer", status: "dropped", content: [text("steer dropped: turn_end")], reason: "turn_end" };
+        histories[active]!.push({ ...row, event: "delivery_status" });
+        send({ event: "delivery_status", session_id: active, ...row, required_feature: "session_history_fidelity" });
+      });
+      return { result: accepted };
+    }
     const persistHistory = () => { if (delivery && method === "send") statuses.set(delivery, "delivered"); histories[active] = [...(histories[active] ?? []), { id: `sent-${sent.length}`, role: "user", content: [text(value)], ...(delivery ? { delivery_id: delivery } : {}), tool_result: null }]; };
     if (echo) { persistHistory(); emitEcho(); } else { withheldHistory.push(persistHistory); withheldEchoes.push(emitEcho); }
     if (method === "steer") {
@@ -406,7 +417,9 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
     if (turn.sendDelivery) statuses.set(turn.sendDelivery, "delivered");
     for (const id of turn.steers) {
       statuses.set(id, "dropped");
-      histories[turn.session]!.push({ id: `delivery-${id}`, role: "system", event: "delivery_status", delivery_id: id, method: "steer", status: "dropped", content: [text("steer dropped: abort")], reason: "abort" });
+      const row = { id: `delivery-${id}`, role: "system", delivery_id: id, method: "steer", status: "dropped", content: [text("steer dropped: abort")], reason: "abort" };
+      histories[turn.session]!.push({ ...row, event: "delivery_status" });
+      send({ event: "delivery_status", session_id: turn.session, ...row, required_feature: "session_history_fidelity" });
     }
     chat = null;
     lastTurn = "user_stop";
@@ -425,6 +438,7 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
     clearSent() { sent.splice(0); },
     setEcho(value: boolean) { echo = value; },
     setHoldTurns(value: boolean) { holdTurns = value; },
+    dropNextSendAtTurnEnd() { dropNextSend = true; },
     persistWithheldHistory() { withheldHistory.splice(0).forEach((persist) => persist()); },
     flushEchoes() { this.persistWithheldHistory(); withheldEchoes.splice(0).forEach((send) => send()); },
     get history() { return histories[ACTIVE] ?? []; },
@@ -894,6 +908,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     setEcho(value: boolean) { composer.setEcho(value); },
     /** `true`: every turn except a "fail this turn" prompt runs until it is stopped. */
     setHoldTurns(value: boolean) { composer.setHoldTurns(value); },
+    dropNextSendAtTurnEnd() { composer.dropNextSendAtTurnEnd(); },
     flushEchoes() { composer.flushEchoes(); },
     // Zeta fd1f893 src/zeta/server/control.py:392-417 publishes a later accepted user_message with the same delivery_id.
     echoFidelityDrop() {
