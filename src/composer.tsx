@@ -197,7 +197,7 @@ function useSubmission(state: ComposerState, blocked: boolean, commands: Command
     setError(undefined);
     const sent = draft.text;
     const sentImages = attachments.current.current;
-    const deliveryId = `web-${crypto.randomUUID()}`;
+    const deliveryId = store.deliveryIdFor(runId, sent, sentImages);
     commands.prepareComposerInput(sent).then((action) => {
       const imageDelivery = action.kind === "send" && sentImages.length > 0;
       if (imageDelivery) store.beginDelivery(runId, { id: deliveryId, attemptId: deliveryId, method: "send_images", text: sent, images: sentImages });

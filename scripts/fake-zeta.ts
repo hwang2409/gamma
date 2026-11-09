@@ -54,7 +54,8 @@ export const PARAM_RULES: Readonly<Record<string, ParamRule>> = {
   // server.py:630 + :827-831 (host_commands), then the busy check (:631, control.py:208-210), then :633-634 (cwd).
   // approval_mode is gated only when it is not null (server.py:624-626, `_optional_string`), so the handler checks it.
   new_session: { gated: { host_commands: ["session_host_commands"] }, afterTurn: { gated: { cwd: ["session_cwd"] } } },
-  // server.py:661-664 (session_id after host_commands).
+  // server.py:662 (host_commands), :663 -> control.py:209-213 (busy: -32004), then :664 (session_id). The fake checks
+  // session_id on dispatch, so a busy resume without session_id gets -32602 where zeta answers -32004; both reject.
   resume: { required: ["session_id"], gated: { host_commands: ["session_host_commands"] } },
   // server.py:1077-1084.
   list_sessions: { gated: { offset: ["list_sessions_paging"], limit: ["list_sessions_paging"], project_id: ["projects"] } },
@@ -77,11 +78,12 @@ export const PARAM_RULES: Readonly<Record<string, ParamRule>> = {
   // connections.py:1021-1022 -> ergonomics.py:85-93; ergonomics.py:1114-1119 (backward keys).
   session_history: { required: ["session_id"], gated: { before: ["session_history_backward"], history_validator: ["session_history_backward"] } },
   session_tree: { required: ["session_id"] },
-  // server.py:903 (rename), :923 (session_id), :956 (busy), :959-960 (set_settings).
+  // server.py:900-906: session_id (:903), then ergonomics.py:79-80 (name must be a string); no busy check.
   rename_session: { required: ["session_id"] },
   // server.py:923, then :956 (busy) before :973 (head_id). The fake does not model a busy switch_branch, so while a turn
   // runs it answers -32602 for a missing head_id where zeta answers -32004; both reject.
   switch_branch: { required: ["session_id", "head_id"] },
+  // server.py:923 (session_id), :956 (busy), then :959-960 (model, approval_mode).
   set_settings: { required: ["session_id"], afterTurn: { required: ["model", "approval_mode"] } },
   session_settings: { required: ["session_id"] },
   model_catalog: {},
@@ -279,7 +281,9 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
     const method = requested === "steer" ? "steer" : "send";
     const rule = PARAM_RULES[requested]!;
     const delivery = typeof params.delivery_id === "string" ? params.delivery_id : null;
-    const seen = delivery ? deliveries.get(delivery) : undefined;
+    // Zeta src/zeta/server/delivery.py:48-58 and :383-408, docs/serve-protocol.md:497-520: ids are retained per
+    // session (the attached runtime's store), the lookup runs after the no-active-session check and before turn checks.
+    const seen = delivery && active ? deliveries.get(`${active}\u0000${delivery}`) : undefined;
     const duplicate = (): Json => ({ result: statuses.get(delivery!) === "dropped" ? { accepted: false, duplicate: true, status: "dropped" } : { ...seen, duplicate: true } });
     const invalid = (checks: ParamChecks | undefined): Json | null => { const message = invalidParams(requested, checks, params, features); return message ? { error: { code: -32602, message } } : null; };
     if (!active) return { error: { code: -32003, message: "no active session" } };
@@ -297,7 +301,7 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
     const userMessage = { event: "user_message", session_id: active, text: value, mode: method, attachments: images.map((image) => ({ name: image.name, mime_type: image.mime_type, size: Math.floor(String(image.data).length * 3 / 4) })), ...(delivery ? { delivery_id: delivery } : {}) };
     const emitEcho = () => send(userMessage);
     const accepted = method === "send" ? { accepted: true, session_id: active } : { accepted: true };
-    if (delivery) { deliveries.set(delivery, accepted); statuses.set(delivery, "queued"); }
+    if (delivery) { deliveries.set(`${active}\u0000${delivery}`, accepted); statuses.set(delivery, "queued"); }
     const persistHistory = () => { if (delivery && method === "send") statuses.set(delivery, "delivered"); histories[active] = [...(histories[active] ?? []), { id: `sent-${sent.length}`, role: "user", content: [text(value)], ...(delivery ? { delivery_id: delivery } : {}), tool_result: null }]; };
     if (echo) { persistHistory(); emitEcho(); } else { withheldHistory.push(persistHistory); withheldEchoes.push(emitEcho); }
     if (method === "steer") {
@@ -622,8 +626,9 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         }
         if (method === "rename_session") {
           const session = sessions.find((candidate) => candidate.session_id === params.session_id);
-          if (!session || typeof params.name !== "string" || !params.name) return reply({ error: { code: -32602, message: "name must be nonempty" } });
-          session.name = params.name;
+          // ergonomics.py:79-80: name must be a string; core/session.py:788-794: a blank name clears it.
+          if (!session || typeof params.name !== "string") return reply({ error: { code: -32602, message: "name must be a string" } });
+          session.name = params.name.trim() ? params.name : "";
           return reply({ result: { session } });
         }
         if (method === "session_tree") return reply({ result: { session_id: params.session_id, branches: [{ id: "head-main", label: "main", seq: 1, current: true }, { id: "head-experiment", label: "experiment", seq: 7, current: false }] } });

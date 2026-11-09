@@ -139,6 +139,8 @@ test("the fake accepts an unknown param wherever real zeta does, and the feature
     // server.py:624-626: a null approval_mode needs no feature (new_session_settings is not negotiated here).
     await rows.check("new_session approval_mode null without its feature", "ok", request("new_session", { approval_mode: null }));
     await rows.check("resume", "ok", request("resume", { session_id: ACTIVE }));
+    // core/session.py:788-794: a blank name clears the session name; zeta does not reject it.
+    await rows.check("rename_session with an empty name", "ok", request("rename_session", { session_id: ACTIVE, name: "" }));
     for (const method of Object.keys(VALID)) {
       if (method === "steer") await rows.check("send before steer", "ok", request("send", { text: "start" }));
       // server.py:728-747: approval-1 is not pending, so approve and deny get past their params to -32006.

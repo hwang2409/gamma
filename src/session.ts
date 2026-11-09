@@ -2,6 +2,7 @@ import { fromZetaEvent, fromZetaHistory, type SessionLease, type ZetaClient } fr
 import type { RunEvent } from "@fulcrum/core";
 import type { hostBindings, Registration } from "./host-client";
 import type { QueuedImage } from "./image-queue";
+import { canDeliver } from "./run-state";
 type HostBindings = typeof hostBindings;
 
 /** The `SessionMetadata` fields this app reads from `list_sessions` (zeta docs/serve-protocol.md). */
@@ -74,6 +75,7 @@ export async function openSession(
   signal?: AbortSignal,
   knownStatus?: ServerStatus,
   registration?: Registration,
+  onReplay?: () => void,
 ): Promise<OpenResult> {
   if (client.features.includes("session_replay_seq")) throw new Error("session_replay_seq needs the sequence replay coordinator");
   const approvalReconnect = client.features.includes("approval_reconnect");
@@ -145,6 +147,19 @@ export async function openSession(
     return status;
   };
 
+  // Attach before the replay: fulcrum's replay disposes the session's old store first, so a busy or failed resume
+  // leaves the last transcript readable.
+  const before = knownStatus ?? await getStatus(client, signal);
+  if (registration) {
+    const resumed = await client.request("resume", { session_id: id, host_commands: [registration.command] }, { timeoutMs: 30_000, signal }) as { session?: SessionMeta };
+    initialStatus = before.session?.session_id === id ? before : { session: resumed.session ?? null, state: "idle", pending_approvals: [] };
+  } else if (before.session?.session_id === id) initialStatus = before;
+  else {
+    const resumed = await client.request("resume", { session_id: id }, { timeoutMs: 30_000, signal }) as { session?: SessionMeta };
+    initialStatus = { session: resumed.session ?? null, state: "idle", pending_approvals: [] };
+  }
+  if (signal?.aborted) throw Object.assign(new Error("request aborted"), { name: "AbortError" });
+  onReplay?.();
   let firstLoad = true;
   const lease = await client.replay(id, async (replaySignal) => {
     activeSignal = combinedSignal(replaySignal);
@@ -153,15 +168,6 @@ export async function openSession(
       return snapshotEvents(id, allRows(), await getStatus(client, activeSignal), true, approvalReconnect);
     }
     firstLoad = false;
-    const before = knownStatus ?? await getStatus(client, activeSignal);
-    if (registration) {
-      const resumed = await client.request("resume", { session_id: id, host_commands: [registration.command] }, { timeoutMs: 30_000, signal: activeSignal }) as { session?: SessionMeta };
-      initialStatus = before.session?.session_id === id ? before : { session: resumed.session ?? null, state: "idle", pending_approvals: [] };
-    } else if (before.session?.session_id === id) initialStatus = before;
-    else {
-      const resumed = await client.request("resume", { session_id: id }, { timeoutMs: 30_000, signal: activeSignal }) as { session?: SessionMeta };
-      initialStatus = { session: resumed.session ?? null, state: "idle", pending_approvals: [] };
-    }
     pages = [await historyPage(0, activeSignal)];
     progress?.(allRows().length, pages[0]!.nextOffset === null);
     return snapshotEvents(id, allRows(), initialStatus, pages[0]!.nextOffset === null, approvalReconnect);
@@ -240,6 +246,7 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
   let openOperation: { runId: SessionId; operationId: OperationId } | null = null;
   const leaseSubscriptions = new Map<string, () => void>();
   const leases = new Map<string, OpenRun>();
+  const replays = new Map<string, Promise<void>>();
   const knownStatus = new Map<string, ServerStatus>();
   const pending = new Map<string, { resolve(value: unknown): void; reject(error: unknown): void }>();
   const live = (target: ZetaClient) => client === target;
@@ -282,23 +289,32 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
     const abort = new AbortController();
     openAbort = abort;
     openOperation = { runId: effect.runId, operationId: effect.operationId };
-    const previous = runs.get(effect.runId).open;
-    if (previous) {
+    // The previous lease stays readable until this open's replay replaces its store.
+    const replaced = () => {
+      const previous = leases.get(effect.runId);
+      runs.dispatch({ type: "OPEN_EVICTED", runId: effect.runId, operationId: effect.operationId });
+      if (!previous) return;
       leaseSubscriptions.get(effect.runId)?.();
       leaseSubscriptions.delete(effect.runId);
       leases.delete(effect.runId);
       previous.lease.release();
-    }
+    };
     try {
       let history = { messages: 0, complete: false };
       const registration = await register(target, effect.runId);
       const initialStatus = knownStatus.get(effect.runId);
       knownStatus.clear();
-      const opened = await openSession(target, effect.runId, (messages, complete) => {
+      // fulcrum refuses a second replay of a session until the aborted one unwinds (back then forward during an open).
+      const prior = replays.get(effect.runId);
+      if (prior) { await prior; if (!live(target) || !current(effect.runId, effect.operationId)) return; }
+      const attempt = openSession(target, effect.runId, (messages, complete) => {
         history = { messages, complete };
         runs.dispatch({ type: "OPEN_PROGRESS", runId: effect.runId, operationId: effect.operationId, messages });
-      }, abort.signal, initialStatus, registration);
-      if (!live(target) || !current(effect.runId, effect.operationId)) { opened.lease.release(); return; }
+      }, abort.signal, initialStatus, registration, replaced);
+      const settled = attempt.then(() => {}, () => {}).finally(() => { if (replays.get(effect.runId) === settled) replays.delete(effect.runId); });
+      replays.set(effect.runId, settled);
+      const opened = await attempt;
+      if (!live(target) || !current(effect.runId, effect.operationId)) { opened.complete.catch(() => {}); opened.lease.release(); return; }
       const open: OpenRun = { id: effect.runId, lease: opened.lease, stale: false, history, syncing: true };
       runs.dispatch({ type: "RESUME_OK", runId: effect.runId, operationId: effect.operationId });
       runs.dispatch({ type: "OPEN_OK", runId: effect.runId, operationId: effect.operationId, open, ...(opened.session ? { session: opened.session } : {}) });
@@ -338,7 +354,7 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
   };
   const handleImages = async (effect: Extract<WorkspaceEffect, { type: "send-images" }>) => {
     const delivery = runs.get(effect.runId).deliveries.get(effect.intentId);
-    if (!client || !delivery) { const error = new Error("session is not attached"); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false, failed: true }); finish(effect.operationId, undefined, error); return; }
+    if (!client || !delivery || !canDeliver(runs.getCatalog(), effect.runId)) { const error = new Error(client && delivery ? "this run is not open yet; your message is still in the draft" : "session is not attached"); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false, failed: true }); finish(effect.operationId, undefined, error); return; }
     try {
       await client.request("send_images", { session_id: effect.runId, text: delivery.text, images: delivery.images.map(({ name, mime_type, data }) => ({ name, mime_type, data })), delivery_id: effect.intentId }, { timeoutMs: 30_000 });
       runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false }); finish(effect.operationId, true);
