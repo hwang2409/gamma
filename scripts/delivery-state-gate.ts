@@ -145,7 +145,10 @@ try {
           await field.fill(text); await field.press("Enter");
           await Bun.sleep(200);
           await page.goBack(); await page.waitForURL(/run=s-markdown/); await ready(page);
-          await Bun.sleep(4_500); // zeta takes the send while this page is away
+          await Bun.sleep(4_500); // the delayed send reaches zeta while this page is away
+          // With delivery_session_guard, zeta refuses it if the back page attached s-markdown first (nothing recorded);
+          // otherwise zeta takes it. M1: a taken send never comes back as a draft; a refused one must come back.
+          const taken = fake.sent.some((item) => item.text === text);
           await page.goForward(); await page.waitForURL(/run=s-themes/); await ready(page);
           await page.locator('.status-line').waitFor({ timeout: 15_000 });
           await Bun.sleep(1_500); // the restored delivery settles from delivery_status
@@ -154,7 +157,7 @@ try {
           if (restored) await field.press("Enter"); // what a user does with a ready draft
           await Bun.sleep(1_500);
           const turns = fake.sent.filter((item) => item.text === text);
-          if (turns.length !== 1 || restored) throw new Error(`after page back and forward the draft held ${JSON.stringify(restored)} and zeta accepted ${turns.length} turns`);
+          if (turns.length !== 1 || turns[0]!.session !== "s-themes" || (taken ? restored : !restored)) throw new Error(`after page back and forward (zeta ${taken ? "took" : "refused"} the send) the draft held ${JSON.stringify(restored)} and zeta accepted ${turns.length} turns in ${JSON.stringify(turns.map((item) => item.session))}`);
         } finally { await cleanup(context, page); }
       });
       // B1: a page for another run never queries or resends this run's saved delivery; only Enter sends it, in its own run.
