@@ -46,7 +46,7 @@ function useDismiss(open: boolean, root: React.RefObject<HTMLElement | null>, cl
  */
 const leftFor = (event: React.FocusEvent<HTMLElement>) => event.relatedTarget instanceof Node && !event.currentTarget.contains(event.relatedTarget);
 
-function ModelPicker({ value, models, resolvedDefault, allowDefault, onChange }: { value: string; models: string[]; resolvedDefault?: string; allowDefault: boolean; onChange(value: string): void }) {
+function ModelPicker({ value, models, resolvedDefault, allowDefault, onChange, disabledReason }: { value: string; models: string[]; resolvedDefault?: string; allowDefault: boolean; onChange(value: string): void; disabledReason?: string }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
   const root = useRef<HTMLDivElement>(null);
@@ -74,8 +74,8 @@ function ModelPicker({ value, models, resolvedDefault, allowDefault, onChange }:
     }
   };
   return <div className="model-picker" ref={root}>
-    <button ref={button} type="button" className="composer-tool" aria-haspopup="listbox" aria-expanded={open} aria-label={`model: ${label}`} title={label} onClick={() => setOpen(!open)}>{label}</button>
-    {open ? <div role="listbox" aria-label="model" tabIndex={0} aria-activedescendant={`${listId}-${active}`} onKeyDown={key} onBlur={(event) => { if (!root.current?.contains(event.relatedTarget)) setOpen(false); }}>
+    <button ref={button} type="button" className="composer-tool" aria-haspopup="listbox" aria-expanded={open} aria-label={`model: ${label}`} title={disabledReason ?? label} disabled={Boolean(disabledReason)} onClick={() => setOpen(!open)}>{label}</button>
+    {open && !disabledReason ? <div role="listbox" aria-label="model" tabIndex={0} aria-activedescendant={`${listId}-${active}`} onKeyDown={key} onBlur={(event) => { if (!root.current?.contains(event.relatedTarget)) setOpen(false); }}>
       {options.map((model, index) => <button id={`${listId}-${index}`} tabIndex={-1} type="button" role="option" aria-selected={model === value} data-active={index === active || undefined} key={model || "default"} onClick={() => { onChange(model); close(); }}>{model || defaultLabel}</button>)}
     </div> : null}
   </div>;
@@ -85,7 +85,7 @@ function ModelPicker({ value, models, resolvedDefault, allowDefault, onChange }:
  * The run's model and approval mode, from zeta. A blank run has no session yet: it shows zeta's catalog and the mode
  * the first send starts the run with (`nextRunModel`, then `set_settings` for YOLO).
  */
-export function RunSettings({ available, deliveries, sessionId, createdWithDefault, running, store, runId }: { available: boolean; deliveries: DeliveryManager; sessionId: string | null; createdWithDefault: boolean; running: boolean; store: RunStateStore; runId: string }) {
+export function RunSettings({ available, disabledReason, deliveries, sessionId, createdWithDefault, running, store, runId }: { available: boolean; deliveries: DeliveryManager; sessionId: string | null; createdWithDefault: boolean; running: boolean; /** Why a change cannot reach zeta now (the run is not open); it would be lost. */ disabledReason?: string; store: RunStateStore; runId: string }) {
   const record = useSyncExternalStore(store.subscribe, () => store.get(runId));
   const catalogState = useSyncExternalStore(store.subscribe, store.getCatalog);
   const settings = record.settings;
@@ -127,10 +127,11 @@ export function RunSettings({ available, deliveries, sessionId, createdWithDefau
   const confirmAllow = () => { closeConfirm(); change({ approval_mode: "allow" }); };
   return (
     <>
-      <ModelPicker value={selected} models={[...(catalogState.modelCatalog?.models ?? [])]} resolvedDefault={sessionId ? record.model.resolvedDefault : undefined} allowDefault={!sessionId || Boolean(record.model.resolvedDefault)} onChange={pick} />
-      <button ref={approvalButton} type="button" className="composer-tool approval-mode" data-yolo={yolo || undefined} aria-pressed={yolo} aria-label={yolo ? "approval mode: YOLO, tools run without asking" : "approval mode: Ask, tools ask before they run"} title={yolo ? "tools run without asking · press to ask again" : "tools ask before they run · press for YOLO"} onClick={toggle}>
+      <ModelPicker value={selected} models={[...(catalogState.modelCatalog?.models ?? [])]} resolvedDefault={sessionId ? record.model.resolvedDefault : undefined} allowDefault={!sessionId || Boolean(record.model.resolvedDefault)} onChange={pick} disabledReason={disabledReason} />
+      <button ref={approvalButton} type="button" className="composer-tool approval-mode" data-yolo={yolo || undefined} aria-pressed={yolo} aria-label={yolo ? "approval mode: YOLO, tools run without asking" : "approval mode: Ask, tools ask before they run"} title={disabledReason ?? (yolo ? "tools run without asking · press to ask again" : "tools ask before they run · press for YOLO")} disabled={Boolean(disabledReason)} onClick={toggle}>
         {yolo ? "YOLO" : "Ask"}
       </button>
+      {disabledReason ? <span className="settings-blocked">{disabledReason}</span> : null}
       {record.model.deferred ? <span className="model-deferred" role="status">model applies to the next turn</span> : null}
       {settings.error ? <span className="settings-error" role="alert" title={settings.error}>{settings.error}</span> : null}
       {confirmYolo ? <div ref={confirmRef} className="confirm-popover" role="dialog" aria-label="allow tools without asking" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setConfirmYolo(false); }}>

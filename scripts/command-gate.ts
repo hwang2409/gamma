@@ -653,7 +653,12 @@ try {
       if (early.length) throw new Error(`enter during the attach showed a receipt: ${JSON.stringify(early)}`);
       if (await field(page).inputValue() !== "/status") throw new Error("enter during the attach dropped the draft");
       await step(page, "the composer says sending waits for the run", () => page.locator('[data-part="composer-message"]', { hasText: "sending is paused until the run opens" }).waitFor({ timeout: 2_000 }));
-      await step(page, "the dock status says the run is opening", () => page.locator(".dock").getByText("opening the run…", { exact: true }).waitFor({ timeout: 2_000 }));
+      // A model or approval change before the run opens has no attached session to reach (zeta server.py:949 ergonomics.active), so it would be lost.
+      for (const control of [page.getByRole("button", { name: /^model:/ }), page.locator("button.approval-mode")]) {
+        if (!await control.isDisabled()) throw new Error(`${await control.getAttribute("aria-label")} stays enabled while the run opens, so a change there would be lost`);
+      }
+      await step(page, "one message names the wait: the panel says zeta has not attached the run yet", () => page.locator(".panel").getByText("waiting for zeta to attach this run", { exact: true }).waitFor({ timeout: 2_000 }));
+      if (await page.locator(".dock .status-line").count()) throw new Error(`the dock repeats the opening panel: ${JSON.stringify(await page.locator(".dock .status-line").innerText())}`);
       await step(page, "the attach reply arrives", () => until(() => status()?.replied !== undefined, 10_000));
       await step(page, "the attached run asks for its command catalog", () => until(() => fake.requests.slice(since).some((request) => request.method === "slash_list" && request.replied !== undefined), 10_000));
       const late = await page.locator(".command-receipt-text").allInnerTexts();
@@ -722,7 +727,8 @@ try {
       const early = window.filter((request) => SENDS.includes(request.method)).map((request) => request.method);
       const status = await page.locator('[data-part="composer-message"]').innerText();
       if (early.length || await field(page).inputValue() !== "hello after back" || status !== "sending is paused until the run opens") throw new Error(`enter during the reopen: requests=${JSON.stringify(early)} draft=${JSON.stringify(await field(page).inputValue())} status=${JSON.stringify(status)}`);
-      await step(page, "the dock status says the run is opening", () => page.locator(".dock").getByText("opening the run…", { exact: true }).waitFor({ timeout: 2_000 }));
+      await step(page, "one message names the wait: the panel says the history is loading", () => page.locator(".panel").getByText("loading history", { exact: true }).waitFor({ timeout: 2_000 }));
+      if (await page.locator(".dock .status-line").count()) throw new Error(`the dock repeats the opening panel: ${JSON.stringify(await page.locator(".dock .status-line").innerText())}`);
       if (await page.getByText("could not send", { exact: false }).count()) throw new Error("enter during the reopen showed a send error");
       await step(page, "the reopen's first history page arrives", () => until(() => fake.requests.slice(since).some((request) => request.method === "session_history" && request.replied !== undefined), 10_000));
       await step(page, "sending resumes", () => page.locator('[data-part="composer-submit"]:not([aria-disabled])').waitFor({ timeout: 10_000 }));

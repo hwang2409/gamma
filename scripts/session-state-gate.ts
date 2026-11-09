@@ -51,18 +51,25 @@ async function poll(check: () => Promise<boolean>, attempts = 50) {
   return false;
 }
 
-// These two UX-8 cases are regression guards: both pass on 58d9713 with this gate and fake.
-for (const width of [1440, 390]) await check(`natural turn end resends a queued steer at ${width}`, async () => {
+// UX-8 regression guards (the second passes on 58d9713 with this gate and fake).
+// gamma does not negotiate session_history_fidelity, so zeta sends it no drop reason (delivery.py:305-325) and gamma never
+// resends a dropped steer by itself: the row offers the resend, and the click sends it once.
+for (const width of [1440, 390]) await check(`natural turn end offers the resend of a queued steer at ${width}`, async () => {
   const browser = await chromium.launch({ headless: true });
   const { context, page } = await fresh(browser, width, "/?run=s-reconnect");
+  fake.clearSent(); // the previous width's resend must not count as this one's
   try {
     await page.getByRole("button", { name: "approve", exact: true }).waitFor({ timeout: 15_000 });
     await page.locator('.dock textarea[aria-label="message"]').fill("please approve this");
     await page.getByRole("button", { name: "steer the running turn" }).click();
     await page.getByRole("status", { name: "message queued" }).waitFor();
     await page.getByRole("button", { name: "approve", exact: true }).click();
-    if (!await poll(() => Promise.resolve(fake.sent.some((item) => item.method === "send" && item.text === "please approve this")), 100)) throw new Error("natural turn end did not resend the dropped steer as a new message");
-    if (!await poll(async () => await page.getByRole("status", { name: /message (queued|requesting|retrying)/ }).count() === 0)) throw new Error("the accepted resend still looked queued");
+    const resend = page.getByRole("button", { name: "resend" });
+    await resend.waitFor({ timeout: 15_000 }); await Bun.sleep(300);
+    if (fake.sent.some((item) => item.method === "send" && item.text === "please approve this")) throw new Error("a steer dropped with no known reason was resent without the user");
+    await resend.click();
+    if (!await poll(() => Promise.resolve(fake.sent.some((item) => item.method === "send" && item.text === "please approve this")), 100)) throw new Error("the resend click did not send the dropped steer as a new message");
+    if (!await poll(async () => await page.getByRole("status", { name: /message (queued|requesting|resending)/ }).count() === 0)) throw new Error("the accepted resend still looked queued");
     if (await page.locator('[data-part="composer-message"]', { hasText: /sending|steering/ }).count()) throw new Error("the composer still looked like it was sending");
     if (await page.locator(".status-line").getAttribute("data-state") === "ready") throw new Error("the resent turn was running but the header said ready");
   } finally { await context.close(); await browser.close(); fake.setLive(false); fake.setLive(true); fake.drop(); await Bun.sleep(300); await fake.start(); }

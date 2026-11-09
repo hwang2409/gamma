@@ -2,7 +2,8 @@ import { fromZetaEvent, fromZetaHistory, type SessionLease, type ZetaClient } fr
 import type { RunEvent } from "@fulcrum/core";
 import type { hostBindings, Registration } from "./host-client";
 import type { QueuedImage } from "./image-queue";
-import { canDeliver } from "./run-state";
+import { evictedResult, refusal } from "./delivery";
+import { decideSend, MISMATCH, sessionMismatch } from "./delivery-owner";
 type HostBindings = typeof hostBindings;
 
 /** The `SessionMetadata` fields this app reads from `list_sessions` (zeta docs/serve-protocol.md). */
@@ -220,11 +221,13 @@ export type OpenFailure = { id: string; message: string; busy: boolean };
 export type RunState = {
   selected: string | null;
   open: OpenRun | null;
-  opening: { id: string; messages: number } | null;
+  opening: { id: string; messages: number; loading: boolean } | null;
   openError: OpenFailure | null;
   session: SessionMeta | null;
   /** The attached run that owns zeta's active turn, independent from the selected URL. */
   active: string | null;
+  /** The active run's title (its id when gamma has no name for it), for notes a person reads. */
+  activeTitle: string | null;
   attached: string | null;
 };
 
@@ -354,11 +357,19 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
   };
   const handleImages = async (effect: Extract<WorkspaceEffect, { type: "send-images" }>) => {
     const delivery = runs.get(effect.runId).deliveries.get(effect.intentId);
-    if (!client || !delivery || !canDeliver(runs.getCatalog(), effect.runId)) { const error = new Error(client && delivery ? "this run is not open yet; your message is still in the draft" : "session is not attached"); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false, failed: true }); finish(effect.operationId, undefined, error); return; }
+    const { blocked, sessionId } = decideSend(runs.getCatalog(), effect.runId, { kind: "attempt", intentId: effect.intentId });
+    // Nothing left gamma: the draft keeps its id and says why, the same shape as handleDelivery's pre-send block.
+    if (!client || !delivery || blocked) { const error = new Error(client && delivery ? blocked : "session is not attached"); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false, failed: true, blocked: true, note: error.message }); finish(effect.operationId, undefined, error); return; }
     try {
-      await client.request("send_images", { session_id: effect.runId, text: delivery.text, images: delivery.images.map(({ name, mime_type, data }) => ({ name, mime_type, data })), delivery_id: effect.intentId }, { timeoutMs: 30_000 });
+      await client.request("send_images", { session_id: sessionId, text: delivery.text, images: delivery.images.map(({ name, mime_type, data }) => ({ name, mime_type, data })), delivery_id: effect.intentId }, { timeoutMs: 30_000 });
       runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false }); finish(effect.operationId, true);
-    } catch (error) { runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false, failed: true }); finish(effect.operationId, undefined, error); }
+    } catch (error) {
+      if (sessionMismatch(error)) { runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, failed: true, blocked: true, note: MISMATCH }); return finish(effect.operationId, undefined, new Error(MISMATCH)); }
+      const evicted = evictedResult(error);
+      if (evicted?.accepted) { runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false }); return finish(effect.operationId, true); }
+      runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false, failed: true, refused: Boolean(evicted) });
+      finish(effect.operationId, undefined, evicted ? refusal(evicted) : error);
+    }
   };
   const executeOne = (effect: WorkspaceEffect) => {
     if (effect.type === "status") return void handleStatus(effect);

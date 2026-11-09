@@ -445,8 +445,13 @@ try {
       await submit.click();
       await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>(".dock textarea")?.value === "", undefined, { timeout: 3000 });
       await shoot(page, "composer-running-1440-tokyo-night");
-      // The fake turn has no tool call, so it ends with the steer still queued and drops it, as zeta does; the app
-      // resends it as the next message, which starts a new turn.
+      // The fake turn has no tool call, so it ends with the steer still queued and drops it, as zeta does. gamma does not
+      // negotiate session_history_fidelity, so it never learns the drop reason and never resends by itself: the row offers
+      // the resend, and the click sends it as the next message, which starts a new turn.
+      const resend = page.getByRole("button", { name: "resend" });
+      await resend.waitFor({ timeout: 10_000 }); await Bun.sleep(300);
+      if (fake.sent.length !== 2) throw new Error(`the dropped steer was resent without the user: ${JSON.stringify(fake.sent)}`);
+      await resend.click();
       for (let i = 0; i < 100 && fake.sent.length < 3; i++) await Bun.sleep(100);
       await composer.and(page.locator('[data-state="steerable"]')).waitFor({ timeout: 5000 });
       // One message the user wrote is one row: the steer's row became the resent message, it was not added again.

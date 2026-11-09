@@ -1,36 +1,46 @@
 import type { RunEvent } from "@fulcrum/core";
-import type { ZetaClient } from "@fulcrum/zeta";
-import { canDeliver } from "./run-state";
+import type { SessionStore, ZetaClient } from "@fulcrum/zeta";
+import { decideSend, MISMATCH, sessionMismatch, type PendingDelivery } from "./delivery-owner";
 import { catalogModels, catalogProviders, settingModel } from "./settings";
 
 /** Zeta errors that mean the turn changed state between the click and the server: -32004 running, -32005 not running. */
 const TURN_RUNNING = -32004;
 const NO_TURN = -32005;
 const DETAILS_EVICTED = -32010;
+const INTERNAL = -32603;
 const code = (error: unknown) => (error as { code?: unknown } | null)?.code;
 
 type Accepted = { accepted?: boolean; status?: string };
 
-/** One message the user asked for. `intent` names it for its whole life; `id` names one attempt to deliver it. */
-type Message = { text: string; intent: string; id: string | null };
+/**
+ * A retried id whose details zeta evicted (zeta delivery.py:401-407: -32010 with `data.outcome`): the first attempt
+ * landed, and its outcome says what happened. Null for any other error.
+ */
+export const evictedResult = (error: unknown): Accepted | null => {
+  if (code(error) !== DETAILS_EVICTED) return null;
+  const outcome = (error as { data?: { outcome?: unknown } }).data?.outcome;
+  return { accepted: outcome !== "dropped", status: String(outcome) };
+};
+
+/** One message the user asked for. `intent` names it for its whole life; `id` names one attempt; `session` is where it must land. */
+type Message = { text: string; intent: string; id: string | null; session: string };
 type Method = "send" | "steer";
 
 /** Whether the turn changed state between the click and the server, so the other method should run instead. */
 const raced = (method: Method, error: unknown) => code(error) === (method === "steer" ? NO_TURN : TURN_RUNNING);
 /** A definite refusal (`accepted: false`): zeta did no work for this id, so a resend needs a new one. */
-const refusal = (result: Accepted) => Object.assign(new Error(result.status === "dropped" ? "the server dropped this message before the turn took it; send it again" : "the server did not accept this message"), { refused: true });
-const NOT_OPEN = "this run is not open yet; your message is still in the draft";
+export const refusal = (result: Accepted) => Object.assign(new Error(result.status === "dropped" ? "the server dropped this message before the turn took it; send it again" : "the server did not accept this message"), { refused: true });
 
 /** Performs one idempotent zeta delivery attempt and publishes its accepted user row. Durable retry and stop policy lives in RunRecord.deliveries. */
 
-export function createDelivery(newId: () => string = () => `web-${crypto.randomUUID()}`, reconcile?: (event: RunEvent) => void) {
-  const request = async (client: ZetaClient, method: Method, { text, id, intent }: Message) => {
+export function createDelivery(reconcile?: (event: RunEvent) => void) {
+  const request = async (client: ZetaClient, method: Method, { text, id, intent, session }: Message) => {
     try {
-      return (await client.request(method, { text, ...(id ? { delivery_id: id } : {}) }, { timeoutMs: 15_000, intent })) as Accepted;
+      // zeta 1bf97c3c protocol.py:566-583 (delivery_session_guard): a session_id that is not the attached session is refused and recorded nowhere.
+      return (await client.request(method, { text, session_id: session, ...(id ? { delivery_id: id } : {}) }, { timeoutMs: 15_000, intent })) as Accepted;
     } catch (error) {
-      // The id was accepted before, but the server no longer has its result: its outcome still says what happened.
-      const outcome = (error as { data?: { outcome?: unknown } }).data?.outcome;
-      if (code(error) === DETAILS_EVICTED) return { accepted: outcome !== "dropped", status: String(outcome) };
+      const evicted = evictedResult(error);
+      if (evicted) return evicted;
       throw error;
     }
   };
@@ -52,19 +62,13 @@ export function createDelivery(newId: () => string = () => `web-${crypto.randomU
     // The echo is display only: zeta already took the message, and a reopen replays it from history.
     try { reconcile({ type: "user_message", text: message.text, mode: used, intent: message.intent, delivery_id: message.id }); } catch {}
   };
-  const fresh = (client: ZetaClient, text: string, deliveryId = newId()): Message =>
-    ({ text, intent: deliveryId, id: client.features.includes("delivery_id") ? deliveryId : null });
+  const fresh = (client: ZetaClient, text: string, deliveryId: string, session: string): Message =>
+    ({ text, intent: deliveryId, id: client.features.includes("delivery_id") ? deliveryId : null, session });
   return {
-    async submit(client: ZetaClient, text: string, steer: boolean, deliveryId = newId()) {
-      const message = fresh(client, text, deliveryId);
+    /** One attempt with `deliveryId` into `session` (the owner's decideSend gives both); `intent` names the message's row when this attempt resends it. */
+    async submit(client: ZetaClient, text: string, steer: boolean, deliveryId: string, session: string, intent = deliveryId) {
+      const message = { ...fresh(client, text, deliveryId, session), intent };
       const delivered = await deliver(client, steer ? "steer" : "send", message);
-      if (delivered.result.accepted === false) throw refusal(delivered.result);
-      reconcileAccepted(message, delivered.used, delivered.result);
-      return delivered;
-    },
-    async retry(client: ZetaClient, text: string, intent: string, deliveryId = newId()) {
-      const message = { text, intent, id: client.features.includes("delivery_id") ? deliveryId : null };
-      const delivered = await deliver(client, "send", message);
       if (delivered.result.accepted === false) throw refusal(delivered.result);
       reconcileAccepted(message, delivered.used, delivered.result);
       return delivered;
@@ -72,6 +76,21 @@ export function createDelivery(newId: () => string = () => `web-${crypto.randomU
     stop(client: ZetaClient) { return stopTurn(client); },
   };
 }
+
+/**
+ * The drop reason zeta's live delivery_status event gave for `deliveryId` (zeta event_contract.py:11-33, published at
+ * delivery.py:305-325 only to a controller with session_history_fidelity). fulcrum keeps it on the message's user row
+ * (`delivery_reason`) or, with no such row, on a notification row. None when this view never saw that event.
+ */
+const dropReason = (store: SessionStore | undefined, deliveryId: string) => {
+  const outline = store?.getOutline() ?? [];
+  for (let index = outline.length - 1; index >= 0; index--) {
+    const item = store!.getItem(outline[index]!.id);
+    if (item?.type === "user" && item.event.type === "user_message" && item.event.delivery_id === deliveryId) return item.event.delivery_reason;
+    if (item?.type === "notification" && item.event.type === "notification" && item.event.data?.type === "delivery_status" && item.event.data.delivery_id === deliveryId) return typeof item.event.data.reason === "string" ? item.event.data.reason : undefined;
+  }
+  return undefined;
+};
 
 type DeliveryStore = {
   hasMessageDelivery(id: string): boolean;
@@ -95,30 +114,36 @@ function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: Del
   };
   const handleStatus = async (effect: Extract<WorkspaceEffect, { type: "delivery-status" }>) => {
     const target = client(); if (!target) return;
-    const delivery = runs.get(effect.runId).deliveries.get(effect.intentId);
-    if (!delivery || delivery.operationId !== effect.operationId) return;
+    const record = runs.get(effect.runId);
+    const delivery = record.deliveries.get(effect.intentId);
+    const retry = record.retryDelivery?.id === effect.intentId ? record.retryDelivery : undefined;
+    if (delivery ? delivery.operationId !== effect.operationId : retry?.operationId !== effect.operationId) return;
     try {
-      const result = await target.request("delivery_status", { delivery_id: delivery.attemptId }, { timeoutMs: 15_000 }) as { status?: string; outcome?: string };
+      const result = await target.request("delivery_status", { delivery_id: delivery?.attemptId ?? effect.intentId }, { timeoutMs: 15_000 }) as { status?: string; outcome?: string };
       const status = result.status === "evicted" ? result.outcome : result.status;
-      const settled = status === "delivered" ? "delivered" : status === "dropped" || (delivery.method === "opaque" && (status === "unknown" || status === "not_delivered")) ? "dropped" : null;
-      if (settled) {
-        runs.dispatch({ type: "DELIVERY_STATUS", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, status: settled });
-        if (settled === "dropped" && delivery.method === "opaque") commandFailure?.(effect.runId, "outcome unknown; this command was not retried");
-      }
-    } catch { /* A reconnect or later turn end queries durable truth again. */ }
+      const unknown = status === "unknown" || status === "not_delivered";
+      const settled = status === "delivered" ? "delivered" : status === "dropped" || (delivery?.method === "opaque" && unknown) ? "dropped" : unknown ? "unknown" : null;
+      if (!settled) return;
+      const reason = settled === "dropped" && delivery ? dropReason(record.open?.lease.store, delivery.attemptId) : undefined;
+      runs.dispatch({ type: "DELIVERY_STATUS", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, status: settled, ...(reason ? { reason } : {}) });
+      if (settled === "dropped" && delivery?.method === "opaque") commandFailure?.(effect.runId, "outcome unknown; this command was not retried");
+    } catch { /* A later turn end or open queries durable truth again. */ }
   };
   /** An opaque command input: exactly one `send {input_id}`, never resent after an uncertain outcome. */
-  const handleOpaqueDelivery = async (effect: Extract<WorkspaceEffect, { type: "deliver" }>, delivery: import("./run-state").PendingDelivery, target: ZetaClient | null) => {
+  const handleOpaqueDelivery = async (effect: Extract<WorkspaceEffect, { type: "deliver" }>, delivery: PendingDelivery, target: ZetaClient | null) => {
     const inputId = opaqueInputs.get(effect.operationId);
     opaqueInputs.delete(effect.operationId);
-    if (target && inputId && !canDeliver(runs.getCatalog(), effect.runId)) { runs.restoreDraft(effect.runId, delivery.text); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, failed: true }); return finish(effect.operationId, new Error(NOT_OPEN)); }
+    const decision = decideSend(runs.getCatalog(), effect.runId, { kind: "attempt", intentId: effect.intentId });
+    if (target && inputId && decision.blocked) { runs.restoreDraft(effect.runId, delivery.text); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, failed: true }); return finish(effect.operationId, new Error(decision.blocked)); }
     if (!target || !inputId) { const error = unavailable(); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, failed: true }); return finish(effect.operationId, error); }
     try {
-      const result = await target.request("send", { input_id: inputId, ...(delivery.attemptId ? { delivery_id: delivery.attemptId } : {}) }, { timeoutMs: 15_000, intent: delivery.id }) as Accepted;
+      const result = await target.request("send", { input_id: inputId, session_id: decision.sessionId, ...(delivery.attemptId ? { delivery_id: delivery.attemptId } : {}) }, { timeoutMs: 15_000, intent: delivery.id }) as Accepted;
       if (result.accepted === false) throw Object.assign(refusal(result), { code: -1 });
       runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, queued: Boolean(delivery.attemptId) });
       return finish(effect.operationId);
     } catch (error) {
+      // session_mismatch: zeta recorded nothing; the draft and its id stay in this run with the note, and nothing is retried.
+      if (sessionMismatch(error)) { runs.restoreDraft(effect.runId, delivery.text); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, failed: true, blocked: true, note: MISMATCH }); return finish(effect.operationId, new Error(MISMATCH)); }
       const uncertain = typeof code(error) !== "number";
       if (!uncertain || !delivery.attemptId) runs.restoreDraft(effect.runId, delivery.text);
       const failure = uncertain ? "outcome unknown; this command was not retried" : error instanceof Error ? error.message : String(error);
@@ -132,14 +157,23 @@ function createDeliveryEffectExecutor(client: () => ZetaClient | null, runs: Del
     if (!delivery || delivery.operationId !== effect.operationId) return;
     const target = client();
     if (delivery.method === "opaque") return handleOpaqueDelivery(effect, delivery, target);
-    if (!target || !canDeliver(runs.getCatalog(), effect.runId)) { const error = target ? new Error(NOT_OPEN) : unavailable(); if (delivery.state !== "retrying") runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, failed: true }); return finish(effect.operationId, error); }
-    const attemptId = delivery.state === "retrying" ? `web-${crypto.randomUUID()}` : delivery.attemptId;
+    const decision = decideSend(runs.getCatalog(), effect.runId, { kind: "attempt", intentId: effect.intentId });
+    const nothingSent = (error: Error) => { runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: delivery.attemptId, failed: true, blocked: true, note: error.message }); finish(effect.operationId, error); };
+    if (!target) return nothingSent(unavailable());
+    if (decision.blocked) return nothingSent(new Error(decision.blocked));
     try {
-      if (delivery.state === "retrying") await record(effect.runId).delivery.retry(target, delivery.text, delivery.id, attemptId);
-      else await record(effect.runId).delivery.submit(target, delivery.text, delivery.method === "steer", attemptId);
-      runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId, queued: target.features.includes("delivery_id") });
+      await record(effect.runId).delivery.submit(target, delivery.text, delivery.method === "steer", decision.id, decision.sessionId!, delivery.id);
+      runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: decision.id, queued: target.features.includes("delivery_id") });
       finish(effect.operationId);
-    } catch (error) { if (delivery.state !== "retrying") runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId, failed: true, refused: (error as { refused?: boolean }).refused === true }); finish(effect.operationId, error); }
+    } catch (error) {
+      // session_mismatch: another run got attached between the check and zeta; nothing was recorded, so the draft goes back with its id and no retry.
+      if (sessionMismatch(error)) { runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: decision.id, failed: true, blocked: true, note: MISMATCH }); return finish(effect.operationId, new Error(MISMATCH)); }
+      const refused = (error as { refused?: boolean }).refused === true;
+      // A refusal or a coded error is zeta's definite answer, and its message is the reason a resent row shows. An internal
+      // error (-32603) may come after zeta recorded the id, so that outcome stays unknown, like a lost reply.
+      const failure = refused || (typeof code(error) === "number" && code(error) !== INTERNAL) ? (error instanceof Error ? error.message : String((error as { message?: unknown }).message ?? error)) : undefined;
+      runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, intentId: effect.intentId, operationId: effect.operationId, attemptId: decision.id, failed: true, refused, ...(failure ? { failure } : {}) }); finish(effect.operationId, error);
+    }
   };
   const settingsFailure = (effect: Extract<WorkspaceEffect, { type: "load-settings" | "set-settings" }>, error: unknown) => {
     runs.dispatch({ type: "SETTINGS_FAIL", runId: effect.runId, operationId: effect.operationId, error: error instanceof Error ? error.message : "settings unavailable" }); finish(effect.operationId, error);
@@ -181,7 +215,7 @@ export function createDeliveryManager(client: () => ZetaClient | null, runs: Del
   let activeRun: string | null = null;
   const record = (runId: string): DeliveryRecord => {
     const prior = records.get(runId); if (prior) return prior;
-    const next: DeliveryRecord = { delivery: createDelivery(undefined, (event) => next.store?.dispatch(event)) };
+    const next: DeliveryRecord = { delivery: createDelivery((event) => next.store?.dispatch(event)) };
     records.set(runId, next); return next;
   };
   const finish = (operationId: OperationId, error?: unknown) => {
@@ -208,7 +242,7 @@ export function createDeliveryManager(client: () => ZetaClient | null, runs: Del
       runs.beginDelivery(runId, { id: deliveryId, attemptId: deliveryId, method: steer ? "steer" : "send", text, images: [] }, operationId);
       return result;
     },
-    submitOpaque(runId: string, inputId: string, displayText: string, sourceText = displayText, deliveryId = `web-${crypto.randomUUID()}`) {
+    submitOpaque(runId: string, inputId: string, displayText: string, sourceText: string, deliveryId: string) {
       const target = client();
       if (!target) return Promise.reject(new Error("not connected to zeta serve"));
       const operationId = crypto.randomUUID() as OperationId;
