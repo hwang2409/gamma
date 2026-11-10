@@ -126,10 +126,12 @@ async function ambiguousResumeSequence(browser: Browser) {
   const { context, page } = await fresh(browser, 390, "/?run=abcd");
   try {
     await page.getByText(/ambiguous/i).waitFor({ timeout: 15_000 });
-    for (const candidate of ["abcd1111", "abcd2222"]) {
-      const link = page.getByRole("link", { name: candidate, exact: true });
-      if (await link.getAttribute("href") !== `?run=${candidate}`) throw new Error(`${candidate} did not link to its run route`);
-    }
+    const choices = page.getByLabel("matching runs");
+    if (await choices.getByText("abcd1111", { exact: true }).count() !== 1) throw new Error("the colliding short candidate was not deduplicated");
+    if (await choices.getByRole("link", { name: "abcd1111", exact: true }).count()) throw new Error("the colliding short candidate linked back to another ambiguous route");
+    await choices.getByText("type a longer id", { exact: false }).waitFor();
+    const link = choices.getByRole("link", { name: "abcd2222", exact: true });
+    if (await link.getAttribute("href") !== "?run=abcd2222") throw new Error("the distinct candidate did not link to its run route");
     if (new URL(page.url()).searchParams.get("run") !== "abcd") throw new Error(`ambiguous prefix auto-opened ${page.url()}`);
     if (fake.requests.slice(before).some((request) => request.method === "session_history" || request.method === "send")) throw new Error("ambiguous prefix replayed or sent");
   } finally { await context.close(); fake.drop(); await Bun.sleep(300); }

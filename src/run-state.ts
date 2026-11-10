@@ -104,7 +104,7 @@ export type WorkspaceEvent =
   | { type: "OPEN_EVICTED"; runId: SessionId; operationId: OperationId }
   | { type: "OPEN_OK"; runId: SessionId; operationId: OperationId; open: OpenRun; session?: SessionMeta }
   | { type: "OPEN_COMPLETE"; runId: SessionId; operationId: OperationId; open: OpenRun }
-  | { type: "OPEN_FAIL"; runId: SessionId; operationId: OperationId; error: string; busy: boolean; candidates?: readonly string[] }
+  | { type: "OPEN_FAIL"; runId: SessionId; operationId: OperationId; error: string; busy: boolean; candidates?: OpenFailure["candidates"] }
   | { type: "OPEN_DISMISS"; runId: SessionId }
   | { type: "RESUME_OK"; runId: SessionId; operationId: OperationId }
   | { type: "RESUME_BUSY"; runId: SessionId; owner: SessionId; operationId: OperationId }

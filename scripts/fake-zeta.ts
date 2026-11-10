@@ -40,7 +40,8 @@ const seeded = [
 ];
 const prefixFixtures = [
   meta("abcd1111-root", 60 * 24 * 41, { name: "ambiguous prefix fixture one" }),
-  meta("abcd2222-root", 60 * 24 * 42, { name: "ambiguous prefix fixture two" }),
+  meta("abcd1111-other", 60 * 24 * 42, { name: "ambiguous prefix fixture two" }),
+  meta("abcd2222-root", 60 * 24 * 43, { name: "distinct ambiguous prefix fixture" }),
 ];
 
 /**

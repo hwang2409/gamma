@@ -245,7 +245,8 @@ export async function openSession(
 export const isBusyError = (error: unknown) => (error as { code?: unknown } | null)?.code === -32004;
 
 export type OpenRun = { id: string; lease: SessionLease; stale: boolean; history: { messages: number; complete: boolean }; syncing: boolean };
-export type OpenFailure = { id: string; message: string; busy: boolean; candidates?: readonly string[] };
+export type OpenCandidate = { id: string; unique: boolean };
+export type OpenFailure = { id: string; message: string; busy: boolean; candidates?: readonly OpenCandidate[] };
 export type RunState = {
   selected: string | null;
   open: OpenRun | null;
@@ -266,11 +267,15 @@ type OperationId = import("./run-state").OperationId;
 type SessionId = import("./run-state").SessionId;
 type DraftRunId = import("./run-state").DraftRunId;
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
-const ambiguousCandidates = (error: unknown) => {
+const ambiguousCandidates = (error: unknown): readonly OpenCandidate[] | undefined => {
   const data = (error as { data?: unknown } | null)?.data;
   if (!data || typeof data !== "object" || (data as { code?: unknown }).code !== "session_id_ambiguous") return undefined;
-  const candidates = (data as { candidates?: unknown }).candidates;
-  return Array.isArray(candidates) && candidates.every((candidate) => typeof candidate === "string") ? candidates : undefined;
+  const requested = (data as { session_id?: unknown }).session_id;
+  const raw = (data as { candidates?: unknown }).candidates;
+  if (typeof requested !== "string" || !Array.isArray(raw) || !raw.every((candidate) => typeof candidate === "string")) return undefined;
+  const counts = new Map<string, number>();
+  for (const candidate of raw.slice(0, 8)) counts.set(candidate, (counts.get(candidate) ?? 0) + 1);
+  return [...counts].map(([id, count]) => ({ id, unique: count === 1 && id !== requested && id.startsWith(requested) }));
 };
 const turn = (status: ServerStatus) => status.pending_approvals?.length ? "approval" as const : status.state === "idle" ? "idle" as const : status.state;
 

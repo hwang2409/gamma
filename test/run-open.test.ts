@@ -231,13 +231,13 @@ const table: Row[] = [
     async run() {
       const h = await world({
         attached: "b", selected: "abcd",
-        handlers: () => ({ resume: () => { throw { code: -32602, message: "session id 'abcd' is ambiguous", data: { code: "session_id_ambiguous", session_id: "abcd", candidates: ["abcd1111", "abcd2222"] } }; } }),
+        handlers: () => ({ resume: () => { throw { code: -32602, message: "session id 'abcd' is ambiguous", data: { code: "session_id_ambiguous", session_id: "abcd", candidates: ["abcd1111", "abcd1111", "abcd2222"] } }; } }),
       });
       try {
         h.type("do not send");
         h.start(); await waitFor(() => Boolean(h.view.openError), 2_000);
         expect(h.view.open).toBeNull();
-        expect(h.view.openError).toMatchObject({ id: "abcd", candidates: ["abcd1111", "abcd2222"] });
+        expect(h.view.openError).toMatchObject({ id: "abcd", candidates: [{ id: "abcd1111", unique: false }, { id: "abcd2222", unique: true }] });
         expect(h.sends()).toEqual([]);
         expect(h.text()).toBe("do not send");
       } finally { h.dispose(); }
