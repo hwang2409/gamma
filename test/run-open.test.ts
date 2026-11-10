@@ -18,7 +18,7 @@ const rows: Record<string, unknown[]> = {
 };
 
 /** Zeta's server-side truth: one attached runtime, its accepted delivery ids per session, and every started turn. */
-type Zeta = { attached: string | null; created: number; turns: Array<{ session: string; text: string; id?: string }>; accepted: Map<string, Map<string, Record<string, unknown>>>; replies: Array<Record<string, unknown>>; evicted: Set<string>; running?: boolean; steers?: Map<string, { session: string; text: string; status: "queued" | "dropped" }>; lastTurn?: string };
+type Zeta = { attached: string | null; created: number; turns: Array<{ session: string; text: string; id?: string }>; accepted: Map<string, Map<string, Record<string, unknown>>>; replies: Array<Record<string, unknown>>; evicted: Set<string>; running?: boolean; steers?: Map<string, { session: string; text: string; status: "queued" | "dropped" }>; lastTurn?: string; history?: Record<string, unknown[]> };
 /**
  * zeta ends the running turn: delivery.py:305-312 drops every queued steer (reason turn_end only when the turn completed),
  * and docs/serve-protocol.md:791-808 reports the outcome as status.last_turn_outcome.reason.
@@ -60,7 +60,8 @@ function zetaHandlers(zeta: Zeta, extra: Record<string, Handler> = {}): Record<s
     status: () => ({ session: zeta.attached ? meta(zeta.attached, "x") : null, state: "idle", pending_approvals: [], last_turn_outcome: zeta.lastTurn ? { turn_id: "t", reason: zeta.lastTurn } : null }),
     resume: (params) => { zeta.attached = params.session_id as string; return { session: meta(zeta.attached, "x") }; },
     session_history: (params) => {
-      const all = rows[params.session_id as string] ?? [];
+      const session = params.session_id as string;
+      const all = [...(rows[session] ?? []), ...(zeta.history?.[session] ?? [])];
       const offset = params.offset as number;
       return { messages: all.slice(offset, offset + 1), next_offset: offset + 1 < all.length ? offset + 1 : null };
     },
@@ -971,6 +972,70 @@ const owner: Row[] = [
         expect(params.delivery_id).not.toBe(intent);
         expect(saved(tab)).toContain(params.delivery_id as string);
         send.release(); await settledSends(h, 1);
+        expect(h.landed()).toEqual(["a"]);
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "owner reconnect: a turn_end drop reported live after reconnect is not resent automatically; the button sends one new id into the same run",
+    async run() {
+      const h = await openA({ features: FIDELITY });
+      let status: Hold | undefined;
+      try {
+        h.zeta.running = true;
+        h.type("reconnected turn-end steer");
+        expect(await h.enter("a", "reconnected turn-end steer", undefined, true)).toEqual({ ok: true });
+        const intent = [...h.store.get("a").deliveries.keys()][0]!;
+        h.connection.set(null);
+        endTurn(h.zeta, "completed");
+        const next = await server(zetaHandlers(h.zeta), FIDELITY);
+        status = next.hold("delivery_status");
+        h.connection.set(next.client);
+        await h.live("a");
+        await waitForHold("reconnect status request", status);
+        // Zeta delivery.py:305-325 publishes the durable terminal row with its turn_end reason.
+        next.event({ event: "delivery_status", session_id: "a", id: `delivery-${intent}`, role: "system", delivery_id: intent, method: "steer", status: "dropped", content: [{ type: "text", text: "steer dropped: turn_end" }], reason: "turn_end" });
+        status.release();
+        await until(() => next.calls.some(([method]) => method === "send") || h.store.get("a").deliveries.get(intent)?.state === "dropped", 2_000);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(next.calls.filter(([method]) => method === "send")).toEqual([]);
+        h.deliveries.resend("a", intent);
+        await until(() => h.landed().length === 1, 2_000);
+        const sends = next.calls.filter(([method]) => method === "send").map(([, params]) => params);
+        expect(sends).toHaveLength(1);
+        expect(sends[0]).toMatchObject({ session_id: "a", text: "reconnected turn-end steer" });
+        expect(sends[0]!.delivery_id).not.toBe(intent);
+        expect(h.landed()).toEqual(["a"]);
+      } finally { status?.release(); h.dispose(); }
+    },
+  },
+  {
+    name: "owner reconnect: a steer dropped at turn_end while offline is not resent automatically; the button sends one new id into the same run",
+    async run() {
+      const tab = tabStorage();
+      const h = await openA({ tab, features: FIDELITY });
+      try {
+        h.zeta.running = true;
+        h.type("offline turn-end steer");
+        expect(await h.enter("a", "offline turn-end steer", undefined, true)).toEqual({ ok: true });
+        const intent = [...h.store.get("a").deliveries.keys()][0]!;
+        h.connection.set(null);
+        endTurn(h.zeta, "completed");
+        // Zeta delivery.py:305-325 and history_projection.py persist this terminal row before a later reopen reads it.
+        h.zeta.history = { a: [{ id: `delivery-${intent}`, role: "system", event: "delivery_status", delivery_id: intent, method: "steer", status: "dropped", content: [{ type: "text", text: "steer dropped: turn_end" }], reason: "turn_end" }] };
+        const next = await server(zetaHandlers(h.zeta), FIDELITY);
+        h.connection.set(next.client);
+        await h.live("a");
+        await until(() => h.store.get("a").deliveries.get(intent)?.state === "dropped" || next.calls.some(([method]) => method === "send"), 2_000);
+        expect(next.calls.filter(([method]) => method === "send")).toEqual([]);
+        expect(h.store.get("a").deliveries.get(intent)).toMatchObject({ state: "dropped", why: "dropped" });
+        h.deliveries.resend("a", intent);
+        await until(() => h.landed().length === 1, 2_000);
+        const sends = next.calls.filter(([method]) => method === "send").map(([, params]) => params);
+        expect(sends).toHaveLength(1);
+        expect(sends[0]).toMatchObject({ session_id: "a", text: "offline turn-end steer" });
+        expect(sends[0]!.delivery_id).not.toBe(intent);
+        expect(saved(tab)).toContain(sends[0]!.delivery_id as string);
         expect(h.landed()).toEqual(["a"]);
       } finally { h.dispose(); }
     },

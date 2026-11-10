@@ -21,7 +21,7 @@ export type PendingDelivery = {
   text: string;
   images: readonly QueuedImage[];
   state: "requesting" | "queued" | "dropped";
-  /** Sent by this page life for the run it shows. Never saved (a reload loses it); a bfcache restore (PAGE_RESTORED) and leaving the run clear it. */
+  /** Sent by this uninterrupted view of the run. Never saved; a reload, reconnect, bfcache restore, or leaving the run clears it. */
   here?: true;
   /** zeta settled `attemptId` as dropped, so a resend needs a new id. Without it a resend reuses the id and zeta dedupes. */
   spent?: true;
@@ -83,7 +83,7 @@ export function decideSend(state: WorkspaceState, runId: RunId, request: SendReq
   return delivery.method === "steer" && delivery.here && !delivery.resent && request.reason === "turn_end" ? { id: newId() } : { id: delivery.attemptId, blocked: MANUAL };
 }
 
-/** This page life no longer counts as the view that sent these deliveries, so none of them is resent automatically. */
+/** This no longer counts as the uninterrupted view that sent these deliveries, so none is resent automatically. */
 export const leaveView = (record: RunRecord): RunRecord => ({ ...record, deliveries: new Map([...record.deliveries].map(([id, delivery]) => [id, { ...delivery, here: undefined }])) });
 
 /** Whether this page shows `runId` live: it is the selected run, zeta has it attached, and its own open completed. */
