@@ -169,19 +169,40 @@ async function openA(options: Parameters<typeof world>[0] = {}) {
 
 type Row = { name: string; run(): Promise<void> };
 
-test("canonicalization merges cached full-id deliveries and keeps the current prefix draft", () => {
+const draftImage = (url: string) => ({ name: `${url}.png`, mime_type: "image/png", data: url, url, size: 1 } as const);
+
+test("mergeDrafts combines different text in canonical order and deduplicates attachments", () => {
+  const shared = draftImage("blob:shared");
+  const merged = RunState.mergeDrafts(
+    { text: "cached full-id draft", attachments: [draftImage("blob:full"), shared] },
+    { text: "prefix draft", attachments: [shared, draftImage("blob:prefix")] },
+  );
+  expect(merged.text).toBe("cached full-id draft\n\nprefix draft");
+  expect(merged.attachments.map(({ url }) => url)).toEqual(["blob:full", "blob:shared", "blob:prefix"]);
+});
+
+test("mergeDrafts keeps one equal or non-empty draft without a separator", () => {
+  expect(RunState.mergeDrafts({ text: " same ", attachments: [] }, { text: "same", attachments: [] }).text).toBe(" same ");
+  expect(RunState.mergeDrafts({ text: "cached", attachments: [] }, { text: " \n ", attachments: [] }).text).toBe("cached");
+  expect(RunState.mergeDrafts({ text: "\t", attachments: [] }, { text: "current", attachments: [] }).text).toBe("current");
+});
+
+test("canonicalization preserves both conflicting drafts and their attachments", () => {
   const prefix = "abcd" as RunState.SessionId;
   const full = "abcd1234-full-session" as RunState.SessionId;
   const open = "prefix-open" as RunState.OperationId;
+  const shared = { name: "shared.png", mime_type: "image/png", data: "shared", url: "blob:shared", size: 1 } as const;
+  const prefixOnly = { name: "prefix.png", mime_type: "image/png", data: "prefix", url: "blob:prefix", size: 1 } as const;
+  const fullOnly = { name: "full.png", mime_type: "image/png", data: "full", url: "blob:full", size: 1 } as const;
   let state: RunState.WorkspaceState = { entry: { id: "entry" as EntryId, run: prefix }, runs: new Map(), aliases: new Map(), attachment: { kind: "detached" } };
   const dispatch = (event: RunState.WorkspaceEvent) => { state = RunState.reduceWorkspace(state, event).state; };
   const delivery = (id: string, text: string, operationId: RunState.OperationId) => ({ id, attemptId: id, operationId, method: "send" as const, text, images: [], state: "requesting" as const });
   dispatch({ type: "ENSURE_RUN", runId: prefix });
   dispatch({ type: "OPEN_REQUEST", runId: prefix, operationId: open });
-  dispatch({ type: "COMPOSER_EDIT", runId: prefix, text: "newer prefix draft" });
+  dispatch({ type: "COMPOSER_EDIT", runId: prefix, text: "prefix draft", attachments: [shared, prefixOnly] });
   dispatch({ type: "DELIVERY_BEGIN", runId: prefix, operationId: "prefix-delivery" as RunState.OperationId, delivery: delivery("shared-delivery", "prefix copy", "prefix-delivery" as RunState.OperationId) });
   dispatch({ type: "ENSURE_RUN", runId: full });
-  dispatch({ type: "COMPOSER_EDIT", runId: full, text: "older full-id draft" });
+  dispatch({ type: "COMPOSER_EDIT", runId: full, text: "cached full-id draft", attachments: [fullOnly, shared] });
   dispatch({ type: "DELIVERY_BEGIN", runId: full, operationId: "full-delivery" as RunState.OperationId, delivery: delivery("shared-delivery", "canonical copy", "full-delivery" as RunState.OperationId) });
   dispatch({ type: "DELIVERY_BEGIN", runId: full, operationId: "full-only" as RunState.OperationId, delivery: delivery("full-only", "pending full-id message", "full-only" as RunState.OperationId) });
   const target = state.runs.get(full)!;
@@ -190,7 +211,8 @@ test("canonicalization merges cached full-id deliveries and keeps the current pr
   const result = RunState.reduceWorkspace(state, { type: "SESSION_CANONICALIZED", runId: prefix, sessionId: full, operationId: open });
   const canonical = result.state.runs.get(full)!;
   expect(result.state.entry.run).toBe(full);
-  expect(canonical.text).toBe("newer prefix draft");
+  expect(canonical.text).toBe("cached full-id draft\n\nprefix draft");
+  expect(canonical.attachments.map(({ url }) => url)).toEqual(["blob:full", "blob:shared", "blob:prefix"]);
   expect([...canonical.deliveries.keys()]).toEqual(["shared-delivery", "full-only"]);
   expect(canonical.deliveries.get("shared-delivery")?.text).toBe("canonical copy");
   expect(result.effects).toEqual([{ type: "release-lease", runId: full }]);
@@ -237,21 +259,21 @@ const table: Row[] = [
       });
       try {
         h.store.get(full);
-        h.type("older full-id draft", full);
-        h.type("newer prefix draft");
+        h.type("cached full-id draft", full);
+        h.type("prefix draft");
         h.start(); await waitFor(() => Boolean(h.view.open), 2_000);
         expect(h.run()).toBe(full);
         await h.live(full);
         expect(targeted(h.fake.calls, full)).toContain("session_history");
         expect(targeted(h.fake.calls, prefix)).toEqual(["resume"]);
-        expect(h.text(full)).toBe("newer prefix draft");
+        expect(h.text(full)).toBe("cached full-id draft\n\nprefix draft");
         expect(h.sends()).toEqual([]);
         await new Promise((resolve) => setTimeout(resolve, 20));
         const saved = JSON.parse(tab.items.get("gamma-run-drafts") ?? "{}");
         expect(saved[prefix]).toBeUndefined();
-        expect(saved[full]?.text).toBe("newer prefix draft");
+        expect(saved[full]?.text).toBe("cached full-id draft\n\nprefix draft");
         expect(await h.enter()).toEqual({ ok: true });
-        expect(h.sends()).toEqual([expect.objectContaining({ session_id: full, text: "newer prefix draft" })]);
+        expect(h.sends()).toEqual([expect.objectContaining({ session_id: full, text: "cached full-id draft\n\nprefix draft" })]);
         expect(h.zeta.turns.map(({ session }) => session)).toEqual([full]);
       } finally { h.dispose(); }
     },

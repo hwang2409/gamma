@@ -132,6 +132,18 @@ const canonical = (state: WorkspaceState, id: RunId): RunId => state.aliases.get
 const blank = (id: RunId): RunRecord => ({ id, lifecycle: id.startsWith("draft:") ? { kind: "draft" } : { kind: "opening" }, text: "", attachments: [], deliveries: new Map(), model: { choice: "default" }, settings: {} });
 const operationMatches = (record: RunRecord | undefined, operationId: OperationId) => record?.lifecycle.kind === "creating" ? record.lifecycle.operationId === operationId : record?.lifecycle.kind === "opening" ? !record.lifecycle.operationId || record.lifecycle.operationId === operationId : false;
 
+type Draft = Pick<RunRecord, "text" | "attachments">;
+export function mergeDrafts(cached: Draft | undefined, current: Draft): Draft {
+  const cachedText = cached?.text ?? "";
+  const cachedTrimmed = cachedText.trim();
+  const currentTrimmed = current.text.trim();
+  const text = !cachedTrimmed ? current.text : !currentTrimmed || cachedTrimmed === currentTrimmed ? cachedText : `${cachedText}\n\n${current.text}`;
+  const attachments: QueuedImage[] = [];
+  const seen = new Set<string>();
+  for (const image of [...(cached?.attachments ?? []), ...current.attachments]) if (!seen.has(image.url)) { seen.add(image.url); attachments.push(image); }
+  return { text, attachments };
+}
+
 /** Pure owner of run identity, lifecycle, attachment, settings, delivery, and browser-entry policy. */
 export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): { state: WorkspaceState; effects: WorkspaceEffect[] } {
   let runs = new Map(state.runs);
@@ -177,14 +189,13 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
       const source = runs.get(event.runId);
       if (!source || source.openOperation !== event.operationId) break;
       const target = runs.get(event.sessionId);
-      const currentDraft = Boolean(source.text || source.attachments.length);
+      const draft = mergeDrafts(target, source);
       if (target?.open) effects.push({ type: "release-lease", runId: event.sessionId });
       runs.delete(event.runId);
       runs.set(event.sessionId, {
         ...source,
         id: event.sessionId,
-        text: currentDraft ? source.text : target?.text ?? source.text,
-        attachments: currentDraft ? source.attachments : target?.attachments ?? source.attachments,
+        ...draft,
         deliveries: new Map([...(source.deliveries ?? []), ...(target?.deliveries ?? [])]),
         retryDelivery: source.retryDelivery ?? target?.retryDelivery,
         deliveryNote: source.deliveryNote ?? target?.deliveryNote,

@@ -107,7 +107,7 @@ async function canonicalResumeSequence(browser: Browser) {
     await page.getByRole("button", { name: "send message", exact: true }).click();
     for (let attempt = 0; attempt < 75 && !fake.requests.slice(before).some((request) => request.method === "send"); attempt++) await Bun.sleep(50);
     if (!fake.requests.slice(before).some((request) => request.method === "send")) throw new Error("the full-id delivery never became pending");
-    await field.fill("newer full-id draft");
+    await field.fill("cached full-id draft");
     await page.getByRole("button", { name: "new run" }).click();
     await page.waitForURL(/run=draft%3A/, { timeout: 15_000 });
 
@@ -121,8 +121,9 @@ async function canonicalResumeSequence(browser: Browser) {
     });
     await field.fill("draft typed under prefix");
     await page.waitForURL((url) => url.searchParams.get("run") === "s-reconnect", { timeout: 15_000 });
-    if (await field.inputValue() !== "draft typed under prefix") throw new Error("canonicalization lost the current prefix draft");
-    if (fake.requests.slice(before).some((request) => request.method === "send" && request.params.text === "draft typed under prefix")) throw new Error("canonicalization sent the prefix draft without Enter");
+    const mergedDraft = "cached full-id draft\n\ndraft typed under prefix";
+    if (await field.inputValue() !== mergedDraft) throw new Error(`canonicalization did not merge both drafts: ${JSON.stringify(await field.inputValue())}`);
+    if (fake.requests.slice(before).some((request) => request.method === "send" && (request.params.text === mergedDraft || request.params.text === "draft typed under prefix"))) throw new Error("canonicalization sent the merged draft without Enter");
     const calls = fake.requests.slice(before);
     const history = [...calls].reverse().find((request) => request.method === "session_history");
     if (history?.params.session_id !== "s-reconnect") throw new Error(`history used ${String(history?.params.session_id)} instead of the canonical id`);
@@ -130,8 +131,8 @@ async function canonicalResumeSequence(browser: Browser) {
     await stop.waitFor({ timeout: 15_000 }); await stop.click();
     const sendButton = page.getByRole("button", { name: "send message", exact: true });
     await sendButton.waitFor({ timeout: 15_000 }); await sendButton.click();
-    for (let attempt = 0; attempt < 75 && !fake.requests.slice(before).some((request) => request.method === "send" && request.params.text === "draft typed under prefix"); attempt++) await Bun.sleep(50);
-    const send = fake.requests.slice(before).find((request) => request.method === "send" && request.params.text === "draft typed under prefix");
+    for (let attempt = 0; attempt < 75 && !fake.requests.slice(before).some((request) => request.method === "send" && request.params.text === mergedDraft); attempt++) await Bun.sleep(50);
+    const send = fake.requests.slice(before).find((request) => request.method === "send" && request.params.text === mergedDraft);
     if (send?.params.session_id !== "s-reconnect") throw new Error(`send used ${String(send?.params.session_id)} instead of the canonical id`);
     await stop.waitFor({ timeout: 15_000 }); await stop.click();
     for (let attempt = 0; attempt < 75 && fake.running; attempt++) await Bun.sleep(50);
