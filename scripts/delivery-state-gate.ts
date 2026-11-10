@@ -176,6 +176,35 @@ try {
       } finally { await cleanup(context, page); }
     });
   } finally { await browser.close(); }
+  // Zeta delivery.py:305-325 persists a turn_end drop before a later controller learns it through history/status.
+  for (const [name, type] of [["chromium", chromium], ["webkit", webkit]] as const) {
+    const reconnecting = await type.launch();
+    try {
+      await check(`queued-steer-dropped-while-offline-waits-for-resend-${name}`, async () => {
+        const { context, page } = await fresh(reconnecting);
+        fake.setLateClose(true);
+        try {
+          await startQueued(page, `offline ${name}`);
+          const run = fake.activeId();
+          await fake.stop();
+          for (let attempt = 0; attempt < 150 && fake.running; attempt++) await Bun.sleep(100);
+          if (fake.running) throw new Error("the turn did not end while gamma was disconnected");
+          await fake.start();
+          const text = `queued offline ${name}`;
+          const resent = () => fake.sent.some((item) => item.method === "send" && item.text === text);
+          const row = page.locator('[data-part="delivery-note"]');
+          for (let attempt = 0; attempt < 100 && !resent() && !(await row.count()); attempt++) await Bun.sleep(200);
+          await Bun.sleep(500);
+          if (resent()) throw new Error("the reconnect resent the steer without the user");
+          await row.waitFor({ timeout: 1_000 });
+          await page.getByRole("button", { name: "resend" }).click();
+          await waitForSent(text);
+          const sends = fake.sent.filter((item) => item.method === "send" && item.text === text);
+          if (sends.length !== 1 || sends[0]!.session !== run) throw new Error(`the resend missed its run: ${JSON.stringify(sends)}`);
+        } finally { fake.setLateClose(false); await cleanup(context, page); }
+      });
+    } finally { await reconnecting.close(); }
+  }
   // B-1: a page back from the bfcache keeps its memory but is a new page life; it never resends a steer by itself.
   // Playwright launches chromium with --disable-back-forward-cache; the full chromium build without that flag restores
   // pages for real (pageshow.persisted). The check fails when no restore happens, so it can never pass without proof.

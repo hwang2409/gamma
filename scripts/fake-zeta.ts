@@ -938,7 +938,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     async stop() {
       allowed = [];
       await rm(discovery, { force: true });
-      if (controller) releaseController(controller);
+      // A late close models a socket loss that the server learns about only when the next controller connects.
+      if (controller && !lateClose) releaseController(controller);
       this.drop();
       for (let attempt = 0; decide && attempt < 100; attempt++) await Bun.sleep(1);
     },

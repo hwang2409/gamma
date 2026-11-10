@@ -244,7 +244,7 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     case "DISCONNECT":
       connected = false;
       // The old client's opens are aborted; the post-step reopens the selection after the next status.
-      for (const [id, record] of runs) update(id, (current) => ({ ...current, ...(current.open ? { open: { ...current.open, stale: true } } : {}), openOperation: undefined, openingMessages: undefined, deliveries: new Map([...record.deliveries].map(([intentId, delivery]) => [intentId, delivery.state === "requesting" ? { ...delivery, state: "queued" as const } : delivery])) }));
+      for (const [id, record] of runs) update(id, (current) => leaveView({ ...current, ...(current.open ? { open: { ...current.open, stale: true } } : {}), openOperation: undefined, openingMessages: undefined, deliveries: new Map([...record.deliveries].map(([intentId, delivery]) => [intentId, delivery.state === "requesting" ? { ...delivery, state: "queued" as const } : delivery])) }));
       attachment = { kind: "disconnected", ...(attachment.kind === "attached" ? { lastAttached: attachment.sessionId, ...(attachment.turn !== "idle" ? { lastTurnOwner: attachment.sessionId } : {}) } : {}) }; break;
     // The page left and came back: it is no longer the view that sent its steers, so none is resent automatically.
     case "PAGE_RESTORED": for (const [id, record] of runs) if (record.deliveries.size) runs.set(id, leaveView(record)); break;
