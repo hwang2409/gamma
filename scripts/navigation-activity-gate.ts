@@ -96,21 +96,41 @@ async function resetResumeFixture() {
 
 async function canonicalResumeSequence(browser: Browser) {
   await resetResumeFixture();
-  fake.delayNext("resume", 400);
   const before = fake.requests.length;
-  const { context, page } = await fresh(browser, 390, "/?run=s-re");
+  const { context, page } = await fresh(browser, 390, "/?run=s-reconnect");
   try {
     const field = page.locator('.dock textarea[aria-label^="message"]');
-    await field.fill("draft typed under prefix");
-    if (fake.sent.length) throw new Error("the prefix draft sent while resume was pending");
-    await page.waitForURL((url) => url.searchParams.get("run") === "s-reconnect", { timeout: 15_000 });
-    if (await field.inputValue() !== "draft typed under prefix") throw new Error("canonicalization lost the prefix draft");
-    if (fake.sent.length) throw new Error("canonicalization sent the prefix draft without Enter");
-    const calls = fake.requests.slice(before);
-    const history = calls.find((request) => request.method === "session_history");
-    if (history?.params.session_id !== "s-reconnect") throw new Error(`history used ${String(history?.params.session_id)} instead of the canonical id`);
+    await page.getByRole("log", { name: "run activity" }).waitFor({ timeout: 15_000 });
+    if (new URL(page.url()).searchParams.get("run") !== "s-reconnect") throw new Error(`exact full id changed to ${page.url()}`);
+
+    await field.fill("full-id delivery still pending");
     await page.getByRole("button", { name: "send message", exact: true }).click();
-    for (let attempt = 0; attempt < 75 && !fake.sent.some((sent) => sent.text === "draft typed under prefix"); attempt++) await Bun.sleep(100);
+    for (let attempt = 0; attempt < 75 && !fake.requests.slice(before).some((request) => request.method === "send"); attempt++) await Bun.sleep(50);
+    if (!fake.requests.slice(before).some((request) => request.method === "send")) throw new Error("the full-id delivery never became pending");
+    await field.fill("newer full-id draft");
+    await page.getByRole("button", { name: "new run" }).click();
+    await page.waitForURL(/run=draft%3A/, { timeout: 15_000 });
+
+    fake.delayNext("resume", 400);
+    await page.evaluate(() => {
+      const url = new URL(location.href);
+      url.searchParams.set("run", "s-re");
+      const state = { gammaEntryId: crypto.randomUUID(), run: "s-re" };
+      history.pushState(state, "", url);
+      dispatchEvent(new PopStateEvent("popstate", { state }));
+    });
+    await field.fill("draft typed under prefix");
+    await page.waitForURL((url) => url.searchParams.get("run") === "s-reconnect", { timeout: 15_000 });
+    if (await field.inputValue() !== "draft typed under prefix") throw new Error("canonicalization lost the current prefix draft");
+    if (fake.requests.slice(before).some((request) => request.method === "send" && request.params.text === "draft typed under prefix")) throw new Error("canonicalization sent the prefix draft without Enter");
+    const calls = fake.requests.slice(before);
+    const history = [...calls].reverse().find((request) => request.method === "session_history");
+    if (history?.params.session_id !== "s-reconnect") throw new Error(`history used ${String(history?.params.session_id)} instead of the canonical id`);
+    const stop = page.getByRole("button", { name: "stop the running turn" });
+    await stop.waitFor({ timeout: 15_000 }); await stop.click();
+    const sendButton = page.getByRole("button", { name: "send message", exact: true });
+    await sendButton.waitFor({ timeout: 15_000 }); await sendButton.click();
+    for (let attempt = 0; attempt < 75 && !fake.requests.slice(before).some((request) => request.method === "send" && request.params.text === "draft typed under prefix"); attempt++) await Bun.sleep(50);
     const send = fake.requests.slice(before).find((request) => request.method === "send" && request.params.text === "draft typed under prefix");
     if (send?.params.session_id !== "s-reconnect") throw new Error(`send used ${String(send?.params.session_id)} instead of the canonical id`);
   } finally {
@@ -134,15 +154,6 @@ async function ambiguousResumeSequence(browser: Browser) {
     if (await link.getAttribute("href") !== "?run=abcd2222") throw new Error("the distinct candidate did not link to its run route");
     if (new URL(page.url()).searchParams.get("run") !== "abcd") throw new Error(`ambiguous prefix auto-opened ${page.url()}`);
     if (fake.requests.slice(before).some((request) => request.method === "session_history" || request.method === "send")) throw new Error("ambiguous prefix replayed or sent");
-  } finally { await context.close(); fake.drop(); await Bun.sleep(300); }
-}
-
-async function fullResumeSequence(browser: Browser) {
-  await resetResumeFixture();
-  const { context, page } = await fresh(browser, 390, "/?run=s-reconnect");
-  try {
-    await page.getByRole("log", { name: "run activity" }).waitFor({ timeout: 15_000 });
-    if (new URL(page.url()).searchParams.get("run") !== "s-reconnect") throw new Error(`full id changed to ${page.url()}`);
   } finally { await context.close(); fake.drop(); await Bun.sleep(300); }
 }
 
@@ -267,12 +278,10 @@ try {
     await check("stop-marks-owner-steer-at-390", () => queuedSteerSequence(browser, 390, true));
     await check("prefix-resume-canonicalizes-before-send-chromium", () => canonicalResumeSequence(browser));
     await check("ambiguous-prefix-lists-candidates-chromium", () => ambiguousResumeSequence(browser));
-    await check("full-session-id-stays-unchanged-chromium", () => fullResumeSequence(browser));
     const webkitBrowser = await webkit.launch();
     try {
       await check("prefix-resume-canonicalizes-before-send-webkit", () => canonicalResumeSequence(webkitBrowser));
       await check("ambiguous-prefix-lists-candidates-webkit", () => ambiguousResumeSequence(webkitBrowser));
-      await check("full-session-id-stays-unchanged-webkit", () => fullResumeSequence(webkitBrowser));
     } finally { await webkitBrowser.close(); }
     await check("pending-create-history-at-1440", () => pendingCreateSequence(browser, 1440));
     await check("pending-create-history-at-390", () => pendingCreateSequence(browser, 390));

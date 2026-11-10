@@ -176,8 +176,19 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
       if (event.runId === event.sessionId) break;
       const source = runs.get(event.runId);
       if (!source || source.openOperation !== event.operationId) break;
+      const target = runs.get(event.sessionId);
+      const currentDraft = Boolean(source.text || source.attachments.length);
+      if (target?.open) effects.push({ type: "release-lease", runId: event.sessionId });
       runs.delete(event.runId);
-      runs.set(event.sessionId, { ...source, id: event.sessionId });
+      runs.set(event.sessionId, {
+        ...source,
+        id: event.sessionId,
+        text: currentDraft ? source.text : target?.text ?? source.text,
+        attachments: currentDraft ? source.attachments : target?.attachments ?? source.attachments,
+        deliveries: new Map([...(source.deliveries ?? []), ...(target?.deliveries ?? [])]),
+        retryDelivery: source.retryDelivery ?? target?.retryDelivery,
+        deliveryNote: source.deliveryNote ?? target?.deliveryNote,
+      });
       aliases.set(event.runId, event.sessionId);
       if (entry.run === event.runId) entry = { ...entry, run: event.sessionId };
       break;

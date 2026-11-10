@@ -168,6 +168,34 @@ async function openA(options: Parameters<typeof world>[0] = {}) {
 }
 
 type Row = { name: string; run(): Promise<void> };
+
+test("canonicalization merges cached full-id deliveries and keeps the current prefix draft", () => {
+  const prefix = "abcd" as RunState.SessionId;
+  const full = "abcd1234-full-session" as RunState.SessionId;
+  const open = "prefix-open" as RunState.OperationId;
+  let state: RunState.WorkspaceState = { entry: { id: "entry" as EntryId, run: prefix }, runs: new Map(), aliases: new Map(), attachment: { kind: "detached" } };
+  const dispatch = (event: RunState.WorkspaceEvent) => { state = RunState.reduceWorkspace(state, event).state; };
+  const delivery = (id: string, text: string, operationId: RunState.OperationId) => ({ id, attemptId: id, operationId, method: "send" as const, text, images: [], state: "requesting" as const });
+  dispatch({ type: "ENSURE_RUN", runId: prefix });
+  dispatch({ type: "OPEN_REQUEST", runId: prefix, operationId: open });
+  dispatch({ type: "COMPOSER_EDIT", runId: prefix, text: "newer prefix draft" });
+  dispatch({ type: "DELIVERY_BEGIN", runId: prefix, operationId: "prefix-delivery" as RunState.OperationId, delivery: delivery("shared-delivery", "prefix copy", "prefix-delivery" as RunState.OperationId) });
+  dispatch({ type: "ENSURE_RUN", runId: full });
+  dispatch({ type: "COMPOSER_EDIT", runId: full, text: "older full-id draft" });
+  dispatch({ type: "DELIVERY_BEGIN", runId: full, operationId: "full-delivery" as RunState.OperationId, delivery: delivery("shared-delivery", "canonical copy", "full-delivery" as RunState.OperationId) });
+  dispatch({ type: "DELIVERY_BEGIN", runId: full, operationId: "full-only" as RunState.OperationId, delivery: delivery("full-only", "pending full-id message", "full-only" as RunState.OperationId) });
+  const target = state.runs.get(full)!;
+  state = { ...state, runs: new Map(state.runs).set(full, { ...target, lifecycle: { kind: "open", lease: "old-lease" }, open: { id: full, lease: "old-lease", stale: false, history: { messages: 1, complete: true }, syncing: false } } as RunState.RunRecord) };
+
+  const result = RunState.reduceWorkspace(state, { type: "SESSION_CANONICALIZED", runId: prefix, sessionId: full, operationId: open });
+  const canonical = result.state.runs.get(full)!;
+  expect(result.state.entry.run).toBe(full);
+  expect(canonical.text).toBe("newer prefix draft");
+  expect([...canonical.deliveries.keys()]).toEqual(["shared-delivery", "full-only"]);
+  expect(canonical.deliveries.get("shared-delivery")?.text).toBe("canonical copy");
+  expect(result.effects).toEqual([{ type: "release-lease", runId: full }]);
+});
+
 const table: Row[] = [
   {
     name: "1 success: the attached run opens without resume and takes one send",
@@ -208,20 +236,22 @@ const table: Row[] = [
         }),
       });
       try {
-        h.type("kept prefix draft");
+        h.store.get(full);
+        h.type("older full-id draft", full);
+        h.type("newer prefix draft");
         h.start(); await waitFor(() => Boolean(h.view.open), 2_000);
         expect(h.run()).toBe(full);
         await h.live(full);
         expect(targeted(h.fake.calls, full)).toContain("session_history");
         expect(targeted(h.fake.calls, prefix)).toEqual(["resume"]);
-        expect(h.text(full)).toBe("kept prefix draft");
+        expect(h.text(full)).toBe("newer prefix draft");
         expect(h.sends()).toEqual([]);
         await new Promise((resolve) => setTimeout(resolve, 20));
         const saved = JSON.parse(tab.items.get("gamma-run-drafts") ?? "{}");
         expect(saved[prefix]).toBeUndefined();
-        expect(saved[full]?.text).toBe("kept prefix draft");
+        expect(saved[full]?.text).toBe("newer prefix draft");
         expect(await h.enter()).toEqual({ ok: true });
-        expect(h.sends()).toEqual([expect.objectContaining({ session_id: full, text: "kept prefix draft" })]);
+        expect(h.sends()).toEqual([expect.objectContaining({ session_id: full, text: "newer prefix draft" })]);
         expect(h.zeta.turns.map(({ session }) => session)).toEqual([full]);
       } finally { h.dispose(); }
     },

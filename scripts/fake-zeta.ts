@@ -835,18 +835,19 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           const busy = transientBusy.get(method) ?? 0;
           if (busy > 0) { transientBusy.set(method, busy - 1); return reply({ error: { code: -32004, message: "a turn is already running" } }); }
           const requested = String(params.session_id);
-          // Zeta 6f29fc4b core/session.py:854-895 resolves exact ids or unique prefixes of at least four characters;
-          // server/handlers/lifecycle.py:64-82 returns the prefix and up to eight eight-character candidates on ambiguity.
+          // Zeta origin/main core/session.py:854-895 resolves exact ids, rejects matching prefixes shorter than four,
+          // and bounds ambiguous candidates; handlers/lifecycle.py:64-83 maps not-found and ambiguous errors to -32602.
           const roots = [...sessions, ...prefixFixtures].filter((session) => session.parent_session_id === null);
           const exact = roots.find((session) => session.session_id === requested);
-          if (!exact && requested.length < 4) return reply({ error: { code: -32012, message: `session ${requested} was not found`, data: { code: "session_not_found", session_id: requested } } });
           const matches = exact ? [exact] : roots.filter((session) => String(session.session_id).startsWith(requested));
+          if (!exact && matches.length && requested.length < 4) return reply({ error: { code: -32602, message: "session id prefix must be at least 4 characters" } });
           if (matches.length > 1) {
             const candidates = matches.map((session) => String(session.session_id).slice(0, 8)).sort().slice(0, 8);
             return reply({ error: { code: -32602, message: `session id '${requested}' is ambiguous; please provide more characters`, data: { code: "session_id_ambiguous", session_id: requested, candidates } } });
           }
           const resolved = matches[0];
-          if (!resolved) return reply({ error: { code: -32012, message: `session ${requested} was not found`, data: { code: "session_not_found", session_id: requested } } });
+          // Zeta origin/main docs/serve-protocol.md:414-417: stale-session recovery uses this -32602 data code.
+          if (!resolved) return reply({ error: { code: -32602, message: `session ${requested} was not found`, data: { code: "session_not_found", session_id: requested } } });
           if (running && resolved.session_id !== active) return reply({ error: { code: -32004, message: "a turn is already running" } });
           active = String(resolved.session_id);
           delayedOpen = false;
