@@ -140,7 +140,10 @@ export function mergeDrafts(cached: Draft | undefined, current: Draft): Draft {
   const text = !cachedTrimmed ? current.text : !currentTrimmed || cachedTrimmed === currentTrimmed ? cachedText : `${cachedText}\n\n${current.text}`;
   const attachments: QueuedImage[] = [];
   const seen = new Set<string>();
-  for (const image of [...(cached?.attachments ?? []), ...current.attachments]) if (!seen.has(image.url)) { seen.add(image.url); attachments.push(image); }
+  for (const image of [...(cached?.attachments ?? []), ...current.attachments]) {
+    const key = `${image.mime_type}\0${image.data}`;
+    if (!seen.has(key)) { seen.add(key); attachments.push(image); }
+  }
   return { text, attachments };
 }
 
