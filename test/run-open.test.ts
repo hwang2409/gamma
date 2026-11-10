@@ -209,8 +209,9 @@ const table: Row[] = [
       });
       try {
         h.type("kept prefix draft");
-        h.start(); await h.live(full);
+        h.start(); await waitFor(() => Boolean(h.view.open), 2_000);
         expect(h.run()).toBe(full);
+        await h.live(full);
         expect(targeted(h.fake.calls, full)).toContain("session_history");
         expect(targeted(h.fake.calls, prefix)).toEqual(["resume"]);
         expect(h.text(full)).toBe("kept prefix draft");
