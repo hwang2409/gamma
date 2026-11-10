@@ -38,6 +38,11 @@ const seeded = [
   meta("s-docs", 60 * 24 * 3, { first_message_preview: "write the quickstart for @fulcrum/react" }),
   meta("s-untitled", 60 * 24 * 40),
 ];
+const prefixFixtures = [
+  meta("abcd1111-root", 60 * 24 * 41, { name: "ambiguous prefix fixture one" }),
+  meta("abcd1111-other", 60 * 24 * 42, { name: "ambiguous prefix fixture two" }),
+  meta("abcd2222-root", 60 * 24 * 43, { name: "distinct ambiguous prefix fixture" }),
+];
 
 /**
  * The params real zeta 169fb144 rejects with -32602, for every request the fake serves after hello. `required` params
@@ -829,10 +834,24 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           if (mode === "broken-session") return reply({ error: { code: -32602, message: "session log is invalid at line 12" } });
           const busy = transientBusy.get(method) ?? 0;
           if (busy > 0) { transientBusy.set(method, busy - 1); return reply({ error: { code: -32004, message: "a turn is already running" } }); }
-          if (running && params.session_id !== active) return reply({ error: { code: -32004, message: "a turn is already running" } });
-          active = String(params.session_id);
+          const requested = String(params.session_id);
+          // Zeta origin/main core/session.py:854-895 resolves exact ids, rejects matching prefixes shorter than four,
+          // and bounds ambiguous candidates; handlers/lifecycle.py:64-83 maps not-found and ambiguous errors to -32602.
+          const roots = [...sessions, ...prefixFixtures].filter((session) => session.parent_session_id === null);
+          const exact = roots.find((session) => session.session_id === requested);
+          const matches = exact ? [exact] : roots.filter((session) => String(session.session_id).startsWith(requested));
+          if (!exact && matches.length && requested.length < 4) return reply({ error: { code: -32602, message: "session id prefix must be at least 4 characters" } });
+          if (matches.length > 1) {
+            const candidates = matches.map((session) => String(session.session_id).slice(0, 8)).sort().slice(0, 8);
+            return reply({ error: { code: -32602, message: `session id '${requested}' is ambiguous; please provide more characters`, data: { code: "session_id_ambiguous", session_id: requested, candidates } } });
+          }
+          const resolved = matches[0];
+          // Zeta origin/main docs/serve-protocol.md:414-417: stale-session recovery uses this -32602 data code.
+          if (!resolved) return reply({ error: { code: -32602, message: `session ${requested} was not found`, data: { code: "session_not_found", session_id: requested } } });
+          if (running && resolved.session_id !== active) return reply({ error: { code: -32004, message: "a turn is already running" } });
+          active = String(resolved.session_id);
           delayedOpen = false;
-          return reply({ result: { session: sessions.find((session) => session.session_id === active) } });
+          return reply({ result: { session: resolved } });
         }
         if (method === "rename_session") {
           const session = sessions.find((candidate) => candidate.session_id === params.session_id);
