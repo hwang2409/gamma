@@ -119,11 +119,19 @@ try {
       try {
         await page.locator('.dock textarea[aria-label="message"]').fill("delivery note reservation");
         await page.getByRole("button", { name: "send message" }).click();
-        await page.locator('[data-kind="user"]', { hasText: "delivery note reservation" }).waitFor({ timeout: 10_000 });
-        const empty = page.locator('.undelivered[data-empty][data-reserve]').last();
-        if (!await empty.count()) throw new Error("delivery row has no note anchor");
-        const height = await empty.evaluate((node) => node.getBoundingClientRect().height);
-        if (height > 1) throw new Error(`empty delivery note reserves ${height}px`);
+        const row = page.locator('[data-kind="user"]', { hasText: "delivery note reservation" });
+        await row.waitFor({ timeout: 10_000 });
+        if (await row.locator('[data-part="delivery-note"]').count()) throw new Error("delivered row renders an empty delivery note");
+        const gap = await row.evaluate((node) => {
+          const content = node.querySelector<HTMLElement>('[data-part="message-content"]');
+          if (!content) throw new Error("delivered row has no message content");
+          const style = getComputedStyle(node);
+          const contentBoxHeight = node.getBoundingClientRect().height
+            - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom)
+            - parseFloat(style.borderTopWidth) - parseFloat(style.borderBottomWidth);
+          return contentBoxHeight - content.getBoundingClientRect().height;
+        });
+        if (gap > 1) throw new Error(`delivered row reserves ${gap}px below its text`);
         await page.screenshot({ path: join(shots, "minor-delivery-note-no-gap-390.png") });
       } finally { await close(context); }
     });

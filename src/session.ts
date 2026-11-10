@@ -1,4 +1,4 @@
-import { fromZetaEvent, fromZetaHistory, type SessionLease, type ZetaClient } from "@fulcrum/zeta";
+import { fromZetaEvent, fromZetaHistory, servedTurnOutcome, statusTurnOutcome, type SessionLease, type ZetaClient } from "@fulcrum/zeta";
 import type { RunEvent } from "@fulcrum/core";
 import type { hostBindings, Registration } from "./host-client";
 import type { QueuedImage } from "./image-queue";
@@ -24,6 +24,7 @@ export type ServerStatus = {
   state: "idle" | "running" | "tool";
   pending_approvals: Array<{ request_id: string; tool_call: unknown; delegated: boolean; agent_instance_id?: string; resolution_pending?: "approve" | "deny" | "expire" | "abort" }>;
   pending_approvals_truncated?: boolean;
+  last_turn_outcome?: { turn_id?: unknown; reason?: unknown } | null;
 };
 
 /** The name, else the first prompt; null when zeta has neither yet. */
@@ -36,6 +37,18 @@ export type OpenResult = { lease: SessionLease; session: SessionMeta | null; syn
 
 type HistoryPage = { messages?: unknown[]; next_offset?: number | null };
 const isApprovalEvent = (event: RunEvent) => event.type === "approval_request" || event.type === "approval_end";
+const terminalEvents = (status: ServerStatus, rows: unknown[] = [], restoredTurnId?: string, historyComplete = true): RunEvent[] => {
+  if (status.state !== "idle") return [{ type: "run_start" }];
+  const turnId = typeof status.last_turn_outcome?.turn_id === "string" ? status.last_turn_outcome.turn_id : undefined;
+  const hasServedOutcome = rows.some((row) => row && typeof row === "object" && (row as { event?: unknown }).event === "served_turn_end");
+  const outcome = turnId
+    ? servedTurnOutcome(rows, turnId) ?? (historyComplete && !hasServedOutcome ? statusTurnOutcome(status.last_turn_outcome, turnId) : undefined)
+    : undefined;
+  const stopped: RunEvent[] = outcome === "cancelled" && restoredTurnId !== turnId
+    ? [{ type: "error", error: { code: "aborted", message: "turn aborted" } }]
+    : [];
+  return [...stopped, { type: "run_end", ...(outcome ? { outcome } : {}) }];
+};
 const snapshotEvents = (id: string, rows: unknown[], status: ServerStatus, historyApprovals = true, liveApprovalStatus = false): RunEvent[] => {
   let events = fromZetaHistory(rows).filter((event) => historyApprovals || !isApprovalEvent(event));
   if (liveApprovalStatus && !status.pending_approvals_truncated) {
@@ -48,7 +61,6 @@ const snapshotEvents = (id: string, rows: unknown[], status: ServerStatus, histo
       event: "approval_request", session_id: id, ...approval,
       ...(approval.resolution_pending ? { state: "resolving", status: "resolving…", disabled_reason: "the server is saving this decision" } : {}),
     }));
-  events.push({ type: status.state === "idle" ? "run_end" : "run_start" });
   return events;
 };
 const wait = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve, reject) => {
@@ -94,9 +106,21 @@ export async function openSession(
   };
   const allRows = () => pages.flatMap((page) => page.rows);
   let publishedPages = 1;
+  let stoppedRestoredTurnId: string | undefined;
+  const finalEvents = (rows: unknown[], status: ServerStatus, historyComplete = true, replacing = false) => {
+    const events = terminalEvents(status, rows, replacing ? undefined : stoppedRestoredTurnId, historyComplete);
+    const turnId = typeof status.last_turn_outcome?.turn_id === "string" ? status.last_turn_outcome.turn_id : undefined;
+    if (events.some((event) => event.type === "error" && event.error.code === "aborted")) stoppedRestoredTurnId = turnId;
+    else if (replacing && stoppedRestoredTurnId === turnId) stoppedRestoredTurnId = undefined;
+    return events;
+  };
+  const replayEvents = (rows: unknown[], status: ServerStatus, historyComplete = true) => [
+    ...snapshotEvents(id, rows, status, historyComplete, approvalReconnect),
+    ...finalEvents(rows, status, historyComplete, true),
+  ];
   const stableRows = () => (pages.length === 1 ? pages : pages.slice(0, -1)).flatMap((page) => page.rows);
   const publishStablePrefix = (status: ServerStatus) => {
-    lease.store.resync(snapshotEvents(id, stableRows(), status, false, approvalReconnect));
+    lease.store.resync(replayEvents(stableRows(), status, false));
     publishedPages = pages.length === 1 ? 1 : pages.length - 1;
   };
   const publishApprovals = (status: ServerStatus) => {
@@ -133,12 +157,14 @@ export async function openSession(
       for (const event of fromZetaHistory(page.rows)) if (!isApprovalEvent(event)) lease.store.dispatch(event);
     if (pages.length > 1)
       for (const event of fromZetaHistory(allRows())) if (isApprovalEvent(event)) lease.store.dispatch(event);
-    for (const event of snapshotEvents(id, [], status, true, approvalReconnect)) lease.store.dispatch(event);
+    for (const event of finalEvents(allRows(), status)) lease.store.dispatch(event);
     publishedPages = pages.length;
   };
-  const waitUntilIdle = async (status = initialStatus): Promise<ServerStatus> => {
+  const waitUntilIdle = async (status?: ServerStatus): Promise<ServerStatus> => {
+    const shouldWait = status !== undefined || initialStatus.state !== "idle";
+    status ??= initialStatus.state === "idle" ? await getStatus(client, activeSignal) : initialStatus;
     let pending = JSON.stringify(status.pending_approvals ?? []);
-    while (status.state !== "idle") {
+    while (shouldWait && status.state !== "idle") {
       await wait(500, activeSignal);
       status = await getStatus(client, activeSignal);
       const nextPending = JSON.stringify(status.pending_approvals ?? []);
@@ -166,12 +192,12 @@ export async function openSession(
     activeSignal = combinedSignal(replaySignal);
     if (!firstLoad) {
       await loadFullHistory();
-      return snapshotEvents(id, allRows(), await getStatus(client, activeSignal), true, approvalReconnect);
+      return replayEvents(allRows(), await getStatus(client, activeSignal));
     }
     firstLoad = false;
     pages = [await historyPage(0, activeSignal)];
     progress?.(allRows().length, pages[0]!.nextOffset === null);
-    return snapshotEvents(id, allRows(), initialStatus, pages[0]!.nextOffset === null, approvalReconnect);
+    return replayEvents(allRows(), initialStatus, pages[0]!.nextOffset === null);
   }, true);
 
   const reconcileTail = async () => {
@@ -200,12 +226,12 @@ export async function openSession(
   const complete = (async (): Promise<{ syncing: boolean }> => {
     try {
       await wait(0, activeSignal);
-      const [, idle] = await Promise.all([loadRemainingPages(), waitUntilIdle()]);
+      const [, status] = await Promise.all([loadRemainingPages(), waitUntilIdle()]);
       if (client.replayRevision(id) === 0 && client.finishReplay(id, 0)) {
-        publishFinalTail(idle);
+        publishFinalTail(status);
         return { syncing: false };
       }
-      await finishWhenClean(idle);
+      await finishWhenClean(status);
       return { syncing: false };
     } catch (error) {
       throw error;

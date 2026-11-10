@@ -54,7 +54,7 @@ try {
       const { context, page } = await fresh(browser);
       try {
         await startQueued(page, "reload natural"); await page.reload(); await ready(page);
-        await page.locator('.undelivered[role="note"]').waitFor({ timeout: 15_000 });
+        await page.locator('[data-part="delivery-note"]').waitFor({ timeout: 15_000 });
         if (fake.sent.some((item) => item.method === "send" && item.text === "queued reload natural")) throw new Error("a reloaded page resent the steer without the user");
         await page.getByRole("button", { name: "resend" }).click(); await waitForSent("queued reload natural");
       } finally { await cleanup(context, page); }
@@ -64,10 +64,10 @@ try {
       try {
         await startQueued(page, "explicit stop");
         const owner = page.url(); await page.getByRole("button", { name: "stop the running turn" }).click();
-        await page.locator('.undelivered[role="note"]').waitFor({ timeout: 10_000 });
+        await page.locator('[data-part="delivery-note"]').waitFor({ timeout: 10_000 });
         await page.locator('.status-line[data-state="ready"]').waitFor({ timeout: 10_000 });
         // A resend that wraps under the note lines up with the note's words, not at an odd indent.
-        const edges = await page.locator('.undelivered[role="note"]').first().evaluate((row) => {
+        const edges = await page.locator('[data-part="delivery-note"]').first().evaluate((row) => {
           const range = document.createRange(); range.selectNodeContents(row.firstChild!);
           const words = range.getClientRects()[0]!; const button = row.querySelector("button")!.getBoundingClientRect();
           return { words: words.left, wordsTop: words.top, button: button.left, buttonTop: button.top };
@@ -75,7 +75,7 @@ try {
         if (edges.buttonTop > edges.wordsTop + 4 && Math.abs(edges.button - edges.words) > 0.5) throw new Error(`the wrapped resend sits at ${edges.button}px, the note's words at ${edges.words}px`);
         if (await page.locator('[data-part="composer-message"]', { hasText: "sending" }).count()) throw new Error(`idle composer still said sending at ${width}`);
         await page.getByRole("button", { name: "new run" }).click(); await page.goBack(); await page.waitForURL(owner);
-        await page.reload(); await ready(page); await page.locator('.undelivered[role="note"]').waitFor({ timeout: 10_000 });
+        await page.reload(); await ready(page); await page.locator('[data-part="delivery-note"]').waitFor({ timeout: 10_000 });
         await page.getByRole("button", { name: "resend" }).click(); await waitForSent("queued explicit stop");
       } finally { await cleanup(context, page); }
     });
@@ -83,7 +83,7 @@ try {
       const { context, page } = await fresh(browser);
       try {
         await startQueued(page, "disconnect"); fake.drop(); await page.reload(); await ready(page);
-        await page.locator('.undelivered[role="note"]').waitFor({ timeout: 15_000 });
+        await page.locator('[data-part="delivery-note"]').waitFor({ timeout: 15_000 });
         if (fake.sent.some((item) => item.method === "send" && item.text === "queued disconnect")) throw new Error("a steer dropped by a disconnect was resent without the user");
         await page.getByRole("button", { name: "resend" }).click(); await waitForSent("queued disconnect");
         if ((await page.locator("body").innerText()).includes("content must be an array")) throw new Error("terminal delivery history failed fulcrum adaptation");
@@ -93,8 +93,7 @@ try {
       const { context, page } = await fresh(browser);
       try {
         const field = await startQueued(page, "delayed retry"); fake.delayNext("send", 3_000);
-        // gamma gets no drop reason without session_history_fidelity, so the natural drop waits for the resend click.
-        await page.locator('.undelivered[role="note"]').getByRole("button", { name: "resend" }).click({ timeout: 15_000 });
+        // The owning page learns the natural drop through session_history_fidelity and retries it automatically.
         await page.getByLabel("message resending").waitFor({ timeout: 15_000 });
         const action = page.locator('[data-part="composer-submit"]');
         if (await action.getAttribute("aria-disabled") !== "true") throw new Error("submit stayed enabled during retry");
@@ -135,7 +134,7 @@ try {
       try {
         await startQueued(page, "mismatch resend");
         await page.getByRole("button", { name: "stop the running turn" }).click();
-        const row = page.locator('.undelivered[role="note"]');
+        const row = page.locator('[data-part="delivery-note"]');
         await row.waitFor({ timeout: 10_000 });
         await page.locator('.status-line[data-state="ready"]').waitFor({ timeout: 10_000 });
         fake.attachQuietly("s-markdown");
@@ -202,7 +201,7 @@ try {
         if (!restored) throw new Error("chromium loaded the page again instead of restoring it from the bfcache (pageshow.persisted never true), so this check proves nothing");
         // The restored page reconnects, reopens the run, and learns the drop reason (turn_end): it shows the row, or resends.
         const resent = () => fake.sent.some((item) => item.method === "send" && item.text === "queued bfcache");
-        const row = page.locator('.undelivered[role="note"]');
+        const row = page.locator('[data-part="delivery-note"]');
         for (let attempt = 0; attempt < 100 && !resent() && !(await row.count()); attempt++) await Bun.sleep(200);
         await Bun.sleep(2_000);
         if (resent()) throw new Error("the page back from the bfcache resent the steer without the user");

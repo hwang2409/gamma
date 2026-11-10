@@ -22,12 +22,14 @@ const meta = (id: string, minutesAgo: number, extra: Json = {}) => ({
 });
 
 export const ACTIVE = "s-reconnect";
+const FIDELITY = "s-fidelity";
 export const LONG = "s-long";
 export const MANY = "s-many";
 export const LARGE = "s-large-pages";
 const seeded = [
   meta(ACTIVE, 2, { name: "fix the flaky reconnect test in packages/zeta" }),
   meta("s-themes", 45, { first_message_preview: "check every theme's muted text against 4.5:1 on the surface color" }),
+  meta(FIDELITY, 50, { name: "session history fidelity fixture" }),
   meta(LONG, 60 * 5, { first_message_preview: "profile the virtual timeline with 400 rows of history" }),
   meta("s-child", 3, { parent_session_id: ACTIVE, first_message_preview: "worker: run the zeta tests" }),
   meta("s-markdown", 60 * 26, { name: "streaming markdown: nested lists in block quotes", model: "gpt-5.1-codex" }),
@@ -132,6 +134,42 @@ const historySeed: Record<string, Json[]> = {
       )],
     },
   ],
+  // Zeta 92ccf67a src/zeta/server/handlers/history_projection.py:346-353,464-520 and
+  // src/zeta/server/event_contract.py:11-60: fidelity history retains bounded arguments, structured bash fields,
+  // metadata-only image blocks, and terminal steer outcomes.
+  [FIDELITY]: [
+    {
+      id: "fidelity-call", role: "assistant", tool_result: null, content: [{
+        type: "tool_use",
+        tool_call: {
+          id: "fidelity-tool", name: "bash", arguments_truncated: true,
+          arguments: { command: `printf fidelity-marker-${"nested-argument-".repeat(24)}`, cwd: "/tmp", options: { env: { FIDELITY: "true" } } },
+        },
+      }],
+    },
+    {
+      id: "fidelity-result", role: "tool_result", content: [text("")], tool_result: result("fidelity-tool", "stdout:\n\nstderr:\nfailed\n", {
+        is_error: true,
+        structured_content: { exit_code: 2, stdout: "", stderr: "failed\n", stdout_truncated: false, stderr_truncated: false, cwd_after: "/tmp" },
+        structured_content_truncated: false,
+        content_blocks: [{ type: "image", mimeType: "image/png", caption: "fidelity preview", width: 640, height: 360, size: 1234, data_omitted: true }],
+      }),
+    },
+    { id: "fidelity-delivered", role: "system", event: "delivery_status", delivery_id: "fidelity-delivered", method: "steer", status: "delivered", content: [text("retained delivered steer")] },
+    { id: "fidelity-dropped", role: "system", event: "delivery_status", delivery_id: "fidelity-dropped", method: "steer", status: "dropped", content: [text("retained dropped steer")], reason: "turn_end" },
+    // Zeta fd1f893 src/zeta/server/handlers/history_projection.py:390-400 and event_contract.py:11-32:
+    // fidelity alone exposes the generic terminal row when no accepted steer text was retained.
+    { id: "fidelity-generic-drop", role: "system", event: "delivery_status", delivery_id: "fidelity-generic-drop", method: "steer", status: "dropped", content: [text("steer dropped: turn_end")], reason: "turn_end" },
+    { id: "fidelity-generic-unknown", role: "system", event: "delivery_status", delivery_id: "fidelity-generic-unknown", method: "steer", status: "dropped", content: [text("steer dropped: private_future_token")], reason: "private_future_token" },
+    { id: "fidelity-generic-missing", role: "system", event: "delivery_status", delivery_id: "fidelity-generic-missing", method: "steer", status: "dropped", content: [text("steer dropped")] },
+    ...([
+      ["abort", "retained stopped steer"], ["clear", "retained removed steer"], ["disconnect", "retained lost-connection steer"],
+      ["failed", "retained unsuccessful steer"], ["restart", "retained interrupted steer"], ["future_token", "retained future steer"],
+    ] as const).map(([reason, display]) => ({
+      id: `fidelity-reason-${reason}`, role: "system", event: "delivery_status", delivery_id: `fidelity-reason-${reason}`,
+      method: "steer", status: "dropped", content: [text(display)], reason,
+    })),
+  ],
   "s-themes": [
     { id: "t1", role: "user", content: [text("check every theme's muted text against 4.5:1 on the surface color")], tool_result: null },
     { id: "t1b", role: "assistant", content: [toolUse("t-ls", "bash")], tool_result: null },
@@ -145,16 +183,55 @@ const historySeed: Record<string, Json[]> = {
     ? { id: `l${index}`, role: "user", content: [text(`step ${index / 2 + 1}: measure frame ${index}`)], tool_result: null }
     : { id: `l${index}`, role: "assistant", content: [text(`frame ${index} took **${(index % 7) + 3} ms**; \`content-visibility\` skipped ${index * 3} rows.`)], tool_result: null }),
 };
+// Zeta 92ccf67a src/zeta/server/event_contract.py:156-226: fidelity live tool frames retain bounded
+// arguments/data and structured bash results, with explicit truncation fields.
+const fidelityLiveEvents = [
+  { event: "tool_start", session_id: FIDELITY, tool_call: (historySeed[FIDELITY]![0]!.content as Json[])[0]!.tool_call, data: { request: { marker: "fidelity-marker", nested: "bounded" } } },
+  { event: "tool_output", session_id: FIDELITY, tool_call: (historySeed[FIDELITY]![0]!.content as Json[])[0]!.tool_call, output: "failed\n", data: { stderr: "failed\n" } },
+  { event: "tool_end", session_id: FIDELITY, tool_call: (historySeed[FIDELITY]![0]!.content as Json[])[0]!.tool_call, tool_result: historySeed[FIDELITY]![1]!.tool_result, data: {} },
+] satisfies Json[];
+
 const createHistories = (): Record<string, Json[]> => Object.fromEntries(
   Object.entries(historySeed).map(([sessionId, rows]) => [sessionId, [...rows]]),
 );
 
+/** Zeta projects stored rows separately for each connection's negotiated history features. */
+function projectHistory(rows: readonly Json[], fidelity: boolean): Json[] {
+  if (fidelity) return rows.map((row) => ({ ...row }));
+  return rows.flatMap((row) => {
+    if (row.event === "delivery_status") return [];
+    const content = Array.isArray(row.content) ? row.content.map((block) => {
+      if (!block || typeof block !== "object" || (block as Json).type !== "tool_use") return block;
+      const call = (block as Json).tool_call as Json;
+      const { arguments_truncated: _, ...legacyCall } = call;
+      return { ...(block as Json), tool_call: { ...legacyCall, arguments: {} } };
+    }) : row.content;
+    if (row.role !== "tool_result" || !row.tool_result || typeof row.tool_result !== "object") return [{ ...row, content }];
+    const { structured_content_truncated: _, ...legacyResult } = row.tool_result as Json;
+    return [{ ...row, content, tool_result: { ...legacyResult, structured_content: null, content_blocks: [] } }];
+  });
+}
+
 /** The live turn that runs when the active session opens: prose, code, a shell call, an approval, then a summary. */
-const liveTurn = (send: (event: Json) => void, ask: () => Promise<"approve" | "deny" | "abort">, wait: (ms: number) => Promise<void>, done: () => void, histories: Record<string, Json[]>, historyMode: HistoryMode, grantProof = false, setPending: (requestId: string, call: Json) => void = () => {}) => async () => {
+const liveTurn = (send: (event: Json) => void, ask: () => Promise<"approve" | "deny" | "abort">, wait: (ms: number) => Promise<void>, done: (reason?: "completed" | "user_stop") => void, histories: Record<string, Json[]>, historyMode: HistoryMode, grantProof = false, setPending: (requestId: string, call: Json) => void = () => {}) => async () => {
   // Committed rows also land in history, as in zeta, so a reconnect rebuilds what the live stream showed.
   const history = histories[ACTIVE]!;
   const row = (id: string, role: string, content: Json[], toolResult: Json | null = null) => history.push({ id, role, content, tool_result: toolResult });
   const e = (event: string, body: Json = {}) => send({ event, session_id: ACTIVE, ...body });
+  const abortApproval = (requestId: string, call: Json) => {
+    const wire = { decision: "abort", reason: "turn_canceled" };
+    // Zeta origin/main approval_lifecycle.py:767-771,1007-1034 persists settlement before publishing
+    // approval_end and its paired canceled tool_end; tests/test_server.py:3230-3237 fixes their live order and shape.
+    if (historyMode === "new") history.push({ id: `approval-end-${requestId}`, role: "system", event: "approval_end", request_id: requestId, tool_call: call, data: wire });
+    e("approval_end", { request_id: requestId, tool_call: call, data: wire });
+    const canceled = result(String(call.id), "tool execution canceled", { is_error: true, is_canceled: true });
+    row(`canceled-${String(call.id)}`, "tool_result", [text("")], canceled);
+    e("tool_end", { tool_call: call, tool_result: canceled, data: {} });
+    // Zeta origin/main delivery.py:326-336 and control.py:525-543 make the user_stop row and idle state
+    // durable before terminal turn_aborted. control.py:607-619 suppresses agent_end on this path.
+    done("user_stop");
+    e("turn_aborted", { data: { reason: "abort" } });
+  };
   e("agent_start");
   e("turn_start", { data: { turn: 2 } });
   for (const chunk of ["Running the test ", "in a loop to confirm ", "the race:\n\n```sh\nfor i in $(seq 20); do bun test test/rpc.test.ts; done\n```\n"]) {
@@ -178,7 +255,10 @@ const liveTurn = (send: (event: Json) => void, ask: () => Promise<"approve" | "d
   e("approval_request", { request_id: "approval-1", tool_call: clean, delegated: false });
   if (historyMode === "new") history.push({ id: "approval-request-1", role: "system", event: "approval_request", request_id: "approval-1", tool_call: clean, delegated: false });
   const decision = await approval;
-  if (decision === "abort") return done();
+  if (decision === "abort") {
+    abortApproval("approval-1", clean);
+    return;
+  }
   // zeta's event says "allow" for an approve call (src/zeta/core/approval.py), not the method name.
   const wire = { decision: decision === "approve" ? "allow" : decision };
   e("approval_end", { request_id: "approval-1", data: wire });
@@ -195,10 +275,7 @@ const liveTurn = (send: (event: Json) => void, ask: () => Promise<"approve" | "d
     e("approval_request", { request_id: "approval-2", tool_call: write, delegated: false });
     const next = await pending;
     if (next === "abort") {
-      e("approval_end", { request_id: "approval-2", data: { decision: "abort", reason: "user_stop" } });
-      e("turn_aborted", { data: { reason: "abort" } });
-      done();
-      e("agent_end");
+      abortApproval("approval-2", write);
       return;
     }
   }
@@ -225,21 +302,37 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
   let aborts = 0;
   let echo = true;
   let holdTurns = false;
+  let dropNextSend = false;
   const withheldEchoes: Array<() => void> = [];
   const withheldHistory: Array<() => void> = [];
-  let chat: { session: string; sendDelivery: string | null; steers: string[]; aborted: boolean } | null = null;
+  let chat: { session: string; turnId: string; sendDelivery: string | null; steers: string[]; aborted: boolean } | null = null;
   const externalSteers: Array<{ id: string; session: string }> = [];
   // docs/serve-protocol.md:791-808 (served_turn_end): status.last_turn_outcome.reason of the last whole turn.
-  let lastTurn: "completed" | "user_stop" | "error" | "disconnect" | null = null;
+  type TurnEndReason = "completed" | "user_stop" | "error" | "disconnect";
+  const lastTurnOutcomes = new Map<string, { turn_id: string; reason: TurnEndReason }>();
+  const recordTurnEnd = (session: string, turnId: string, reason: TurnEndReason) => {
+    // Zeta origin/main connections.py:821-832 reads last_turn_outcome from the active session's store.
+    lastTurnOutcomes.set(session, { turn_id: turnId, reason });
+    // Zeta origin/main event_contract.py:35-45 defines this exact frame; history_projection.py:295-300 keeps
+    // every durable turn_end in branch order when served_turn_end is negotiated.
+    histories[session]!.push({ id: `served-${turnId}`, role: "system", event: "served_turn_end", data: { turn_id: turnId, reason } });
+  };
   type Send = (event: Json) => void;
   const chatTurn = async (session: string, send: Send, prompt: string, sendDelivery: string | null) => {
-    const turn = { session, sendDelivery, steers: [] as string[], aborted: false }; // steers holds delivery ids
+    const turn = { session, turnId: `turn-${sent.length}`, sendDelivery, steers: [] as string[], aborted: false }; // steers holds delivery ids
     chat = turn;
     running.set(true);
     const e = (event: string, body: Json = {}) => { if (!turn.aborted) send({ event, session_id: session, ...body }); };
     e("agent_start");
-    e("turn_start", { data: { turn: sent.length } });
-    const finish = () => { if (turn.sendDelivery) statuses.set(turn.sendDelivery, "delivered"); e("turn_end", { data: { turn: sent.length } }); chat = null; lastTurn = "error"; running.set(false); e("agent_end"); };
+    e("turn_start", { data: { turn: sent.length, turn_id: turn.turnId } });
+    const finish = () => {
+      if (turn.sendDelivery) statuses.set(turn.sendDelivery, "delivered");
+      // Zeta origin/main runtime/loop/turn_persistence.py:83-118 persists the failed assistant message;
+      // handlers/history_projection.py:518-526 always projects its tool_result field and failed_turn marker.
+      histories[session]!.push({ id: `failed-${turn.turnId}`, role: "assistant", content: [], tool_result: null, failed_turn: { code: "provider_error", message: "the provider is overloaded (529)" } });
+      recordTurnEnd(session, turn.turnId, "error");
+      e("turn_end", { data: { turn: sent.length } }); chat = null; running.set(false); e("agent_end");
+    };
     // Prompts that steer the scripted turn, for the status line: a provider failure, and a slow tool call.
     if (prompt.includes("fail this turn")) {
       await wait(200);
@@ -278,8 +371,8 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
       e("delivery_status", { ...row, required_feature: "session_history_fidelity" });
     }
     e("turn_end", { data: { turn: sent.length } });
+    recordTurnEnd(session, turn.turnId, "completed");
     chat = null;
-    lastTurn = "completed";
     running.set(false);
     e("agent_end");
   };
@@ -318,6 +411,16 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
     const emitEcho = () => send(userMessage);
     const accepted = method === "send" ? { accepted: true, session_id: active } : { accepted: true };
     if (delivery) { deliveries.set(`${active}\u0000${delivery}`, accepted); statuses.set(delivery, "queued"); }
+    if (requested === "send" && delivery && dropNextSend) {
+      dropNextSend = false;
+      void wait(500).then(() => {
+        statuses.set(delivery, "dropped");
+        const row = { id: `delivery-${delivery}`, role: "system", delivery_id: delivery, method: "steer", status: "dropped", content: [text("steer dropped: turn_end")], reason: "turn_end" };
+        histories[active]!.push({ ...row, event: "delivery_status" });
+        send({ event: "delivery_status", session_id: active, ...row, required_feature: "session_history_fidelity" });
+      });
+      return { result: accepted };
+    }
     const persistHistory = () => { if (delivery && method === "send") statuses.set(delivery, "delivered"); histories[active] = [...(histories[active] ?? []), { id: `sent-${sent.length}`, role: "user", content: [text(value)], ...(delivery ? { delivery_id: delivery } : {}), tool_result: null }]; };
     if (echo) { persistHistory(); emitEcho(); } else { withheldHistory.push(persistHistory); withheldEchoes.push(emitEcho); }
     if (method === "steer") {
@@ -334,10 +437,12 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
     if (turn.sendDelivery) statuses.set(turn.sendDelivery, "delivered");
     for (const id of turn.steers) {
       statuses.set(id, "dropped");
-      histories[turn.session]!.push({ id: `delivery-${id}`, role: "system", event: "delivery_status", delivery_id: id, method: "steer", status: "dropped", content: [text("steer dropped: abort")], reason: "abort" });
+      const row = { id: `delivery-${id}`, role: "system", delivery_id: id, method: "steer", status: "dropped", content: [text("steer dropped: abort")], reason: "abort" };
+      histories[turn.session]!.push({ ...row, event: "delivery_status" });
+      send({ event: "delivery_status", session_id: turn.session, ...row, required_feature: "session_history_fidelity" });
     }
+    recordTurnEnd(turn.session, turn.turnId, "user_stop");
     chat = null;
-    lastTurn = "user_stop";
     running.set(false);
     turn.aborted = true;
     aborts++;
@@ -351,23 +456,25 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
     clearSent() { sent.splice(0); },
     setEcho(value: boolean) { echo = value; },
     setHoldTurns(value: boolean) { holdTurns = value; },
+    dropNextSendAtTurnEnd() { dropNextSend = true; },
     persistWithheldHistory() { withheldHistory.splice(0).forEach((persist) => persist()); },
     flushEchoes() { this.persistWithheldHistory(); withheldEchoes.splice(0).forEach((send) => send()); },
     get history() { return histories[ACTIVE] ?? []; },
     get aborts() { return aborts; },
-    get lastTurnOutcome() { return lastTurn ? { turn_id: `turn-${sent.length}`, reason: lastTurn } : null; },
-    finishExternalTurn(session: string, send: Send) {
-      lastTurn = "completed";
+    lastTurnOutcome(session: string | null) { return session ? lastTurnOutcomes.get(session) ?? null : null; },
+    finishExternalTurn(session: string, send: Send, outcome: TurnEndReason = "completed") {
+      const turnId = `turn-${sent.length}`;
+      const dropReason = outcome === "completed" ? "turn_end" : "abort";
       for (const steer of externalSteers.splice(0).filter((steer) => steer.session === session)) {
         statuses.set(steer.id, "dropped");
-        const row = { id: `delivery-${steer.id}`, role: "system", delivery_id: steer.id, method: "steer", status: "dropped", content: [text("steer dropped: turn_end")], reason: "turn_end" };
+        const row = { id: `delivery-${steer.id}`, role: "system", delivery_id: steer.id, method: "steer", status: "dropped", content: [text(`steer dropped: ${dropReason}`)], reason: dropReason };
         histories[session]!.push({ ...row, event: "delivery_status" });
         // zeta delivery.py:305-325: published live only to a controller with session_history_fidelity.
         send({ event: "delivery_status", session_id: session, ...row, required_feature: "session_history_fidelity" });
       }
+      recordTurnEnd(session, turnId, outcome);
     },
     disconnect() {
-      if (chat || externalSteers.length) lastTurn = "disconnect";
       for (const steer of externalSteers.splice(0)) {
         statuses.set(steer.id, "dropped");
         histories[steer.session]!.push({ id: `delivery-${steer.id}`, role: "system", event: "delivery_status", delivery_id: steer.id, method: "steer", status: "dropped", content: [text("steer dropped: disconnect")], reason: "disconnect" });
@@ -377,6 +484,7 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
         statuses.set(id, "dropped");
         histories[chat.session]!.push({ id: `delivery-${id}`, role: "system", event: "delivery_status", delivery_id: id, method: "steer", status: "dropped", content: [text("steer dropped: abort")], reason: "abort" });
       }
+      recordTurnEnd(chat.session, chat.turnId, "disconnect");
       chat.aborted = true; chat = null; running.set(false);
     },
     /** The reply body for a composer method, or undefined for any other method. */
@@ -420,6 +528,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   ];
   let decide: ((decision: "approve" | "deny" | "abort") => void) | null = null;
   let turnStarted = false;
+  let fidelityStarted = false;
   let approvalAborted = false;
   let running = false;
   let rejectCreate = false;
@@ -535,6 +644,37 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     resolve("abort");
   };
 
+  const handleSessionHistory = async (socket: ServerWebSocket<SocketData>, params: Json, reply: (body: Json) => void, send: (event: Json) => void) => {
+    if (params.session_id !== active) return reply({ error: { code: -32003, message: "no active session" } });
+    if (openDelay > 0 && !delayedOpen) {
+      delayedOpen = true;
+      await wait(openDelay);
+    }
+    const servedTurnEnd = socket.data.features?.includes("served_turn_end") === true;
+    const stored = (histories[active!] ?? []).filter((row) =>
+      (approvalHistoryMode !== "not-advertised-without-rows" || (row.event !== "approval_request" && row.event !== "approval_end"))
+      && (servedTurnEnd || row.event !== "served_turn_end"));
+    const rows = projectHistory(stored, socket.data.features?.includes("session_history_fidelity") === true);
+    const offset = Number(params.offset ?? 0);
+    const pageSize = active === LARGE ? 128 : active === FIDELITY ? 32 : 8;
+    reply({ result: { messages: rows.slice(offset, offset + pageSize), next_offset: offset + pageSize < rows.length ? offset + pageSize : null } });
+    if (active === FIDELITY && socket.data.features?.includes("session_history_fidelity") && !fidelityStarted) {
+      fidelityStarted = true;
+      queueMicrotask(() => fidelityLiveEvents.forEach((event) => socket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: event }))));
+    }
+    // Zeta 5feea2fc tests/test_server.py::test_approval_and_steer_continue_the_same_turn and
+    // ::test_resumed_approval_finishes_idle_after_terminal_event define this approval-turn lifecycle.
+    if (liveEnabled && active === ACTIVE && offset + pageSize >= rows.length && !turnStarted) {
+      turnStarted = true;
+      running = true;
+      const ask = () => new Promise<"approve" | "deny" | "abort">((resolve) => {
+        approvalAborted = false;
+        decide = (decision) => { decide = null; resolve(decision); };
+      });
+      setTimeout(() => void liveTurn(send, ask, wait, (reason) => { composer.finishExternalTurn(ACTIVE, send, reason); running = false; }, histories, currentHistoryMode, grantProof, (requestId, call) => { approvalRequestId = requestId; approvalCall = call as typeof approvalCall; })(), 300);
+    }
+  };
+
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port,
@@ -636,7 +776,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         }
         if (method === "status") {
           const pending = decide && !approvalAborted ? [{ request_id: approvalRequestId, tool_call: approvalCall, delegated: false }] : [];
-          return reply({ result: { session: active ? { ...(sessions.find((session) => session.session_id === active) ?? {}), vim_mode: vimMode, plan_mode: activeSettings().plan_mode } : null, state: running ? (decide ? "tool" : "running") : "idle", explicit_finish: false, pending_approvals: pending, usage: {}, compaction_markers: 0, ...(socket.data.features?.includes("served_turn_end") ? { last_turn_outcome: composer.lastTurnOutcome } : {}) } });
+          return reply({ result: { session: active ? { ...(sessions.find((session) => session.session_id === active) ?? {}), vim_mode: vimMode, plan_mode: activeSettings().plan_mode } : null, state: running ? (decide ? "tool" : "running") : "idle", explicit_finish: false, pending_approvals: pending, usage: {}, compaction_markers: 0, ...(socket.data.features?.includes("served_turn_end") ? { last_turn_outcome: composer.lastTurnOutcome(active) } : {}) } });
         }
         if (handleGrantRequest(socket, method, params, reply)) return;
         if (method === "resume") {
@@ -660,26 +800,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         if (method === "session_tree") return reply({ result: { session_id: params.session_id, branches: [{ id: "head-main", label: "main", seq: 1, current: true }, { id: "head-experiment", label: "experiment", seq: 7, current: false }] } });
         if (method === "switch_branch") return reply({ result: { session_id: params.session_id, head_id: params.head_id } });
         if (method === "session_history") {
-          if (params.session_id !== active) return reply({ error: { code: -32003, message: "no active session" } });
-          if (openDelay > 0 && !delayedOpen) {
-            delayedOpen = true;
-            await wait(openDelay);
-          }
-          const rows = (histories[active!] ?? []).filter((row) => approvalHistoryMode !== "not-advertised-without-rows" || (row.event !== "approval_request" && row.event !== "approval_end"));
-          const offset = Number(params.offset ?? 0);
-          const pageSize = active === LARGE ? 128 : 8;
-          reply({ result: { messages: rows.slice(offset, offset + pageSize), next_offset: offset + pageSize < rows.length ? offset + pageSize : null } });
-          // Zeta 5feea2fc tests/test_server.py::test_approval_and_steer_continue_the_same_turn and
-          // ::test_resumed_approval_finishes_idle_after_terminal_event define this approval-turn lifecycle.
-          if (liveEnabled && active === ACTIVE && offset + pageSize >= rows.length && !turnStarted) {
-            turnStarted = true;
-            running = true;
-            const ask = () => new Promise<"approve" | "deny" | "abort">((resolve) => {
-              approvalAborted = false;
-              decide = (decision) => { decide = null; resolve(decision); };
-            });
-            setTimeout(() => void liveTurn(send, ask, wait, () => { composer.finishExternalTurn(ACTIVE, send); running = false; }, histories, currentHistoryMode, grantProof, (requestId, call) => { approvalRequestId = requestId; approvalCall = call as typeof approvalCall; })(), 300);
-          }
+          await handleSessionHistory(socket, params, reply, send);
           return;
         }
         // As in zeta (server/ergonomics.py `active`): these name the active session or fail.
@@ -803,7 +924,13 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     setEcho(value: boolean) { composer.setEcho(value); },
     /** `true`: every turn except a "fail this turn" prompt runs until it is stopped. */
     setHoldTurns(value: boolean) { composer.setHoldTurns(value); },
+    dropNextSendAtTurnEnd() { composer.dropNextSendAtTurnEnd(); },
     flushEchoes() { composer.flushEchoes(); },
+    // Zeta fd1f893 src/zeta/server/control.py:392-417 publishes a later accepted user_message with the same delivery_id.
+    echoFidelityDrop() {
+      const event = { event: "user_message", session_id: FIDELITY, text: "recovered omitted steer", mode: "steer", delivery_id: "fidelity-generic-drop" };
+      for (const socket of sockets) socket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: event }));
+    },
     get aborts() { return composer.aborts; },
     /** Closes every socket, like a network blip; the server keeps running. */
     drop() { composer.persistWithheldHistory(); for (const socket of sockets) socket.close(1012, "restart"); },

@@ -1,7 +1,7 @@
 import { createHighlighter } from "@fulcrum/highlight";
 import { Markdown, type Fences, type MarkdownProps } from "@fulcrum/markdown/react";
 import { MermaidFence } from "@fulcrum/mermaid";
-import { Approval, Code, Fallback, FileBlock, HighlightContext, ImageBlock, Message, RunProvider, Timeline, ToolCall, useItemSelector, useRun, useRunStore, useTimeline, type Renderers } from "@fulcrum/react";
+import { Approval, Code, Fallback, FileBlock, HighlightContext, ImageBlock, Message, RunProvider, Timeline, ToolCall, useItemSelector, useRun, useRunStore, useTimeline, type Renderers, type UserMessageItem } from "@fulcrum/react";
 import { createRunStore } from "@fulcrum/core";
 import { SESSION_GRANTS_FEATURE, type ZetaClient } from "@fulcrum/zeta";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type Dispatch, type ReactNode, type SetStateAction } from "react";
@@ -39,11 +39,17 @@ function ZetaApproval({ id }: { id: string }) {
 }
 // The intents of steers a stop dropped: zeta never gave them to the agent, so their rows must not look delivered.
 const DeliveryStates = createContext<ReadonlyMap<string, import("./delivery-owner").PendingDelivery>>(new Map());
-const UNDELIVERED = {
+const UNDELIVERED: Record<string, string> = {
+  turn_end: "not delivered · the turn ended before zeta used this steer",
+  abort: "not delivered · the stop ended the turn before zeta took this steer",
   stop: "not delivered · the stop ended the turn before zeta took this steer",
+  clear: "not delivered · pending steers were cleared before zeta used this steer",
+  disconnect: "not delivered · the connection ended before zeta used this steer",
+  failed: "not delivered · the turn failed before zeta used this steer",
+  restart: "not delivered · zeta restarted before it used this steer",
   dropped: "not delivered · zeta did not take this message",
   unconfirmed: "not confirmed · resend will not run it twice",
-} as const;
+};
 const ResendDelivery = createContext<((intent: string) => void) | null>(null);
 function UserRow({ id }: { id: string }) {
   const intent = useItemSelector(id, (item) => (item?.type === "user" && item.event.type === "user_message" ? item.event.intent : undefined));
@@ -56,11 +62,15 @@ function UserRow({ id }: { id: string }) {
   const lost = state === "dropped";
   const waiting = state === "requesting" || state === "queued";
   const label = state === "requesting" && pending?.resent ? "resending" : state;
+  const renderDeliveryNote = useCallback((item: UserMessageItem) => {
+    if (item.event.delivery_status !== "dropped" && !lost && !item.event.text_omitted) return null;
+    const reason = item.event.delivery_reason ?? pending?.why ?? "dropped";
+    return <>{UNDELIVERED[reason] ?? UNDELIVERED.dropped}{item.event.text_omitted ? " · text not kept" : null}{pending?.failure ? <span className="resend-failure">{pending.failure}</span> : null} {lost && !item.event.text_omitted && resend && identity ? <button type="button" className="ghost" onClick={() => resend(identity)}>resend</button> : null}</>;
+  }, [identity, lost, pending?.failure, pending?.why, resend]);
   return (
     <>
-      <Fallback id={id} />
+      <Fallback id={id} renderDeliveryNote={renderDeliveryNote} />
       {waiting ? <p className="queued-delivery" role="status" aria-label={`message ${label}`}>{label}</p> : null}
-      <p className="undelivered" data-empty={!lost || undefined} data-reserve={identity || undefined} data-user-id={id} role={lost ? "note" : undefined} aria-hidden={!lost || undefined}>{lost ? <>{UNDELIVERED[pending?.why ?? "dropped"]}{pending?.failure ? <span className="resend-failure">{pending.failure}</span> : null} {resend ? <button type="button" className="ghost" onClick={() => resend(identity)}>resend</button> : null}</> : "\u00a0"}</p>
     </>
   );
 }
@@ -230,6 +240,7 @@ export function App() {
     writeEntry(next, "push"); runState.dispatch({ type: "NAVIGATED", entryId: next.gammaEntryId as EntryId, runId: id as RunId }); runState.activate(id, { choice: "explicit", model: "" });
   }, [runState]);
   const client = state.phase === "connected" ? connection.client : null;
+  const resendDelivery = useCallback((intent: string) => void deliveries.resend(browserEntry.run, intent), [deliveries, browserEntry.run]);
 
   return (
     <HighlightContext value={highlight}>
@@ -237,7 +248,7 @@ export function App() {
         <RunProvider store={store} highlight={highlight} onRetry={client && open ? () => client.retrySession(open.id) : undefined}>
           <DeliveryStates value={deliveryStates}>
           <RetryTurn value={retryTurn}>
-            <ResendDelivery value={(intent) => void deliveries.resend(browserEntry.run, intent)}>
+            <ResendDelivery value={resendDelivery}>
             <div className="app">
               <header className="topbar">
                 <span className="brand"><span className="brand-mark" aria-hidden="true" /><span className="brand-name">gamma</span></span>

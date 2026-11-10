@@ -68,7 +68,7 @@ test("fake zeta keeps an always grant when the next approval is cancelled", asyn
   });
   try {
     await bounded(new Promise<void>((resolve, reject) => { socket.addEventListener("open", () => resolve(), { once: true }); socket.addEventListener("error", () => reject(new Error("socket failed")), { once: true }); }), "socket open");
-    await request("hello", { protocol_version: "1.2", client_version: "1.2", role: "controller", features: ["session_grants"] });
+    await request("hello", { protocol_version: "1.2", client_version: "1.2", role: "controller", features: ["session_grants", "session_history_fidelity", "served_turn_end"] });
     await request("resume", { session_id: ACTIVE });
     await request("session_history", { session_id: ACTIVE, offset: 0 });
     await until(() => events.some((event) => event.event === "approval_request" && event.request_id === "approval-1"), "first approval");
@@ -77,11 +77,31 @@ test("fake zeta keeps an always grant when the next approval is cancelled", asyn
     await request("abort", {});
     await until(() => events.some((event) => event.event === "turn_aborted"), "cancelled turn");
 
+    const secondApproval = events.findIndex((event) => event.event === "approval_request" && event.request_id === "approval-2");
+    const terminal = events.findIndex((event) => event.event === "turn_aborted");
+    expect(events.slice(secondApproval + 1, terminal + 1).map((event) => event.event)).toEqual(["approval_end", "tool_end", "turn_aborted"]);
+    expect(events[terminal - 2]).toMatchObject({ event: "approval_end", request_id: "approval-2", tool_call: { id: "live-3" }, data: { decision: "abort", reason: "turn_canceled" } });
+    expect(events[terminal - 1]).toMatchObject({
+      event: "tool_end",
+      tool_call: { id: "live-3" },
+      tool_result: { tool_call_id: "live-3", content: "tool execution canceled", is_error: true, is_canceled: true },
+    });
+    const rows: any[] = [];
+    for (let offset: number | null = 0; offset !== null;) {
+      const page = await request("session_history", { session_id: ACTIVE, offset });
+      rows.push(...page.messages);
+      offset = page.next_offset;
+    }
+    const canceled = rows.findIndex((row) => row.tool_result?.tool_call_id === "live-3");
+    expect(rows[canceled]).toMatchObject({ role: "tool_result", tool_result: { content: "tool execution canceled", is_error: true, is_canceled: true } });
+    expect(rows[canceled + 1]).toMatchObject({ event: "served_turn_end", data: { reason: "user_stop" } });
+
     expect(fake.sessionGrants(ACTIVE)).toEqual(["bash"]);
     expect(events.filter((event) => event.event === "session_grants_changed" && event.data?.change === "grant")).toHaveLength(1);
     const approvals = events.filter((event) => event.event === "approval_request").length;
+    const agentEnds = events.filter((event) => event.event === "agent_end").length;
     await request("send", { text: "use a tool after the grant" });
-    await until(() => events.filter((event) => event.event === "agent_end").length >= 2, "reuse turn");
+    await until(() => events.filter((event) => event.event === "agent_end").length > agentEnds, "reuse turn");
     expect(events.filter((event) => event.event === "approval_request")).toHaveLength(approvals);
   } finally {
     socket.close();
