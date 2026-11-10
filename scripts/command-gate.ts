@@ -759,7 +759,7 @@ try {
       // Zeta 5feea2fc server.py:601-626 and control.py:160-180: resume while another turn runs returns -32004.
       fake.busyNext("resume", 8);
       try {
-        await typeWhileAttaching("keep me while zeta is busy", "s-new-7");
+        await typeWhileAttaching("keep me while zeta is busy", "s-docs");
         await step(page, "the busy panel shows", () => page.getByRole("heading", { name: "another run is active" }).waitFor({ timeout: 30_000 }));
         if (await field(page).inputValue() !== "keep me while zeta is busy") throw new Error("the busy open dropped the draft");
         const status = await page.locator('[data-part="composer-message"]').innerText();

@@ -35,6 +35,8 @@ const seeded = [
   meta("s-markdown", 60 * 26, { name: "streaming markdown: nested lists in block quotes", model: "gpt-5.1-codex" }),
   meta("s-docs", 60 * 24 * 3, { first_message_preview: "write the quickstart for @fulcrum/react" }),
   meta("s-untitled", 60 * 24 * 40),
+];
+const prefixFixtures = [
   meta("abcd1111-root", 60 * 24 * 41, { name: "ambiguous prefix fixture one" }),
   meta("abcd2222-root", 60 * 24 * 42, { name: "ambiguous prefix fixture two" }),
 ];
@@ -790,7 +792,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           const requested = String(params.session_id);
           // Zeta 6f29fc4b core/session.py:854-895 resolves exact ids or unique prefixes of at least four characters;
           // server/handlers/lifecycle.py:64-82 returns the prefix and up to eight eight-character candidates on ambiguity.
-          const roots = sessions.filter((session) => session.parent_session_id === null);
+          const roots = [...sessions, ...prefixFixtures].filter((session) => session.parent_session_id === null);
           const exact = roots.find((session) => session.session_id === requested);
           if (!exact && requested.length < 4) return reply({ error: { code: -32012, message: `session ${requested} was not found`, data: { code: "session_not_found", session_id: requested } } });
           const matches = exact ? [exact] : roots.filter((session) => String(session.session_id).startsWith(requested));
