@@ -218,6 +218,20 @@ const liveTurn = (send: (event: Json) => void, ask: () => Promise<"approve" | "d
   const history = histories[ACTIVE]!;
   const row = (id: string, role: string, content: Json[], toolResult: Json | null = null) => history.push({ id, role, content, tool_result: toolResult });
   const e = (event: string, body: Json = {}) => send({ event, session_id: ACTIVE, ...body });
+  const abortApproval = (requestId: string, call: Json) => {
+    const wire = { decision: "abort", reason: "turn_canceled" };
+    // Zeta origin/main approval_lifecycle.py:767-771,1007-1034 persists settlement before publishing
+    // approval_end and its paired canceled tool_end; tests/test_server.py:3230-3237 fixes their live order and shape.
+    if (historyMode === "new") history.push({ id: `approval-end-${requestId}`, role: "system", event: "approval_end", request_id: requestId, tool_call: call, data: wire });
+    e("approval_end", { request_id: requestId, tool_call: call, data: wire });
+    const canceled = result(String(call.id), "tool execution canceled", { is_error: true, is_canceled: true });
+    row(`canceled-${String(call.id)}`, "tool_result", [text("")], canceled);
+    e("tool_end", { tool_call: call, tool_result: canceled, data: {} });
+    // Zeta origin/main delivery.py:326-336 and control.py:525-543 make the user_stop row and idle state
+    // durable before terminal turn_aborted. control.py:607-619 suppresses agent_end on this path.
+    done("user_stop");
+    e("turn_aborted", { data: { reason: "abort" } });
+  };
   e("agent_start");
   e("turn_start", { data: { turn: 2 } });
   for (const chunk of ["Running the test ", "in a loop to confirm ", "the race:\n\n```sh\nfor i in $(seq 20); do bun test test/rpc.test.ts; done\n```\n"]) {
@@ -242,14 +256,7 @@ const liveTurn = (send: (event: Json) => void, ask: () => Promise<"approve" | "d
   if (historyMode === "new") history.push({ id: "approval-request-1", role: "system", event: "approval_request", request_id: "approval-1", tool_call: clean, delegated: false });
   const decision = await approval;
   if (decision === "abort") {
-    // Zeta origin/main control.py:525-543 settles pending approvals before publishing turn_aborted;
-    // approval_lifecycle.py:758-812 durably records the abort resolution used by approval history.
-    const wire = { decision: "abort", reason: "turn_canceled" };
-    e("approval_end", { request_id: "approval-1", data: wire });
-    if (historyMode === "new") history.push({ id: "approval-end-1", role: "system", event: "approval_end", request_id: "approval-1", tool_call: clean, data: wire });
-    e("turn_aborted", { data: { reason: "abort" } });
-    done("user_stop");
-    e("agent_end");
+    abortApproval("approval-1", clean);
     return;
   }
   // zeta's event says "allow" for an approve call (src/zeta/core/approval.py), not the method name.
@@ -268,12 +275,7 @@ const liveTurn = (send: (event: Json) => void, ask: () => Promise<"approve" | "d
     e("approval_request", { request_id: "approval-2", tool_call: write, delegated: false });
     const next = await pending;
     if (next === "abort") {
-      const wire = { decision: "abort", reason: "turn_canceled" };
-      e("approval_end", { request_id: "approval-2", data: wire });
-      if (historyMode === "new") history.push({ id: "approval-end-2", role: "system", event: "approval_end", request_id: "approval-2", tool_call: write, data: wire });
-      e("turn_aborted", { data: { reason: "abort" } });
-      done("user_stop");
-      e("agent_end");
+      abortApproval("approval-2", write);
       return;
     }
   }

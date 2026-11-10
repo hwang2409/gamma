@@ -248,6 +248,76 @@ async function checkOmittedPrivacy(page: Page, origin: string) {
   }
 }
 
+async function settleSeededApproval(page: Page, fake: Fake, origin: string) {
+  fake.setLive(true);
+  await page.goto(`${origin}/?theme=tokyo-night&run=${ACTIVE}`);
+  await ready(page);
+  const approval = page.locator('[data-part="approval"][data-state="pending"]');
+  await waitFor(approval, 15_000, "seeded approval");
+  await approval.getByRole("button", { name: "deny" }).click();
+  await until(() => !fake.running, 15_000, "seeded denial to finish");
+}
+
+async function submit(page: Page, text: string) {
+  const field = page.locator('.dock textarea[aria-label^="message"]');
+  await field.fill(text);
+  await field.press("Enter");
+}
+
+async function checkNaturalDropJourney(page: Page, fake: Fake, origin: string) {
+  await settleSeededApproval(page, fake, origin);
+  fake.clearSent();
+  await submit(page, "natural drop owner");
+  await waitFor(page.getByRole("button", { name: "stop the running turn" }), 10_000, "natural owner turn");
+  const field = page.locator('.dock textarea[aria-label^="message"]');
+  await field.fill("natural dropped steer");
+  await page.getByRole("button", { name: "steer the running turn" }).click();
+  try {
+    await until(() => fake.sent.some((item) => item.method === "send" && item.text === "natural dropped steer"), 20_000, "natural steer automatic resend");
+  } catch (error) {
+    throw new Error(`${(error as Error).message}; sent=${JSON.stringify(fake.sent)} body=${JSON.stringify((await page.locator("body").innerText()).slice(-1200))}`);
+  }
+  await Bun.sleep(500);
+  const attempts = fake.sent.filter((item) => item.text === "natural dropped steer");
+  if (attempts.length !== 2 || attempts[0]!.method !== "steer" || attempts[1]!.method !== "send" || attempts[0]!.delivery_id === attempts[1]!.delivery_id) {
+    throw new Error(`natural steer attempts were ${JSON.stringify(attempts)}`);
+  }
+  const rendered = await page.locator("body").innerText();
+  if (rendered.includes("turn_end")) throw new Error(`natural steer exposed raw turn_end: ${JSON.stringify(rendered.slice(-1200))}`);
+}
+
+async function checkFailedRetryJourney(page: Page, fake: Fake, origin: string) {
+  await settleSeededApproval(page, fake, origin);
+  fake.clearSent();
+  await submit(page, "fail this turn");
+  await waitFor(page.locator('[data-part="timeline"] [data-kind="error"]', { hasText: "provider is overloaded" }), 10_000, "failed turn row");
+  await until(() => !fake.running, 10_000, "failed turn to finish");
+  await submit(page, "retry after failed turn");
+  await until(() => fake.sent.some((item) => item.method === "send" && item.text === "retry after failed turn"), 10_000, "retry send");
+  try {
+    await waitFor(page.getByText("Reading the files you named", { exact: false }).last(), 20_000, "retry assistant reply");
+  } catch (error) {
+    throw new Error(`${(error as Error).message}; sent=${JSON.stringify(fake.sent)} body=${JSON.stringify((await page.locator("body").innerText()).slice(-1600))}`);
+  }
+  const retry = page.locator('[data-part="timeline"] [data-kind="user"]', { hasText: "retry after failed turn" }).last();
+  if ((await retry.innerText()).includes("fail this turn")) throw new Error(`retry row inherited failed prompt note: ${JSON.stringify(await retry.innerText())}`);
+}
+
+async function checkFailedStopReloadJourney(page: Page, fake: Fake, origin: string) {
+  await settleSeededApproval(page, fake, origin);
+  await submit(page, "fail this turn");
+  await waitFor(page.locator('[data-part="timeline"] [data-kind="error"]', { hasText: "provider is overloaded" }), 10_000, "failed turn row");
+  await until(() => !fake.running, 10_000, "failed turn to finish");
+  await submit(page, "use a tool after failed turn");
+  await waitFor(page.getByRole("button", { name: "stop the running turn" }), 10_000, "tool turn stop control");
+  await page.getByRole("button", { name: "stop the running turn" }).click();
+  const stopped = page.locator('[data-part="timeline"] [data-kind="stopped"]');
+  await waitFor(stopped, 10_000, "failed-then-stopped live row");
+  await page.reload();
+  await ready(page);
+  await waitFor(stopped, 10_000, "failed-then-stopped reloaded row");
+}
+
 async function checkStopReload(page: Page, fake: Fake, origin: string) {
   fake.setLive(true);
   await page.goto(`${origin}/?theme=tokyo-night&run=${ACTIVE}`);
@@ -255,11 +325,15 @@ async function checkStopReload(page: Page, fake: Fake, origin: string) {
   await waitFor(page.getByText("needs approval"), 15_000, "seeded approval");
   await page.getByRole("button", { name: "stop the running turn" }).click();
   const stopped = page.locator('[data-part="timeline"] [data-kind="stopped"]');
+  const canceledTool = page.locator('[data-part="timeline"] [data-part="tool"][data-state="canceled"]', { hasText: "rm -rf packages/zeta/dist" });
   await waitFor(stopped, 10_000, "live stopped row");
+  await waitFor(canceledTool, 10_000, "live canceled tool row");
   await page.reload();
   await ready(page);
   await waitFor(stopped, 10_000, "reloaded stopped row");
+  await waitFor(canceledTool, 10_000, "reloaded canceled tool row");
   if (await stopped.count() !== 1) throw new Error(`stop + reload restored ${await stopped.count()} stopped rows instead of 1`);
+  if (await canceledTool.count() !== 1) throw new Error(`stop + reload restored ${await canceledTool.count()} canceled tool rows instead of 1`);
   if (await page.getByText("needs approval").count()) throw new Error("stop + reload kept the cancelled approval live");
 }
 
@@ -314,6 +388,9 @@ if (import.meta.main) {
       "omitted-echo": () => checkLaterEcho(page, fake, origin),
       "omitted-privacy": () => checkOmittedPrivacy(page, origin),
       "stop-reload": () => checkStopReload(page, fake, origin),
+      "natural-drop-journey": () => checkNaturalDropJourney(page, fake, origin),
+      "failed-retry-journey": () => checkFailedRetryJourney(page, fake, origin),
+      "failed-stop-reload-journey": () => checkFailedStopReloadJourney(page, fake, origin),
       auto: () => checkTurnEndResend(page, fake, origin),
     } as const;
     const selected = process.env.FIDELITY_GATE_CASE as keyof typeof cases | undefined;
