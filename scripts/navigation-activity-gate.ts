@@ -133,6 +133,9 @@ async function canonicalResumeSequence(browser: Browser) {
     for (let attempt = 0; attempt < 75 && !fake.requests.slice(before).some((request) => request.method === "send" && request.params.text === "draft typed under prefix"); attempt++) await Bun.sleep(50);
     const send = fake.requests.slice(before).find((request) => request.method === "send" && request.params.text === "draft typed under prefix");
     if (send?.params.session_id !== "s-reconnect") throw new Error(`send used ${String(send?.params.session_id)} instead of the canonical id`);
+    await stop.waitFor({ timeout: 15_000 }); await stop.click();
+    for (let attempt = 0; attempt < 75 && fake.running; attempt++) await Bun.sleep(50);
+    if (fake.running) throw new Error("the canonical send did not stop before the next browser row");
   } finally {
     const stop = page.getByRole("button", { name: "stop the running turn" });
     await stop.waitFor({ timeout: 2_000 }).then(() => stop.click()).catch(() => {});
@@ -145,7 +148,8 @@ async function ambiguousResumeSequence(browser: Browser) {
   const before = fake.requests.length;
   const { context, page } = await fresh(browser, 390, "/?run=abcd");
   try {
-    await page.getByText(/ambiguous/i).waitFor({ timeout: 15_000 });
+    try { await page.getByText(/ambiguous/i).waitFor({ timeout: 15_000 }); }
+    catch (error) { throw new Error(`${String(error)}\nbody: ${await page.locator("body").innerText()}`); }
     const choices = page.getByLabel("matching runs");
     if (await choices.getByText("abcd1111", { exact: true }).count() !== 1) throw new Error("the colliding short candidate was not deduplicated");
     if (await choices.getByRole("link", { name: "abcd1111", exact: true }).count()) throw new Error("the colliding short candidate linked back to another ambiguous route");
