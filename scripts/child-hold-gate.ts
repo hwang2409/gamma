@@ -72,12 +72,13 @@ async function runEngine(name: "chromium" | "webkit", engine: BrowserType) {
       const page = await primary.newPage();
       await page.goto(`${origin}/?run=${CHILD_HOLD}&theme=github-light`);
       await inspect(page, `${name}-live`);
-      const progress = page.locator('[data-part="sub-agent"], [data-part="notification"]', { hasText: "reviewer is ready for more work" });
+      const progress = page.locator('[data-part="sub-agent"][data-state="idle"]', { hasText: "reviewer" });
       await progress.waitFor({ timeout: 15_000 }).catch(async () => {
         const body = (await page.locator("body").innerText()).slice(0, 3000);
         const parts = await page.locator("[data-part]").evaluateAll((nodes) => Array.from(new Set(nodes.map((node) => node.getAttribute("data-part")).filter(Boolean))));
         throw new Error(`${name}: later child progress did not render; body=${body}; parts=${JSON.stringify(parts)}`);
       });
+      if (await page.locator('[data-part="notification"]', { hasText: "reviewer is ready for more work" }).count() !== 0) throw new Error(`${name}: child progress rendered as a generic child_idle notification`);
       if (await rows(page).count() !== 2) throw new Error(`${name}: later child progress removed a durable hold row`);
       const generic = page.locator('[data-part="notification"][data-kind="notification"]', { hasText: "default notification remains visible" });
       await generic.waitFor({ timeout: 15_000 }).catch(() => { throw new Error(`${name}: unknown notification did not delegate to Fulcrum Notification`); });
@@ -86,6 +87,12 @@ async function runEngine(name: "chromium" | "webkit", engine: BrowserType) {
       const beforeReload = await rows(page).allTextContents();
       await page.reload();
       await inspect(page, `${name}-reload`);
+      await progress.waitFor({ timeout: 15_000 }).catch(async () => {
+        const body = (await page.locator("body").innerText()).slice(0, 3000);
+        const parts = await page.locator("[data-part]").evaluateAll((nodes) => Array.from(new Set(nodes.map((node) => node.getAttribute("data-part")).filter(Boolean))));
+        throw new Error(`${name}: later child progress did not render after reload; body=${body}; parts=${JSON.stringify(parts)}`);
+      });
+      if (await page.locator('[data-part="notification"]', { hasText: "reviewer is ready for more work" }).count() !== 0) throw new Error(`${name}: reloaded child progress rendered as a generic child_idle notification`);
       if (JSON.stringify(await rows(page).allTextContents()) !== JSON.stringify(beforeReload)) throw new Error(`${name}: reload changed child hold copy or order`);
       await primary.close();
 
