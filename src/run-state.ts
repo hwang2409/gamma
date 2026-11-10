@@ -62,7 +62,7 @@ export type BrowserEntry = { readonly id: EntryId; readonly run: RunId };
 export type WorkspaceState = {
   readonly entry: BrowserEntry;
   readonly runs: ReadonlyMap<RunId, RunRecord>;
-  readonly aliases: ReadonlyMap<DraftRunId, SessionId>;
+  readonly aliases: ReadonlyMap<RunId, SessionId>;
   readonly attachment: AttachmentState;
   readonly connected?: boolean;
   readonly notice?: { runId: SessionId };
@@ -88,6 +88,7 @@ export type WorkspaceEvent =
   | { type: "COMPOSER_EDIT"; runId: RunId; text?: string; attachments?: readonly QueuedImage[] }
   | { type: "REMOVE_ATTACHMENT"; runId: RunId; index: number }
   | { type: "PROMOTE"; runId: DraftRunId; sessionId: SessionId }
+  | { type: "SESSION_CANONICALIZED"; runId: SessionId; sessionId: SessionId; operationId: OperationId }
   | { type: "MODEL_SET"; runId: RunId; model: RunModel }
   | { type: "MODEL_DEFERRED"; runId: RunId; deferred: boolean }
   | { type: "DISMISS_NOTICE" }
@@ -103,7 +104,7 @@ export type WorkspaceEvent =
   | { type: "OPEN_EVICTED"; runId: SessionId; operationId: OperationId }
   | { type: "OPEN_OK"; runId: SessionId; operationId: OperationId; open: OpenRun; session?: SessionMeta }
   | { type: "OPEN_COMPLETE"; runId: SessionId; operationId: OperationId; open: OpenRun }
-  | { type: "OPEN_FAIL"; runId: SessionId; operationId: OperationId; error: string; busy: boolean }
+  | { type: "OPEN_FAIL"; runId: SessionId; operationId: OperationId; error: string; busy: boolean; candidates?: readonly string[] }
   | { type: "OPEN_DISMISS"; runId: SessionId }
   | { type: "RESUME_OK"; runId: SessionId; operationId: OperationId }
   | { type: "RESUME_BUSY"; runId: SessionId; owner: SessionId; operationId: OperationId }
@@ -127,7 +128,7 @@ export type WorkspaceEvent =
   | { type: "SETTINGS_OK"; runId: SessionId; operationId: OperationId; model?: string; approval_mode?: "ask" | "allow"; plan_mode?: boolean }
   | { type: "SETTINGS_FAIL"; runId: SessionId; operationId: OperationId; error: string };
 
-const canonical = (state: WorkspaceState, id: RunId): RunId => state.aliases.get(id as DraftRunId) ?? id;
+const canonical = (state: WorkspaceState, id: RunId): RunId => state.aliases.get(id) ?? id;
 const blank = (id: RunId): RunRecord => ({ id, lifecycle: id.startsWith("draft:") ? { kind: "draft" } : { kind: "opening" }, text: "", attachments: [], deliveries: new Map(), model: { choice: "default" }, settings: {} });
 const operationMatches = (record: RunRecord | undefined, operationId: OperationId) => record?.lifecycle.kind === "creating" ? record.lifecycle.operationId === operationId : record?.lifecycle.kind === "opening" ? !record.lifecycle.operationId || record.lifecycle.operationId === operationId : false;
 
@@ -171,6 +172,16 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     case "REMOVE_ATTACHMENT": update(event.runId, (record) => ({ ...record, attachments: record.attachments.filter((_, index) => index !== event.index) })); break;
     case "DELIVERY_BEGIN": case "DELIVERY_ACK": case "DELIVERY_STATUS": case "DELIVERY_SETTLE": case "DELIVERY_RESEND": update(event.runId, (record) => reduceDelivery(now(), record, event, effects)); break;
     case "PROMOTE": { const source = runs.get(event.runId) ?? blank(event.runId); const target = runs.get(event.sessionId); runs.delete(event.runId); runs.set(event.sessionId, target && (target.text || target.attachments.length || target.deliveries.size) ? target : { ...source, id: event.sessionId, lifecycle: { kind: "opening" } }); aliases.set(event.runId, event.sessionId); if (entry.run === event.runId) entry = { ...entry, run: event.sessionId }; else notice = { runId: event.sessionId }; break; }
+    case "SESSION_CANONICALIZED": {
+      if (event.runId === event.sessionId) break;
+      const source = runs.get(event.runId);
+      if (!source || source.openOperation !== event.operationId) break;
+      runs.delete(event.runId);
+      runs.set(event.sessionId, { ...source, id: event.sessionId });
+      aliases.set(event.runId, event.sessionId);
+      if (entry.run === event.runId) entry = { ...entry, run: event.sessionId };
+      break;
+    }
     case "MODEL_SET": update(event.runId, (record) => ({ ...record, model: { ...event.model, deferred: record.model.deferred }, settings: record.id.startsWith("draft:") ? { ...record.settings, desired: { ...record.settings.desired, model: event.model.choice === "explicit" ? event.model.model : undefined } } : record.settings })); break;
     case "MODEL_DEFERRED": update(event.runId, (record) => ({ ...record, model: { ...record.model, deferred: event.deferred } })); break;
     case "DISMISS_NOTICE": notice = undefined; break;
@@ -213,7 +224,7 @@ export function reduceWorkspace(state: WorkspaceState, event: WorkspaceEvent): {
     case "OPEN_PROGRESS": update(event.runId, (record) => record.openOperation === event.operationId ? { ...record, openingMessages: event.messages } : record); break;
     case "OPEN_OK": update(event.runId, (record) => record.openOperation === event.operationId ? { ...record, lifecycle: { kind: "open", lease: event.open.lease }, open: event.open, openedBy: event.operationId, openingMessages: undefined, openError: undefined, session: event.session ?? record.session } : record); query(event.runId, true); break;
     case "OPEN_COMPLETE": update(event.runId, (record) => record.openOperation === event.operationId ? { ...record, lifecycle: { kind: "open", lease: event.open.lease }, open: event.open, openingMessages: undefined } : record); break;
-    case "OPEN_FAIL": update(event.runId, (record) => record.openOperation === event.operationId ? { ...record, lifecycle: record.open ? record.lifecycle : { kind: "failed", error: event.error }, openOperation: undefined, openingMessages: undefined, openError: { id: event.runId, message: event.error, busy: event.busy } } : record); break;
+    case "OPEN_FAIL": update(event.runId, (record) => record.openOperation === event.operationId ? { ...record, lifecycle: record.open ? record.lifecycle : { kind: "failed", error: event.error }, openOperation: undefined, openingMessages: undefined, openError: { id: event.runId, message: event.error, busy: event.busy, ...(event.candidates ? { candidates: event.candidates } : {}) } } : record); break;
     case "OPEN_DISMISS": update(event.runId, (record) => ({ ...record, openError: undefined })); break;
     case "RESUME_OK": {
       const creatingOwner = [...runs.values()].some((record) => record.submitting && record.lifecycle.kind === "creating");
@@ -381,6 +392,7 @@ export function createRunStateStore(cleanLimit = 8, storage: RunStorage | undefi
     if (disposed) return;
     const result = reduceWorkspace(state, event);
     state = result.state;
+    if (event.type === "SESSION_CANONICALIZED" && active === event.runId) active = event.sessionId;
     hold();
     // Typing is saved after a short pause; every other change (a delivery id, an accepted send) is saved before its effects run.
     if (event.type === "COMPOSER_EDIT") { if (persistTimer) clearTimeout(persistTimer); persistTimer = setTimeout(persist, 120); } else persist();

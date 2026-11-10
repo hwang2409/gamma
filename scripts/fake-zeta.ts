@@ -35,6 +35,8 @@ const seeded = [
   meta("s-markdown", 60 * 26, { name: "streaming markdown: nested lists in block quotes", model: "gpt-5.1-codex" }),
   meta("s-docs", 60 * 24 * 3, { first_message_preview: "write the quickstart for @fulcrum/react" }),
   meta("s-untitled", 60 * 24 * 40),
+  meta("abcd1111-root", 60 * 24 * 41, { name: "ambiguous prefix fixture one" }),
+  meta("abcd2222-root", 60 * 24 * 42, { name: "ambiguous prefix fixture two" }),
 ];
 
 /**
@@ -785,10 +787,23 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           if (mode === "broken-session") return reply({ error: { code: -32602, message: "session log is invalid at line 12" } });
           const busy = transientBusy.get(method) ?? 0;
           if (busy > 0) { transientBusy.set(method, busy - 1); return reply({ error: { code: -32004, message: "a turn is already running" } }); }
-          if (running && params.session_id !== active) return reply({ error: { code: -32004, message: "a turn is already running" } });
-          active = String(params.session_id);
+          const requested = String(params.session_id);
+          // Zeta 6f29fc4b core/session.py:854-895 resolves exact ids or unique prefixes of at least four characters;
+          // server/handlers/lifecycle.py:64-82 returns the prefix and up to eight eight-character candidates on ambiguity.
+          const roots = sessions.filter((session) => session.parent_session_id === null);
+          const exact = roots.find((session) => session.session_id === requested);
+          if (!exact && requested.length < 4) return reply({ error: { code: -32012, message: `session ${requested} was not found`, data: { code: "session_not_found", session_id: requested } } });
+          const matches = exact ? [exact] : roots.filter((session) => String(session.session_id).startsWith(requested));
+          if (matches.length > 1) {
+            const candidates = matches.map((session) => String(session.session_id).slice(0, 8)).sort().slice(0, 8);
+            return reply({ error: { code: -32602, message: `session id '${requested}' is ambiguous; please provide more characters`, data: { code: "session_id_ambiguous", session_id: requested, candidates } } });
+          }
+          const resolved = matches[0];
+          if (!resolved) return reply({ error: { code: -32012, message: `session ${requested} was not found`, data: { code: "session_not_found", session_id: requested } } });
+          if (running && resolved.session_id !== active) return reply({ error: { code: -32004, message: "a turn is already running" } });
+          active = String(resolved.session_id);
           delayedOpen = false;
-          return reply({ result: { session: sessions.find((session) => session.session_id === active) } });
+          return reply({ result: { session: resolved } });
         }
         if (method === "rename_session") {
           const session = sessions.find((candidate) => candidate.session_id === params.session_id);

@@ -194,6 +194,54 @@ const table: Row[] = [
     },
   },
   {
+    name: "2a a prefix resume becomes one canonical run before replay or send",
+    async run() {
+      const prefix = "abcd";
+      const full = "abcd1234-full-session";
+      const tab = tabStorage();
+      const h = await world({
+        attached: "b", selected: prefix, tab,
+        handlers: (zeta) => ({
+          resume: () => { zeta.attached = full; return { session: meta(full, "x") }; },
+          session_history: (params) => ({ messages: rows.a, next_offset: null, seen_session_id: params.session_id }),
+        }),
+      });
+      try {
+        h.type("kept prefix draft");
+        h.start(); await h.live(full);
+        expect(h.run()).toBe(full);
+        expect(targeted(h.fake.calls, full)).toContain("session_history");
+        expect(targeted(h.fake.calls, prefix)).toEqual(["resume"]);
+        expect(h.text(full)).toBe("kept prefix draft");
+        expect(h.sends()).toEqual([]);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        const saved = JSON.parse(tab.items.get("gamma-run-drafts") ?? "{}");
+        expect(saved[prefix]).toBeUndefined();
+        expect(saved[full]?.text).toBe("kept prefix draft");
+        expect(await h.enter()).toEqual({ ok: true });
+        expect(h.sends()).toEqual([expect.objectContaining({ session_id: full, text: "kept prefix draft" })]);
+        expect(h.zeta.turns.map(({ session }) => session)).toEqual([full]);
+      } finally { h.dispose(); }
+    },
+  },
+  {
+    name: "2b an ambiguous prefix stays unopened and names its candidate routes",
+    async run() {
+      const h = await world({
+        attached: "b", selected: "abcd",
+        handlers: () => ({ resume: () => { throw { code: -32602, message: "session id 'abcd' is ambiguous", data: { code: "session_id_ambiguous", session_id: "abcd", candidates: ["abcd1111", "abcd2222"] } }; } }),
+      });
+      try {
+        h.type("do not send");
+        h.start(); await waitFor(() => Boolean(h.view.openError), 2_000);
+        expect(h.view.open).toBeNull();
+        expect(h.view.openError).toMatchObject({ id: "abcd", candidates: ["abcd1111", "abcd2222"] });
+        expect(h.sends()).toEqual([]);
+        expect(h.text()).toBe("do not send");
+      } finally { h.dispose(); }
+    },
+  },
+  {
     name: "3 route 1: before the first status reply nothing is sent and the draft stays",
     async run() {
       const h = await world({ attached: "b", selected: "a" });

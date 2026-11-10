@@ -172,6 +172,9 @@ export function App() {
   const runState = useMemo(() => createRunStateStore(8, localStorage, sessionStorage, { id: firstEntry.gammaEntryId as EntryId, run: firstEntry.run as RunId }), [firstEntry]);
   const workspace = useSyncExternalStore(runState.subscribe, runState.getCatalog);
   const browserEntry = { gammaEntryId: workspace.entry.id, run: workspace.entry.run };
+  useEffect(() => {
+    if (new URLSearchParams(location.search).get("run") !== browserEntry.run) writeEntry(browserEntry, "replace");
+  }, [browserEntry.gammaEntryId, browserEntry.run]);
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
   const runs = useMemo(() => createSessionManager(connection, runState, hostBindings), [connection, runState]);
@@ -586,7 +589,7 @@ function Body({ state, view, connection, runs, onNewRun, onSelectRun, followRequ
   if (present.open) return <OpenBody state={state} connection={connection} present={present} runs={runs} followRequest={followRequest} />;
   if (offline && (state.phase !== "connecting" || state.lastFailure) && state.phase !== "dropped") return <div className="scroll"><ConnectionNotice state={state} connection={connection} /></div>;
   if (present.opening) return <div className="scroll"><Panel title="opening the run" tone="busy"><p>{present.active ? `this run waits while ${present.active} has the active zeta turn` : !present.opening.loading ? "waiting for zeta to attach this run" : `loading history${present.opening.messages ? ` · ${present.opening.messages.toLocaleString("en")} messages` : ""}`}</p>{ownerActions}</Panel></div>;
-  if (present.openError) { const failure = present.openError; return <div className="scroll"><Panel title={failure.busy ? "another run is active" : "could not open this run"} tone={failure.busy ? "warn" : "danger"}><p className="mono">{failure.busy ? `this run waits while ${present.active ?? "another run"} has the active zeta turn` : failure.message}</p>{ownerActions}<div className="actions"><button type="button" className="primary" onClick={() => runs.retryOpen(failure.id)}>try again</button><button type="button" className="ghost" onClick={onNewRun}>new run</button></div></Panel></div>; }
+  if (present.openError) { const failure = present.openError; return <div className="scroll"><Panel title={failure.busy ? "another run is active" : "could not open this run"} tone={failure.busy ? "warn" : "danger"}><p className="mono">{failure.busy ? `this run waits while ${present.active ?? "another run"} has the active zeta turn` : failure.message}</p>{failure.candidates?.length ? <div className="actions" aria-label="matching runs">{failure.candidates.map((candidate) => <a key={candidate} className="ghost" href={`?run=${encodeURIComponent(candidate)}`}>{candidate}</a>)}</div> : null}{ownerActions}<div className="actions"><button type="button" className="primary" onClick={() => runs.retryOpen(failure.id)}>try again</button><button type="button" className="ghost" onClick={onNewRun}>new run</button></div></Panel></div>; }
   if (present.active) return <div className="scroll"><Panel title="new run waits for the running run" tone="warn"><p>you can type now. send becomes available when {present.activeTitle} finishes.</p>{ownerActions}</Panel></div>;
   return <div className="scroll"><div className="empty-run" role="note"><h2>start a conversation</h2><p>write below to start. zeta creates the run when you send the first message.</p></div></div>;
 }
