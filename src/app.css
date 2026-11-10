@@ -32,6 +32,7 @@ button {
 }
 button:disabled { color: var(--fulcrum-muted); cursor: not-allowed; }
 .ghost, .primary { display: inline-flex; align-items: center; justify-content: center; min-height: var(--control); padding: 0 14px; white-space: nowrap; }
+a.ghost { border: 1px solid var(--fulcrum-border); color: var(--fulcrum-fg); font: 500 13px/1 var(--fulcrum-font); text-decoration: none; }
 .ghost:hover:not(:disabled) { border-color: var(--fulcrum-fg); }
 .primary { border-color: var(--fulcrum-fg); background: var(--fulcrum-fg); color: var(--fulcrum-bg); font-weight: 700; }
 .primary:hover { text-decoration: underline; text-underline-offset: 3px; }

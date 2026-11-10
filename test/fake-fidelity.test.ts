@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { startFakeZeta } from "../scripts/fake-zeta";
 
-type Frame = { id?: number; result?: { messages?: Record<string, unknown>[]; next_offset?: number | null; state?: string; last_turn_outcome?: { turn_id: string; reason: string } | null }; error?: { code: number; message: string } };
+type Frame = { id?: number; result?: { messages?: Record<string, unknown>[]; next_offset?: number | null; state?: string; last_turn_outcome?: { turn_id: string; reason: string } | null }; error?: { code: number; message: string; data?: Record<string, unknown> } };
 type Request = (method: string, params: Record<string, unknown>) => Promise<Frame>;
 const bounded = <T>(promise: Promise<T>, label: string) => Promise.race([
   promise,
@@ -59,6 +59,13 @@ const waitForCompletedTurn = (request: Request, label: string) => bounded((async
     await Bun.sleep(20);
   }
 })(), label);
+
+test("fake resume matches zeta's unknown-id and short-prefix errors", async () => {
+  await history([], "s-reconnect", async (request) => {
+    expect((await request("resume", { session_id: "missing-session" })).error).toEqual({ code: -32602, message: "session missing-session was not found", data: { code: "session_not_found", session_id: "missing-session" } });
+    expect((await request("resume", { session_id: "s-r" })).error).toEqual({ code: -32602, message: "session id prefix must be at least 4 characters" });
+  });
+});
 
 test("a client without fidelity still opens legacy history without fidelity-only rows", async () => {
   const rows = await history([], "s-reconnect");

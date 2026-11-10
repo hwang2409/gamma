@@ -179,10 +179,12 @@ export async function openSession(
   const before = knownStatus ?? await getStatus(client, signal);
   if (registration) {
     const resumed = await client.request("resume", { session_id: id, host_commands: [registration.command] }, { timeoutMs: 30_000, signal }) as { session?: SessionMeta };
+    id = resumed.session?.session_id ?? id;
     initialStatus = before.session?.session_id === id ? before : { session: resumed.session ?? null, state: "idle", pending_approvals: [] };
   } else if (before.session?.session_id === id) initialStatus = before;
   else {
     const resumed = await client.request("resume", { session_id: id }, { timeoutMs: 30_000, signal }) as { session?: SessionMeta };
+    id = resumed.session?.session_id ?? id;
     initialStatus = { session: resumed.session ?? null, state: "idle", pending_approvals: [] };
   }
   if (signal?.aborted) throw Object.assign(new Error("request aborted"), { name: "AbortError" });
@@ -243,7 +245,8 @@ export async function openSession(
 export const isBusyError = (error: unknown) => (error as { code?: unknown } | null)?.code === -32004;
 
 export type OpenRun = { id: string; lease: SessionLease; stale: boolean; history: { messages: number; complete: boolean }; syncing: boolean };
-export type OpenFailure = { id: string; message: string; busy: boolean };
+export type OpenCandidate = { id: string; unique: boolean };
+export type OpenFailure = { id: string; message: string; busy: boolean; candidates?: readonly OpenCandidate[] };
 export type RunState = {
   selected: string | null;
   open: OpenRun | null;
@@ -264,6 +267,16 @@ type OperationId = import("./run-state").OperationId;
 type SessionId = import("./run-state").SessionId;
 type DraftRunId = import("./run-state").DraftRunId;
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+const ambiguousCandidates = (error: unknown): readonly OpenCandidate[] | undefined => {
+  const data = (error as { data?: unknown } | null)?.data;
+  if (!data || typeof data !== "object" || (data as { code?: unknown }).code !== "session_id_ambiguous") return undefined;
+  const requested = (data as { session_id?: unknown }).session_id;
+  const raw = (data as { candidates?: unknown }).candidates;
+  if (typeof requested !== "string" || !Array.isArray(raw) || !raw.every((candidate) => typeof candidate === "string")) return undefined;
+  const counts = new Map<string, number>();
+  for (const candidate of raw.slice(0, 8)) counts.set(candidate, (counts.get(candidate) ?? 0) + 1);
+  return [...counts].map(([id, count]) => ({ id, unique: count === 1 && id !== requested && id.startsWith(requested) }));
+};
 const turn = (status: ServerStatus) => status.pending_approvals?.length ? "approval" as const : status.state === "idle" ? "idle" as const : status.state;
 
 /** Executes tagged session effects. Run selection, leases, attachment, and active-turn truth remain in RunStateStore. */
@@ -343,24 +356,29 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
       const settled = attempt.then(() => {}, () => {}).finally(() => { if (replays.get(effect.runId) === settled) replays.delete(effect.runId); });
       replays.set(effect.runId, settled);
       const opened = await attempt;
+      const runId = (opened.session?.session_id ?? effect.runId) as SessionId;
+      try {
+        if (registration && runId !== effect.runId) await bindings!.bind(registration.registration_id, runId);
+      } catch (error) { opened.complete.catch(() => {}); opened.lease.release(); throw error; }
       if (!live(target) || !current(effect.runId, effect.operationId)) { opened.complete.catch(() => {}); opened.lease.release(); return; }
-      const open: OpenRun = { id: effect.runId, lease: opened.lease, stale: false, history, syncing: true };
-      runs.dispatch({ type: "RESUME_OK", runId: effect.runId, operationId: effect.operationId });
-      runs.dispatch({ type: "OPEN_OK", runId: effect.runId, operationId: effect.operationId, open, ...(opened.session ? { session: opened.session } : {}) });
-      watch(effect.runId, open);
+      runs.dispatch({ type: "SESSION_CANONICALIZED", runId: effect.runId, sessionId: runId, operationId: effect.operationId });
+      const open: OpenRun = { id: runId, lease: opened.lease, stale: false, history, syncing: true };
+      runs.dispatch({ type: "RESUME_OK", runId, operationId: effect.operationId });
+      runs.dispatch({ type: "OPEN_OK", runId, operationId: effect.operationId, open, ...(opened.session ? { session: opened.session } : {}) });
+      watch(runId, open);
       void opened.complete.then((result) => {
-        if (!current(effect.runId, effect.operationId)) { result.lease?.release(); return; }
-        const active = runs.get(effect.runId).open ?? open;
+        if (!current(runId, effect.operationId)) { result.lease?.release(); return; }
+        const active = runs.get(runId).open ?? open;
         const complete: OpenRun = { ...active, ...(result.lease ? { lease: result.lease } : {}), history: { ...history, complete: true }, syncing: result.syncing };
         if (result.lease && active.lease !== result.lease) active.lease.release();
-        runs.dispatch({ type: "OPEN_COMPLETE", runId: effect.runId, operationId: effect.operationId, open: complete });
-        watch(effect.runId, complete);
+        runs.dispatch({ type: "OPEN_COMPLETE", runId, operationId: effect.operationId, open: complete });
+        watch(runId, complete);
       }).catch((error) => {
-        if (current(effect.runId, effect.operationId) && (error as { name?: string }).name !== "AbortError") runs.dispatch({ type: "OPEN_FAIL", runId: effect.runId, operationId: effect.operationId, error: message(error), busy: isBusyError(error) });
+        if (current(runId, effect.operationId) && (error as { name?: string }).name !== "AbortError") runs.dispatch({ type: "OPEN_FAIL", runId, operationId: effect.operationId, error: message(error), busy: isBusyError(error), candidates: ambiguousCandidates(error) });
       });
     } catch (error) {
       if (!live(target) || !current(effect.runId, effect.operationId) || (error as { name?: string }).name === "AbortError") return;
-      runs.dispatch({ type: "OPEN_FAIL", runId: effect.runId, operationId: effect.operationId, error: message(error), busy: isBusyError(error) });
+      runs.dispatch({ type: "OPEN_FAIL", runId: effect.runId, operationId: effect.operationId, error: message(error), busy: isBusyError(error), candidates: ambiguousCandidates(error) });
     }
   };
   const handleCreate = async (effect: Extract<WorkspaceEffect, { type: "new-session" }>) => {
