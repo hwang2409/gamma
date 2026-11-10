@@ -22,6 +22,7 @@ const meta = (id: string, minutesAgo: number, extra: Json = {}) => ({
 });
 
 export const ACTIVE = "s-reconnect";
+export const CHILD_HOLD = "s-child-hold";
 const FIDELITY = "s-fidelity";
 export const LONG = "s-long";
 export const MANY = "s-many";
@@ -30,6 +31,7 @@ const seeded = [
   meta(ACTIVE, 2, { name: "fix the flaky reconnect test in packages/zeta" }),
   meta("s-themes", 45, { first_message_preview: "check every theme's muted text against 4.5:1 on the surface color" }),
   meta(FIDELITY, 50, { name: "session history fidelity fixture" }),
+  meta(CHILD_HOLD, 55, { name: "child hold notification fixture" }),
   meta(LONG, 60 * 5, { first_message_preview: "profile the virtual timeline with 400 rows of history" }),
   meta("s-child", 3, { parent_session_id: ACTIVE, first_message_preview: "worker: run the zeta tests" }),
   meta("s-markdown", 60 * 26, { name: "streaming markdown: nested lists in block quotes", model: "gpt-5.1-codex" }),
@@ -132,6 +134,27 @@ const historySeed: Record<string, Json[]> = {
       id: "h6", role: "assistant", tool_result: null, content: [text(
         "The failure is a race in the close path:\n\n1. `transport.close()` fires `onClose` **before** pending requests reject.\n2. The test awaits `hello()`, which never settles.\n\n```ts\ntransport.onClose?.((code) => {\n  const error = rejectPending(code); // reject first\n  closeListeners.forEach((listener) => listener(error));\n});\n```\n\nI will fix the order and add a test that fails without it.",
       )],
+    },
+  ],
+  // Zeta 1bef23e0 src/zeta/server/handlers/history_projection.py:420-441 projects durable notifications
+  // as system rows with the complete structured payload under `notification`.
+  [CHILD_HOLD]: [
+    {
+      id: "hold-history", role: "system", content: [text("child root:1 is held by a provider rate limit")], tool_result: null,
+      notification: {
+        notification_id: "hold-history", origin: "notification", kind: "child_hold", child_instance_id: "root:1",
+        child_session_path: "/sessions/root/agents/1", description: "worker", status: "held", reason: "rate_limit",
+        until: "2099-01-07T09:30:00+00:00", provider: "codex", account: "codex:first", retry_after: 524749,
+        text: "child root:1 is held by a provider rate limit",
+      },
+    },
+    {
+      id: "future-notification", role: "system", content: [text("default notification remains visible")], tool_result: null,
+      notification: { kind: "future_notification", status: "noted", text: "default notification remains visible" },
+    },
+    {
+      id: "malformed-hold", role: "system", content: [text("malformed child hold remains generic")], tool_result: null,
+      notification: { kind: "child_hold", description: "malformed", reason: "rate_limit", status: "held", until: "not-a-date", text: "malformed child hold remains generic" },
     },
   ],
   // Zeta 92ccf67a src/zeta/server/handlers/history_projection.py:346-353,464-520 and
@@ -529,6 +552,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   let decide: ((decision: "approve" | "deny" | "abort") => void) | null = null;
   let turnStarted = false;
   let fidelityStarted = false;
+  let childHoldStarted = false;
   let approvalAborted = false;
   let running = false;
   let rejectCreate = false;
@@ -661,6 +685,26 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     if (active === FIDELITY && socket.data.features?.includes("session_history_fidelity") && !fidelityStarted) {
       fidelityStarted = true;
       queueMicrotask(() => fidelityLiveEvents.forEach((event) => socket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: event }))));
+    }
+    if (active === CHILD_HOLD && !childHoldStarted) {
+      childHoldStarted = true;
+      // Zeta 1bef23e0 src/zeta/agent/conversation_channel.py:320-356, src/zeta/server/event_contract.py:93-116,
+      // and tests/test_child_hold_wake.py:221-240 define this protocol-1.2 live frame. Zeta persists the matching
+      // history row before the controller receives the durable notification.
+      const data = {
+        notification_id: "hold-live", origin: "notification", kind: "child_hold", child_instance_id: "root:2",
+        child_session_path: "/sessions/root/agents/2", description: "reviewer", status: "held", reason: "subscription_limit",
+        until: "2099-01-08T10:45:00+00:00", provider: "codex", account: "codex:second", retry_after: 612000,
+        text: "child root:2 is held by a subscription limit",
+      };
+      histories[CHILD_HOLD]!.push({ id: "hold-live", role: "system", content: [text(data.text)], tool_result: null, notification: data });
+      queueMicrotask(() => {
+        socket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: { event: "child_hold", session_id: CHILD_HOLD, data } }));
+        // Zeta origin/main src/zeta/agent/conversation_channel.py:297-323 defines this later child progress notice.
+        const idle = { origin: "notification", kind: "child_idle", child_instance_id: "root:2", child_session_path: "/sessions/root/agents/2", description: "reviewer", status: "child_idle", text: "reviewer is ready for more work" };
+        histories[CHILD_HOLD]!.push({ id: "hold-later-progress", role: "system", content: [text(idle.text)], tool_result: null, notification: idle });
+        setTimeout(() => socket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: { event: "child_idle", session_id: CHILD_HOLD, data: idle } })), 50);
+      });
     }
     // Zeta 5feea2fc tests/test_server.py::test_approval_and_steer_continue_the_same_turn and
     // ::test_resumed_approval_finishes_idle_after_terminal_event define this approval-turn lifecycle.
