@@ -1,7 +1,7 @@
 import { createHighlighter } from "@fulcrum/highlight";
 import { Markdown, type Fences, type MarkdownProps } from "@fulcrum/markdown/react";
 import { MermaidFence } from "@fulcrum/mermaid";
-import { Approval, Code, Fallback, FileBlock, HighlightContext, ImageBlock, Message, RunProvider, Timeline, ToolCall, useItemSelector, useRun, useRunStore, useTimeline, type Renderers, type UserMessageItem } from "@fulcrum/react";
+import { Approval, Code, Fallback, FileBlock, HighlightContext, ImageBlock, Message, Notification, RunProvider, Timeline, ToolCall, useItemSelector, useRun, useRunStore, useTimeline, type Renderers, type UserMessageItem } from "@fulcrum/react";
 import { createRunStore } from "@fulcrum/core";
 import { SESSION_GRANTS_FEATURE, type ZetaClient } from "@fulcrum/zeta";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type Dispatch, type ReactNode, type SetStateAction } from "react";
@@ -110,6 +110,28 @@ function ZetaMessage({ id }: { id: string }) {
   const onOpen = useContext(ImageViewer);
   return <Message id={id} markdown={RichMarkdown} onOpen={onOpen ?? undefined} />;
 }
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function localDeadline(value: unknown) {
+  if (typeof value !== "string") return;
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return;
+  const now = new Date();
+  const clock = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  const sameDay = date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth() && date.getDate() === now.getDate();
+  const day = `${MONTHS[date.getMonth()]} ${date.getDate()}`;
+  return { iso: date.toISOString(), label: sameDay ? clock : date.getFullYear() === now.getFullYear() ? `${day}, ${clock}` : `${day}, ${date.getFullYear()}, ${clock}` };
+}
+function ZetaNotification({ id }: { id: string }) {
+  const data = useItemSelector(id, (item) => item?.type === "notification" && item.event.type === "notification" ? item.event.data : undefined);
+  if (!data || data.kind !== "child_hold") return <Notification id={id} />;
+  const description = typeof data.description === "string" && data.description.trim() ? data.description.trim() : typeof data.child_instance_id === "string" && data.child_instance_id.trim() ? data.child_instance_id.trim() : "";
+  const until = localDeadline(data.until);
+  if (!description || !until) return <Notification id={id} />;
+  const reason = data.reason === "rate_limit" ? "rate limit" : data.reason === "subscription_limit" ? "subscription limit" : "";
+  return <div role="group" aria-label="notification" data-part="notification" data-kind="child-hold" data-status="held" data-id={id}>
+    <span data-part="notification-summary"><span data-part="notification-line">child {description} waits until <time dateTime={until.iso} title={until.iso}>{until.label}</time>{reason ? <> · {reason}</> : null}</span></span>
+  </div>;
+}
 // A failed turn's one action: send its prompt again, offered on the error row while it is the last row.
 type RetryAction = { run(): void; label: "retry" | "edit and retry" };
 const RetryTurn = createContext<RetryAction | null>(null);
@@ -129,6 +151,7 @@ const renderers: Renderers = {
   user: UserRow,
   tool: ToolWithArtifacts,
   error: ErrorRow,
+  notification: ZetaNotification,
 };
 
 const useExternal = <T,>(source: { subscribe(listener: () => void): () => void; readonly state: T }) =>
