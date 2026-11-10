@@ -72,7 +72,12 @@ async function runEngine(name: "chromium" | "webkit", engine: BrowserType) {
       const page = await primary.newPage();
       await page.goto(`${origin}/?run=${CHILD_HOLD}&theme=github-light`);
       await inspect(page, `${name}-live`);
-      await page.locator('[data-part="sub-agent"]').waitFor({ timeout: 15_000 }).catch(() => { throw new Error(`${name}: later child progress did not render`); });
+      const progress = page.locator('[data-part="sub-agent"], [data-part="notification"]', { hasText: "reviewer is ready for more work" });
+      await progress.waitFor({ timeout: 15_000 }).catch(async () => {
+        const body = (await page.locator("body").innerText()).slice(0, 3000);
+        const parts = await page.locator("[data-part]").evaluateAll((nodes) => Array.from(new Set(nodes.map((node) => node.getAttribute("data-part")).filter(Boolean))));
+        throw new Error(`${name}: later child progress did not render; body=${body}; parts=${JSON.stringify(parts)}`);
+      });
       if (await rows(page).count() !== 2) throw new Error(`${name}: later child progress removed a durable hold row`);
       const generic = page.locator('[data-part="notification"][data-kind="notification"]', { hasText: "default notification remains visible" });
       await generic.waitFor({ timeout: 15_000 }).catch(() => { throw new Error(`${name}: unknown notification did not delegate to Fulcrum Notification`); });
