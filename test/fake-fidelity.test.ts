@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { startFakeZeta } from "../scripts/fake-zeta";
 
-type Frame = { id?: number; result?: { messages?: Record<string, unknown>[]; next_offset?: number | null; state?: string }; error?: { code: number; message: string } };
+type Frame = { id?: number; result?: { messages?: Record<string, unknown>[]; next_offset?: number | null; state?: string; last_turn_outcome?: { turn_id: string; reason: string } | null }; error?: { code: number; message: string } };
 type Request = (method: string, params: Record<string, unknown>) => Promise<Frame>;
 const bounded = <T>(promise: Promise<T>, label: string) => Promise.race([
   promise,
@@ -94,6 +94,18 @@ test("fake history projects legacy and fidelity rows per negotiated socket", asy
     content_blocks: [{ type: "image", mimeType: "image/png", caption: "fidelity preview", width: 640, height: 360, size: 1234, data_omitted: true }],
   });
   expect(fidelity.filter((row) => row.event === "delivery_status")).toHaveLength(11);
+});
+
+test("fake status scopes the last turn outcome to the active session", async () => {
+  let outcome: { turn_id: string; reason: string } | null | undefined;
+  await history(["served_turn_end"], "s-fidelity", async (request) => {
+    expect((await request("resume", { session_id: "s-reconnect" })).error).toBeUndefined();
+    expect((await request("send", { text: "fail this turn" })).error).toBeUndefined();
+    await waitForCompletedTurn(request, "failed fake turn to finish");
+    expect((await request("resume", { session_id: "s-fidelity" })).error).toBeUndefined();
+    outcome = (await request("status", {})).result?.last_turn_outcome;
+  });
+  expect(outcome).toBeNull();
 });
 
 test("fake failed turns keep zeta's durable row order and shape", async () => {

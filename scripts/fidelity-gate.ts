@@ -248,6 +248,21 @@ async function checkOmittedPrivacy(page: Page, origin: string) {
   }
 }
 
+async function checkStopReload(page: Page, fake: Fake, origin: string) {
+  fake.setLive(true);
+  await page.goto(`${origin}/?theme=tokyo-night&run=${ACTIVE}`);
+  await ready(page);
+  await waitFor(page.getByText("needs approval"), 15_000, "seeded approval");
+  await page.getByRole("button", { name: "stop the running turn" }).click();
+  const stopped = page.locator('[data-part="timeline"] [data-kind="stopped"]');
+  await waitFor(stopped, 10_000, "live stopped row");
+  await page.reload();
+  await ready(page);
+  await waitFor(stopped, 10_000, "reloaded stopped row");
+  if (await stopped.count() !== 1) throw new Error(`stop + reload restored ${await stopped.count()} stopped rows instead of 1`);
+  if (await page.getByText("needs approval").count()) throw new Error("stop + reload kept the cancelled approval live");
+}
+
 async function checkTurnEndResend(page: Page, fake: Fake, origin: string) {
   fake.clearSent();
   await page.goto(`${origin}/?theme=tokyo-night&run=${ACTIVE}`);
@@ -298,6 +313,7 @@ if (import.meta.main) {
       "omitted-render": () => checkTextlessRendering(page, origin),
       "omitted-echo": () => checkLaterEcho(page, fake, origin),
       "omitted-privacy": () => checkOmittedPrivacy(page, origin),
+      "stop-reload": () => checkStopReload(page, fake, origin),
       auto: () => checkTurnEndResend(page, fake, origin),
     } as const;
     const selected = process.env.FIDELITY_GATE_CASE as keyof typeof cases | undefined;

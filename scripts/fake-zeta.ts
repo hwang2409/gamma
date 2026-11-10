@@ -213,7 +213,7 @@ function projectHistory(rows: readonly Json[], fidelity: boolean): Json[] {
 }
 
 /** The live turn that runs when the active session opens: prose, code, a shell call, an approval, then a summary. */
-const liveTurn = (send: (event: Json) => void, ask: () => Promise<"approve" | "deny" | "abort">, wait: (ms: number) => Promise<void>, done: () => void, histories: Record<string, Json[]>, historyMode: HistoryMode, grantProof = false, setPending: (requestId: string, call: Json) => void = () => {}) => async () => {
+const liveTurn = (send: (event: Json) => void, ask: () => Promise<"approve" | "deny" | "abort">, wait: (ms: number) => Promise<void>, done: (reason?: "completed" | "user_stop") => void, histories: Record<string, Json[]>, historyMode: HistoryMode, grantProof = false, setPending: (requestId: string, call: Json) => void = () => {}) => async () => {
   // Committed rows also land in history, as in zeta, so a reconnect rebuilds what the live stream showed.
   const history = histories[ACTIVE]!;
   const row = (id: string, role: string, content: Json[], toolResult: Json | null = null) => history.push({ id, role, content, tool_result: toolResult });
@@ -241,7 +241,17 @@ const liveTurn = (send: (event: Json) => void, ask: () => Promise<"approve" | "d
   e("approval_request", { request_id: "approval-1", tool_call: clean, delegated: false });
   if (historyMode === "new") history.push({ id: "approval-request-1", role: "system", event: "approval_request", request_id: "approval-1", tool_call: clean, delegated: false });
   const decision = await approval;
-  if (decision === "abort") return done();
+  if (decision === "abort") {
+    // Zeta origin/main control.py:525-543 settles pending approvals before publishing turn_aborted;
+    // approval_lifecycle.py:758-812 durably records the abort resolution used by approval history.
+    const wire = { decision: "abort", reason: "turn_canceled" };
+    e("approval_end", { request_id: "approval-1", data: wire });
+    if (historyMode === "new") history.push({ id: "approval-end-1", role: "system", event: "approval_end", request_id: "approval-1", tool_call: clean, data: wire });
+    e("turn_aborted", { data: { reason: "abort" } });
+    done("user_stop");
+    e("agent_end");
+    return;
+  }
   // zeta's event says "allow" for an approve call (src/zeta/core/approval.py), not the method name.
   const wire = { decision: decision === "approve" ? "allow" : decision };
   e("approval_end", { request_id: "approval-1", data: wire });
@@ -258,9 +268,11 @@ const liveTurn = (send: (event: Json) => void, ask: () => Promise<"approve" | "d
     e("approval_request", { request_id: "approval-2", tool_call: write, delegated: false });
     const next = await pending;
     if (next === "abort") {
-      e("approval_end", { request_id: "approval-2", data: { decision: "abort", reason: "user_stop" } });
+      const wire = { decision: "abort", reason: "turn_canceled" };
+      e("approval_end", { request_id: "approval-2", data: wire });
+      if (historyMode === "new") history.push({ id: "approval-end-2", role: "system", event: "approval_end", request_id: "approval-2", tool_call: write, data: wire });
       e("turn_aborted", { data: { reason: "abort" } });
-      done();
+      done("user_stop");
       e("agent_end");
       return;
     }
@@ -295,13 +307,10 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
   const externalSteers: Array<{ id: string; session: string }> = [];
   // docs/serve-protocol.md:791-808 (served_turn_end): status.last_turn_outcome.reason of the last whole turn.
   type TurnEndReason = "completed" | "user_stop" | "error" | "disconnect";
-  let lastTurn: TurnEndReason | null = null;
-  let lastTurnId: string | null = null;
-  let lastTurnSession: string | null = null;
+  const lastTurnOutcomes = new Map<string, { turn_id: string; reason: TurnEndReason }>();
   const recordTurnEnd = (session: string, turnId: string, reason: TurnEndReason) => {
-    lastTurn = reason;
-    lastTurnId = turnId;
-    lastTurnSession = session;
+    // Zeta origin/main connections.py:821-832 reads last_turn_outcome from the active session's store.
+    lastTurnOutcomes.set(session, { turn_id: turnId, reason });
     // Zeta origin/main event_contract.py:35-45 defines this exact frame; history_projection.py:295-300 keeps
     // every durable turn_end in branch order when served_turn_end is negotiated.
     histories[session]!.push({ id: `served-${turnId}`, role: "system", event: "served_turn_end", data: { turn_id: turnId, reason } });
@@ -450,21 +459,20 @@ function createComposerMethods(wait: (ms: number) => Promise<void>, running: { g
     flushEchoes() { this.persistWithheldHistory(); withheldEchoes.splice(0).forEach((send) => send()); },
     get history() { return histories[ACTIVE] ?? []; },
     get aborts() { return aborts; },
-    get lastTurnOutcome() { return lastTurn && lastTurnId ? { turn_id: lastTurnId, reason: lastTurn } : null; },
-    get lastTurnSession() { return lastTurnSession; },
-    finishExternalTurn(session: string, send: Send) {
+    lastTurnOutcome(session: string | null) { return session ? lastTurnOutcomes.get(session) ?? null : null; },
+    finishExternalTurn(session: string, send: Send, outcome: TurnEndReason = "completed") {
       const turnId = `turn-${sent.length}`;
+      const dropReason = outcome === "completed" ? "turn_end" : "abort";
       for (const steer of externalSteers.splice(0).filter((steer) => steer.session === session)) {
         statuses.set(steer.id, "dropped");
-        const row = { id: `delivery-${steer.id}`, role: "system", delivery_id: steer.id, method: "steer", status: "dropped", content: [text("steer dropped: turn_end")], reason: "turn_end" };
+        const row = { id: `delivery-${steer.id}`, role: "system", delivery_id: steer.id, method: "steer", status: "dropped", content: [text(`steer dropped: ${dropReason}`)], reason: dropReason };
         histories[session]!.push({ ...row, event: "delivery_status" });
         // zeta delivery.py:305-325: published live only to a controller with session_history_fidelity.
         send({ event: "delivery_status", session_id: session, ...row, required_feature: "session_history_fidelity" });
       }
-      recordTurnEnd(session, turnId, "completed");
+      recordTurnEnd(session, turnId, outcome);
     },
     disconnect() {
-      if (chat || externalSteers.length) lastTurn = "disconnect";
       for (const steer of externalSteers.splice(0)) {
         statuses.set(steer.id, "dropped");
         histories[steer.session]!.push({ id: `delivery-${steer.id}`, role: "system", event: "delivery_status", delivery_id: steer.id, method: "steer", status: "dropped", content: [text("steer dropped: disconnect")], reason: "disconnect" });
@@ -661,7 +669,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         approvalAborted = false;
         decide = (decision) => { decide = null; resolve(decision); };
       });
-      setTimeout(() => void liveTurn(send, ask, wait, () => { composer.finishExternalTurn(ACTIVE, send); running = false; }, histories, currentHistoryMode, grantProof, (requestId, call) => { approvalRequestId = requestId; approvalCall = call as typeof approvalCall; })(), 300);
+      setTimeout(() => void liveTurn(send, ask, wait, (reason) => { composer.finishExternalTurn(ACTIVE, send, reason); running = false; }, histories, currentHistoryMode, grantProof, (requestId, call) => { approvalRequestId = requestId; approvalCall = call as typeof approvalCall; })(), 300);
     }
   };
 
@@ -766,7 +774,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         }
         if (method === "status") {
           const pending = decide && !approvalAborted ? [{ request_id: approvalRequestId, tool_call: approvalCall, delegated: false }] : [];
-          return reply({ result: { session: active ? { ...(sessions.find((session) => session.session_id === active) ?? {}), vim_mode: vimMode, plan_mode: activeSettings().plan_mode } : null, state: running ? (decide ? "tool" : "running") : "idle", explicit_finish: false, pending_approvals: pending, usage: {}, compaction_markers: 0, ...(socket.data.features?.includes("served_turn_end") ? { last_turn_outcome: composer.lastTurnOutcome } : {}) } });
+          return reply({ result: { session: active ? { ...(sessions.find((session) => session.session_id === active) ?? {}), vim_mode: vimMode, plan_mode: activeSettings().plan_mode } : null, state: running ? (decide ? "tool" : "running") : "idle", explicit_finish: false, pending_approvals: pending, usage: {}, compaction_markers: 0, ...(socket.data.features?.includes("served_turn_end") ? { last_turn_outcome: composer.lastTurnOutcome(active) } : {}) } });
         }
         if (handleGrantRequest(socket, method, params, reply)) return;
         if (method === "resume") {
