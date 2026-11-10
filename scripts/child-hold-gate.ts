@@ -15,11 +15,13 @@ const screenshotDir = process.env.CHILD_HOLD_SCREENSHOT_DIR;
 
 const localLabel = (iso: string) => {
   const date = new Date(iso);
-  const now = new Date();
-  const clock = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-  if (date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth() && date.getDate() === now.getDate()) return clock;
-  const day = `${date.toLocaleString("en-US", { month: "short" })} ${date.getDate()}`;
-  return date.getFullYear() === now.getFullYear() ? `${day}, ${clock}` : `${day}, ${date.getFullYear()}, ${clock}`;
+  const format = (value: Date) => Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(value).filter(({ type }) => type !== "literal").map(({ type, value: part }) => [type, part]));
+  const current = format(new Date());
+  const parts = format(date);
+  const clock = `${parts.hour}:${parts.minute}`;
+  if (parts.year === current.year && parts.month === current.month && parts.day === current.day) return clock;
+  const day = `${parts.month} ${parts.day}`;
+  return parts.year === current.year ? `${day}, ${clock}` : `${day}, ${parts.year}, ${clock}`;
 };
 
 const historyIso = "2099-01-07T09:30:00.000Z";
