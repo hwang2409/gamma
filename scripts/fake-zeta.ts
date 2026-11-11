@@ -87,6 +87,11 @@ export const PARAM_RULES: Readonly<Record<string, ParamRule>> = {
   // connections.py:1021-1022 -> ergonomics.py:85-93; ergonomics.py:1114-1119 (backward keys).
   session_history: { required: ["session_id"], gated: { before: ["session_history_backward"], history_validator: ["session_history_backward"] } },
   session_tree: { required: ["session_id"] },
+  // Zeta 57fedc2 docs/serve-protocol.md:756-775 and handlers/child_runs.py:13-82.
+  child_run_list: { required: ["session_id"] },
+  child_run_send: { required: ["session_id", "run_id", "text"] },
+  // Zeta afc1e088 connections.py:805-831,916-954 and handlers/history.py:340-370.
+  child_run_history: { required: ["session_id", "run_id"] },
   // server.py:900-906: session_id (:903), then ergonomics.py:79-80 (name must be a string); no busy check.
   rename_session: { required: ["session_id"] },
   // server.py:923, then :956 (busy) before :973 (head_id). The fake does not model a busy switch_branch, so while a turn
@@ -533,6 +538,15 @@ export function composerMethods(wait: (ms: number) => Promise<void>, running: { 
 
 export async function startFakeZeta({ origins, port = 0, live = true, historyMode = process.env.FAKE_ZETA_HISTORY_MODE === "old" ? "old" : "new", approvalHistoryMode = (process.env.FAKE_ZETA_APPROVAL_HISTORY_MODE as ApprovalHistoryMode | undefined) ?? "not-advertised-with-rows", approvalReconnect = true, approvalReconnectGraceMs = 90_000, newSessionSettings = true, sessionGrants = true, grantProof = false, helloDelay = 60_000, serialDelays }: { origins: string[]; port?: number; live?: boolean; historyMode?: HistoryMode; approvalHistoryMode?: ApprovalHistoryMode; approvalReconnect?: boolean; approvalReconnectGraceMs?: number; newSessionSettings?: boolean; sessionGrants?: boolean; grantProof?: boolean; helloDelay?: number; serialDelays?: Readonly<Record<string, number | readonly number[]>> }) {
   const histories = createHistories();
+  const childRunId = "root:2";
+  const childHistory = [
+    { id: "child-user", role: "user", content: [text("check the reconnect evidence")], tool_result: null },
+    { id: "child-assistant", role: "assistant", content: [text("saved child transcript is available")], tool_result: null },
+  ];
+  let childTurns = 1;
+  let childCatalogRows = 1;
+  let staleChildHistory = 0;
+  let childRunHistoryEnabled = true;
   const home = await mkdtemp(join(tmpdir(), "fulcrum-web-zeta-"));
   await mkdir(join(home, "run"), { recursive: true });
   const discovery = join(home, "run", "serve.ws.json");
@@ -595,6 +609,38 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     const data = { change, changed, grants: grantSnapshot(sessionId) };
     grantChanges.push(data);
     for (const socket of sockets) if (socket.data.features?.includes("session_grants")) socket.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: { event: "session_grants_changed", data } }));
+  };
+  const handleChildRunRequest = (socket: ServerWebSocket<SocketData>, method: string, params: Json, reply: (body: Json) => void) => {
+    if (method !== "child_run_list" && method !== "child_run_send" && method !== "child_run_history") return false;
+    if (method === "child_run_history") {
+      if (!socket.data.features?.includes("child_run_history")) { reply({ error: { code: -32601, message: "method not found" } }); return true; }
+      if (params.session_id !== active) { reply({ error: { code: -32003, message: "owner is not active" } }); return true; }
+      if (params.run_id !== childRunId || active !== CHILD_HOLD) { reply({ error: { code: -32012, message: "child run not found", data: { code: "child_run_not_found" } } }); return true; }
+      // Zeta origin/main src/zeta/server/handlers/history.py:353-357 returns this restart signal when history changes while paging.
+      if (staleChildHistory > 0) { staleChildHistory -= 1; reply({ error: { code: -32009, message: "session history changed; restart from the newest page", data: { code: "stale_history_snapshot" } } }); return true; }
+      // Zeta afc1e088 docs/serve-protocol.md:1484 and handlers/history.py:340-370.
+      reply({ result: params.before === null || params.before === undefined
+        ? { messages: [childHistory[1]], next_before: 1, history_validator: { end: childHistory.length, entry_id: "child-assistant" } }
+        : { messages: [childHistory[0]], next_before: null, history_validator: { end: childHistory.length, entry_id: "child-assistant" } } });
+      return true;
+    }
+    if (!socket.data.features?.includes("child_runs")) { reply({ error: { code: -32601, message: "method not found" } }); return true; }
+    if (socket.data.role === "observer") { reply({ error: { code: -32008, message: "observer is read-only" } }); return true; }
+    if (params.session_id !== active) { reply({ error: { code: -32003, message: "owner is not active" } }); return true; }
+    if (method === "child_run_send") {
+      if (params.run_id !== childRunId || active !== CHILD_HOLD) { reply({ error: { code: -32005, message: "child run is not available" } }); return true; }
+      childTurns += 1;
+      reply({ result: { accepted: true, run_id: childRunId } });
+      return true;
+    }
+    const first = { run_id: childRunId, session_id: CHILD_HOLD, parent_run_id: null, description: "reviewer", agent_type: "reviewer", status: "idle", accepts_follow_ups: true, turns_used: childTurns, tool_count: 3, current_step: "waiting for follow-up", started_at: "2099-01-08T10:40:00+00:00", finished_at: null, elapsed_seconds: 305 };
+    const rows = active === CHILD_HOLD ? [first, ...Array.from({ length: Math.max(0, childCatalogRows - 1) }, (_, index) => ({ ...first, run_id: `root:extra:${index + 1}`, description: `worker ${index + 1}`, agent_type: "worker", accepts_follow_ups: index === 0 }))] : [];
+    const offset = Number(params.offset ?? 0);
+    const limit = Number(params.limit ?? 100);
+    const page = rows.slice(offset, offset + limit);
+    // Zeta origin/main src/zeta/server/protocol.py:347-348 and handlers/child_runs.py:13-53 define controller-only list paging.
+    reply({ result: { runs: page, ...(offset + page.length < rows.length ? { next_offset: offset + page.length } : {}) } });
+    return true;
   };
   const handleGrantRequest = (socket: ServerWebSocket<SocketData>, method: string, params: Json, reply: (body: Json) => void) => {
     if (method !== "session_grants" && method !== "revoke_session_grants") return false;
@@ -762,11 +808,11 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           if (mode === "slow") await wait(helloDelay);
           if (!sockets.has(socket)) return;
           if (socket.data.role === "controller") controller = socket;
-          const features = protocolVersion === "1.0" ? [] : (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "send_images_delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || name === "served_turn_end" || name === "session_history_fidelity" || name === "delivery_session_guard" || (name === "model_input_ids" && modelInputIds) || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings) || (name === "session_grants" && sessionGrants)) ?? [];
+          const features = protocolVersion === "1.0" ? [] : (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "send_images_delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || name === "served_turn_end" || name === "session_history_fidelity" || name === "delivery_session_guard" || (name === "model_input_ids" && modelInputIds) || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings) || (name === "session_grants" && sessionGrants) || name === "child_runs" || (name === "child_run_history" && childRunHistoryEnabled)) ?? [];
           socket.data.features = features;
           const reconnect = features.includes("approval_reconnect");
           if (reconnect) reconnectControllers.add(socket as object);
-          const advertised = protocolVersion === "1.0" ? ["list_sessions", "new_session", "resume", "send", "steer", "approve", "deny", "abort", "status"] : ["status", "approve", "deny", "rename_session", "session_tree", "switch_branch", "slash_list", "slash_run", ...(sessionGrants ? ["session_grants", "revoke_session_grants"] : []), ...(settingsEnabled ? ["model_catalog", "session_settings", "set_settings", "send_images", ...(advertiseNewSessionSettings ? ["new_session_settings"] : [])] : []), ...extraRequests];
+          const advertised = protocolVersion === "1.0" ? ["list_sessions", "new_session", "resume", "send", "steer", "approve", "deny", "abort", "status"] : ["status", "approve", "deny", "rename_session", "session_tree", "switch_branch", "slash_list", "slash_run", ...(sessionGrants ? ["session_grants", "revoke_session_grants"] : []), "child_run_list", "child_run_send", "child_run_history", ...(settingsEnabled ? ["model_catalog", "session_settings", "set_settings", "send_images", ...(advertiseNewSessionSettings ? ["new_session_settings"] : [])] : []), ...extraRequests];
           const offered = advertised.filter((name) => !omittedRequests.has(name));
           reply({ result: { ...extraHelloFields, protocol_version: protocolVersion, server: "fake-zeta", capabilities: protocolVersion === "1.0" ? { requests: offered, notifications: ["event"] } : { features, requests: offered } } });
           if (decide && !approvalAborted) {
@@ -866,6 +912,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           await handleSessionHistory(socket, params, reply, send);
           return;
         }
+        if (handleChildRunRequest(socket, method, params, reply)) return;
         // As in zeta (server/ergonomics.py `active`): these name the active session or fail.
         // send_images under delivery_session_guard answers with data.code in deliver(); before it, zeta sent no data (serve-protocol.md:508-510).
         if (SETTINGS_REQUESTS.includes(method) && method !== "model_catalog" && params.session_id !== active && !(method === "send_images" && socket.data.features?.includes("delivery_session_guard"))) return reply({ error: { code: -32003, message: "session is not active" } });
@@ -979,6 +1026,9 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
       notifyGrantChange(change, change === "grant" ? grants.filter((grant) => !before.includes(grant)) : before.filter((grant) => !grants.includes(grant)), sessionId);
     },
     failNext(method: string, message: string) { failures.set(method, [...(failures.get(method) ?? []), message]); },
+    setChildCatalogRows(count: number) { childCatalogRows = Math.max(1, Math.floor(count)); },
+    staleChildHistoryFor(count: number) { staleChildHistory = Math.max(0, Math.floor(count)); },
+    setChildRunHistoryEnabled(enabled: boolean) { childRunHistoryEnabled = enabled; },
     busyNext(method: "resume" | "new_session", count = 1) { transientBusy.set(method, count); },
     get running() { return running; },
     /** Every accepted send and steer, in order. */
