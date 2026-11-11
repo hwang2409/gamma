@@ -431,6 +431,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .saved-label { justify-self: end; }
 .child-meta { grid-column: 2 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; color: var(--fulcrum-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .child-route-note { width: min(var(--measure), calc(100% - 2 * var(--gutter))); margin: 12px auto 0; padding: 12px; border-left: var(--rail) solid var(--fulcrum-border); }
+.child-history-note { padding-inline: 0; }
 .child-transcript { flex: 1; min-height: 0; }
 .child-followup { flex: none; width: min(var(--measure), calc(100% - 2 * var(--gutter))); margin: 0 auto; padding: 8px 0 max(16px, env(safe-area-inset-bottom)); }
 .child-followup label { display: block; margin-bottom: 4px; color: var(--fulcrum-muted); font-size: 12px; }

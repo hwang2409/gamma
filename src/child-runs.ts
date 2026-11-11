@@ -36,6 +36,10 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
 
 export type ChildRunAuthority = "controller" | "observer";
 
+export function childNavigationUnavailable({ authority, canList, canOpenHistory }: { authority: ChildRunAuthority; canList: boolean; canOpenHistory: boolean }) {
+  return canOpenHistory || canList ? undefined : "child details need a newer zeta server";
+}
+
 export function createChildRunsController(client: ZetaClient, now = Date.now, authority: ChildRunAuthority = "controller", draftStore: TextDraftStore = createTextDraftStore()) {
   let catalog: ChildCatalog = { owner: null, runs: [], invalidRows: 0, loading: false, warning: null, reportedAt: null };
   let generation = 0;
@@ -272,8 +276,8 @@ export function useChildRoute({
   }, []);
   const navigation = useMemo<SubAgentNavigation | null>(() => client && owner ? {
     open: openChild,
-    unavailable: () => canOpenHistory ? undefined : "child details need a newer zeta server",
-  } : null, [canOpenHistory, client, openChild, owner]);
+    unavailable: () => childNavigationUnavailable({ authority, canList, canOpenHistory }),
+  } : null, [authority, canList, canOpenHistory, client, openChild, owner]);
 
   return {
     controller,
