@@ -1,14 +1,16 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chromium, type Browser, type Page } from "playwright";
+import { chromium, webkit, type Browser, type BrowserType, type Page } from "playwright";
 import { startFakeZeta } from "./fake-zeta";
 
 const root = new URL("..", import.meta.url).pathname;
 const port = Number(process.env.SESSION_GATE_PORT ?? 4341);
 const origin = `http://127.0.0.1:${port}`;
 const gammaHome = await mkdtemp(join(tmpdir(), "gamma-session-state-"));
+const errorShots = process.env.ERROR_BOUNDARY_SHOTS ?? join(root, "gate-artifacts", "error-boundary");
+await mkdir(errorShots, { recursive: true });
 const fake = await startFakeZeta({ origins: [origin], live: true });
 const vite = spawn("bun", ["x", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: root, env: { ...process.env, ZETA_HOME: fake.home, GAMMA_HOME: gammaHome, GAMMA_APP_ORIGIN: origin, VITE_ZETA_PORT: String(fake.port) }, stdio: "ignore" });
 const failures: string[] = [];
@@ -21,7 +23,7 @@ for (let attempt = 0; attempt < 100; attempt++) {
 
 async function ready(page: Page) {
   try { await page.locator('.dock textarea[aria-label^="message"]').waitFor({ timeout: 15_000 }); }
-  catch (error) { throw new Error(`${error instanceof Error ? error.message : String(error)}\npage: ${await page.locator("main").innerText()}`); }
+  catch (error) { throw new Error(`${error instanceof Error ? error.message : String(error)}\nurl: ${page.url()}\npage: ${await page.locator("body").innerText()}`); }
 }
 async function fresh(browser: Browser, width: number, path = "/") {
   const context = await browser.newContext({ viewport: { width, height: width === 390 ? 844 : 900 } });
@@ -39,6 +41,7 @@ async function fresh(browser: Browser, width: number, path = "/") {
 }
 async function check(name: string, run: () => Promise<void>) {
   if (process.env.GATE_ONLY && process.env.GATE_ONLY !== name) return;
+  if (process.env.GATE_MATCH && !name.includes(process.env.GATE_MATCH)) return;
   try { await run(); passed++; console.log(`PASS ${name}`); }
   catch (error) { const message = error instanceof Error ? error.message : String(error); failures.push(`${name}: ${message}`); console.log(`FAIL ${name}: ${message}`); }
 }
@@ -49,6 +52,25 @@ async function waitForIdle() {
 async function poll(check: () => Promise<boolean>, attempts = 50) {
   for (let attempt = 0; attempt < attempts; attempt++) { if (await check()) return true; await Bun.sleep(100); }
   return false;
+}
+async function errorPage(type: BrowserType, width: number, path = "/") {
+  const browser = await type.launch({ headless: true });
+  const context = await browser.newContext({ viewport: { width, height: width === 390 ? 844 : 900 } });
+  const page = await context.newPage();
+  await page.goto(`${origin}${path}`);
+  await ready(page);
+  await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });
+  await page.goto(`${origin}${path}`);
+  await ready(page);
+  return { browser, context, page };
+}
+async function plantRenderError(page: Page, area: "app" | "transcript" | "composer") {
+  await page.evaluate((target) => {
+    const url = new URL(location.href);
+    url.searchParams.set("__gamma_render_error", target);
+    history.replaceState(history.state, "", url);
+    dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
+  }, area);
 }
 
 // UX-8 regression guards (the second passes on 58d9713 with this gate and fake).
@@ -233,6 +255,67 @@ await check("four busy resumes show the busy panel", async () => {
   }
   finally { await context.close(); await browser.close(); }
 });
+
+for (const [engine, type] of [["chromium", chromium], ["webkit", webkit]] as const) {
+  for (const width of [1440, 390]) {
+    await check(`${engine} transcript render failure keeps the ${width}px composer and recovers on run switch`, async () => {
+      fake.setLive(false);
+      const { browser, context, page } = await errorPage(type, width, "/?run=s-themes");
+      try {
+        const composer = page.locator('.dock textarea[aria-label="message"]');
+        await composer.fill("draft survives transcript failure");
+        const sent = fake.sent.length;
+        await plantRenderError(page, "transcript");
+        const recoveryHeading = page.getByRole("heading", { name: "run view broke" });
+        await recoveryHeading.waitFor({ timeout: 5_000 });
+        if (await composer.inputValue() !== "draft survives transcript failure") throw new Error("the transcript failure lost the draft");
+        if (!await composer.evaluate((node) => document.activeElement === node)) throw new Error("transcript failure stole focus from the composer");
+        await composer.fill("draft stays usable");
+        await page.screenshot({ path: join(errorShots, `${engine}-${width}-transcript-fallback.png`) });
+        await Bun.sleep(200);
+        if (fake.sent.length !== sent) throw new Error("editing the surviving composer sent without Enter or a click");
+        await page.getByRole("button", { name: "new run" }).click();
+        await page.getByRole("heading", { name: "start a conversation" }).waitFor({ timeout: 5_000 });
+        if (await page.getByRole("heading", { name: "run view broke" }).count()) throw new Error("the transcript fallback did not reset after switching runs");
+        await page.screenshot({ path: join(errorShots, `${engine}-${width}-transcript-recovered.png`) });
+      } finally { await context.close(); await browser.close(); }
+    });
+
+    await check(`${engine} transcript render failure focuses recovery when transcript had focus at ${width}px`, async () => {
+      fake.setLive(false);
+      const { browser, context, page } = await errorPage(type, width, "/?run=s-themes");
+      try {
+        const transcript = page.locator(".scroll");
+        const transcriptFocus = transcript.locator("[tabindex]").first();
+        await transcriptFocus.focus();
+        if (!await transcript.evaluate((node) => node.contains(document.activeElement))) throw new Error("test could not focus the transcript before planting the error");
+        await plantRenderError(page, "transcript");
+        const recoveryHeading = page.getByRole("heading", { name: "run view broke" });
+        await recoveryHeading.waitFor({ timeout: 5_000 });
+        if (!await recoveryHeading.evaluate((node) => document.activeElement === node)) throw new Error("transcript failure did not focus its recovery heading");
+      } finally { await context.close(); await browser.close(); }
+    });
+
+    for (const area of ["app", "composer"] as const) await check(`${engine} ${area} render failure restores the ${width}px draft after reload`, async () => {
+      const { browser, context, page } = await errorPage(type, width);
+      try {
+        const composer = page.locator('.dock textarea[aria-label="message"]');
+        const draft = `draft survives ${area} failure`;
+        await composer.fill(draft);
+        await plantRenderError(page, area);
+        const recoveryHeading = page.getByRole("heading", { name: "something broke" });
+        await recoveryHeading.waitFor({ timeout: 5_000 });
+        if (!await recoveryHeading.evaluate((node) => document.activeElement === node)) throw new Error(`${area} failure did not focus the outer recovery heading`);
+        await page.getByText(`planted ${area} render error`, { exact: false }).waitFor();
+        await page.screenshot({ path: join(errorShots, `${engine}-${width}-${area}-fallback.png`) });
+        await page.getByRole("button", { name: "reload gamma" }).click();
+        await ready(page);
+        if (await composer.inputValue() !== draft) throw new Error(`the ${area} failure lost the draft after reload`);
+        await page.screenshot({ path: join(errorShots, `${engine}-${width}-${area}-recovered.png`) });
+      } finally { await context.close(); await browser.close(); }
+    });
+  }
+}
 
 vite.kill("SIGTERM");
 await Promise.race([new Promise<void>((resolve) => vite.once("exit", () => resolve())), Bun.sleep(2_000)]);
