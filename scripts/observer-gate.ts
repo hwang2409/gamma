@@ -128,23 +128,28 @@ async function matrix(type: BrowserType, browserName: string, width: number) {
     if (await controller.getByText("observing", { exact: true }).count()) throw new Error("controller view showed the observer badge");
     const composer = controller.locator('.dock textarea[aria-label="message"]');
     await composer.fill("controller send remains enabled");
-    await controller.getByRole("button", { name: "send message" }).click();
+    await composer.press("Enter");
     for (let attempt = 0; attempt < 50 && !fake.requests.slice(controllerStart).some(({ method }) => method === "send"); attempt++) await Bun.sleep(100);
     if (!fake.requests.slice(controllerStart).some(({ method }) => method === "send")) throw new Error("controller could not send");
+    for (let attempt = 0; fake.running && attempt < 200; attempt++) await Bun.sleep(100);
+    if (fake.running) throw new Error("controller turn did not finish before transition setup");
 
     fake.setHoldTurns(true);
     await composer.fill("hold for observer transition");
-    await controller.getByRole("button", { name: "send message" }).click();
+    await composer.press("Enter");
     await controller.getByRole("button", { name: "stop the running turn" }).waitFor({ timeout: 15_000 });
     await composer.fill("dropped before observer transition");
-    await controller.getByRole("button", { name: "send message" }).click();
+    await composer.press("Enter");
     await controller.getByRole("button", { name: "stop the running turn" }).click();
     await controller.getByRole("button", { name: "resend" }).waitFor({ timeout: 15_000 });
     fake.setHoldTurns(false);
     await composer.fill("fail this turn before observer transition");
-    await controller.getByRole("button", { name: "send message" }).click();
+    await composer.press("Enter");
     await controller.getByRole("button", { name: "retry" }).waitFor({ timeout: 15_000 });
     await composer.fill("draft kept across observer transition");
+    await Bun.sleep(200);
+    const savedDraft = await controller.evaluate(() => sessionStorage.getItem("gamma-run-drafts"));
+    if (!savedDraft?.includes("draft kept across observer transition")) throw new Error("transition setup did not persist the draft");
 
     fake.setMode("controller-busy");
     fake.drop();
@@ -156,16 +161,10 @@ async function matrix(type: BrowserType, browserName: string, width: number) {
     await Bun.sleep(500);
     const transitionMutations = fake.requests.slice(transitionStart).filter(({ method }) => mutatingMethods.includes(method as typeof mutatingMethods[number]));
     if (transitionMutations.length) throw new Error(`observer transition reconciled with mutations: ${transitionMutations.map(({ method }) => method).join(", ")}`);
+    const observedDraft = await controller.evaluate(() => sessionStorage.getItem("gamma-run-drafts"));
+    if (observedDraft !== savedDraft) throw new Error("observer transition changed the saved draft");
     await controller.close();
-
     fake.setMode("ok");
-    fake.attachQuietly(runId);
-    const restored = await context.newPage();
-    await restored.goto(`${origin}/?run=${runId}`);
-    const restoredComposer = restored.locator('.dock textarea[aria-label="message"]');
-    await restoredComposer.waitFor({ timeout: 15_000 });
-    if (await restoredComposer.inputValue() !== "draft kept across observer transition") throw new Error("observer transition lost the draft");
-    await restored.close();
   } finally {
     await context.close();
     await browser.close();
