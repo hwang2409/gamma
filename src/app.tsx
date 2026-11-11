@@ -383,6 +383,9 @@ export function App() {
 function childStatus(row: ChildRunRow) {
   return row.status.value;
 }
+function childAgentType(row: ChildRunRow) {
+  return row.agentType && row.agentType !== row.description ? row.agentType : null;
+}
 function elapsed(seconds: number) {
   if (seconds < 60) return `${Math.round(seconds)}s`;
   const minutes = Math.floor(seconds / 60);
@@ -411,7 +414,7 @@ function ChildCatalog({ owner, controller, snapshot, onOpen, onClose }: { owner:
       <ol className="child-list">{snapshot.runs.map((row) => <li key={`${row.sessionId}:${row.runId}`}>
         <button type="button" className="child-row" onClick={() => onOpen(row.runId)}>
           <span className="child-row-heading"><strong>{row.description || row.runId}</strong><span className="status-mark" data-state={childStatus(row)} aria-hidden="true" /><span>{childStatus(row)}</span></span>
-          <span>{row.agentType || "agent"}{row.currentStep ? ` · ${row.currentStep}` : ""}</span>
+          <span>{childAgentType(row) ? `${childAgentType(row)}${row.currentStep ? " · " : ""}` : ""}{row.currentStep || (!row.description ? "agent" : "")}</span>
           <span className="child-row-metrics">{elapsed(row.elapsedSeconds)} · {row.turnsUsed} {row.turnsUsed === 1 ? "turn" : "turns"} · {row.toolCount} {row.toolCount === 1 ? "tool" : "tools"}</span>
         </button>
       </li>)}</ol>
@@ -432,7 +435,7 @@ function ChildView({ owner, runId, controller, snapshot, historyAvailable, onBac
     setNotice(null);
     try {
       const result = await controller.send(key, text);
-      setNotice(result.kind === "accepted" ? { text: "accepted" } : { text: "delivery is unknown; your draft is kept", tone: "danger" });
+      setNotice(result.kind === "accepted" ? null : { text: "delivery is unknown; your draft is kept", tone: "danger" });
     } catch (error) {
       setNotice({ text: `${error instanceof Error ? error.message : String(error)}; your draft is kept`, tone: "danger" });
     }
@@ -445,7 +448,7 @@ function ChildView({ owner, runId, controller, snapshot, historyAvailable, onBac
   return <section className="child-view" aria-label="child run">
     <header className="child-header">
       <button type="button" className="ghost child-back" onClick={onBack}>back to parent run</button>
-      <div className="child-identity"><span className="child-owner">{owner}</span><span aria-hidden="true">/</span><strong>{row?.description || runId}</strong><span>{row?.agentType || "child agent"}</span></div>
+      <div className="child-identity"><span className="child-owner">{owner}</span><span aria-hidden="true">/</span><strong>{row?.description || runId}</strong>{row && childAgentType(row) ? <span>{childAgentType(row)}</span> : null}</div>
       <span className="saved-label">saved transcript</span>
       {row ? <div className="child-meta"><span className="status-mark" data-state={childStatus(row)} aria-hidden="true" /><span>{childStatus(row)}</span>{row.currentStep ? <span>{row.currentStep}</span> : null}<span>{elapsed(row.elapsedSeconds)}</span><span>{row.turnsUsed} turns</span><span>{row.toolCount} tools</span></div> : null}
     </header>
@@ -456,7 +459,7 @@ function ChildView({ owner, runId, controller, snapshot, historyAvailable, onBac
     {row?.acceptsFollowUps ? <div className="child-followup">
       {notice ? <p role={notice.tone ? "alert" : "status"} data-tone={notice.tone}>{notice.text}</p> : null}
       <label htmlFor="child-followup">follow up with this child</label>
-      <div><textarea id="child-followup" aria-label="child follow-up" value={draft} disabled={sending} onChange={(event) => controller.setDraft(key, event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} /><button type="button" className="primary" disabled={sending || !draft.trim()} onClick={() => void send()}>{sending ? "sending…" : "send"}</button></div>
+      <div><textarea id="child-followup" aria-label="child follow-up" value={draft} onChange={(event) => controller.setDraft(key, event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} /><button type="button" className="child-send" disabled={!draft.trim()} onClick={() => void send()}>{sending ? "sending…" : "send"}</button></div>
     </div> : row ? <p className="child-ineligible">this child is not accepting follow-ups</p> : null}
   </section>;
 }

@@ -421,7 +421,9 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .child-followup label { display: block; margin-bottom: 4px; color: var(--fulcrum-muted); font-size: 12px; }
 .child-followup > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; border: 1px solid var(--fulcrum-border); }
 .child-followup textarea { min-height: 64px; padding: 10px 12px; resize: vertical; border: 0; background: var(--fulcrum-bg); color: var(--fulcrum-fg); font: inherit; }
-.child-followup .primary { align-self: stretch; min-width: 80px; border-width: 0 0 0 1px; }
+.child-send { align-self: stretch; min-width: 80px; padding: 0 14px; border: 0 solid var(--fulcrum-accent); border-left-width: 1px; background: var(--fulcrum-accent); color: var(--fulcrum-bg); font: 600 13px/1 var(--fulcrum-font); }
+.child-send:hover:not(:disabled) { text-decoration: underline; text-underline-offset: 3px; }
+.child-send:disabled { border-color: var(--fulcrum-border); background: var(--fulcrum-surface); color: var(--fulcrum-muted); }
 .child-followup > p, .child-ineligible { color: var(--fulcrum-muted); font-size: 12px; }
 .child-followup > p[data-tone="danger"] { padding-left: 12px; border-left: var(--rail) solid var(--fulcrum-danger); color: var(--fulcrum-fg); }
 .child-ineligible { width: min(var(--measure), calc(100% - 2 * var(--gutter))); margin: 0 auto; padding: 12px 0 max(16px, env(safe-area-inset-bottom)); }
@@ -433,7 +435,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
   .saved-label { grid-column: 2; }
   .child-meta { grid-column: 1 / -1; }
   .child-followup > div { grid-template-columns: 1fr; }
-  .child-followup .primary { min-height: 44px; border-width: 1px 0 0; }
+  .child-send { min-height: 44px; border-width: 1px 0 0; }
 }
 @media (forced-colors: active) {
   .status-mark { forced-color-adjust: none; background: CanvasText; }

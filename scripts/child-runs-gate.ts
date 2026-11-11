@@ -67,14 +67,16 @@ async function run(name: "chromium" | "webkit", engine: BrowserType) {
       await field.press("Shift+Enter");
       if (childRequests(fake, "child_run_send").length !== 0) throw new Error(`${name}: Shift+Enter sent a child follow-up`);
       await field.press("Enter");
-      await page.getByText("accepted", { exact: true }).waitFor();
+      await page.waitForFunction(() => (document.querySelector('[aria-label="child follow-up"]') as HTMLTextAreaElement | null)?.value === "");
       if (childRequests(fake, "child_run_send").length !== 1) throw new Error(`${name}: Enter did not send exactly once`);
+      if (await page.getByText("accepted", { exact: true }).count()) throw new Error(`${name}: child view left a bare accepted receipt`);
+      if ((await page.locator(".child-identity").innerText()).toLowerCase().includes("reviewer reviewer")) throw new Error(`${name}: child identity repeated its agent type`);
       await field.fill("second follow-up");
+      if (screenshots) await page.screenshot({ path: join(screenshots, `${name}-after.png`), fullPage: true });
       await page.getByRole("button", { name: "send", exact: true }).click();
       await page.waitForFunction(() => (document.querySelector('[aria-label="child follow-up"]') as HTMLTextAreaElement | null)?.value === "");
       if (childRequests(fake, "child_run_send").length !== 2) throw new Error(`${name}: click did not send exactly once`);
       if (childRequests(fake, "child_run_list").length < 3) throw new Error(`${name}: accepted sends did not create later catalog refreshes`);
-      if (screenshots) await page.screenshot({ path: join(screenshots, `${name}-after.png`), fullPage: true });
 
       await page.getByRole("button", { name: "back to parent run" }).click();
       await page.waitForURL((url) => !url.searchParams.has("child"));
@@ -85,6 +87,10 @@ async function run(name: "chromium" | "webkit", engine: BrowserType) {
       await page.getByRole("button", { name: "back to parent run" }).click();
       await page.waitForURL((url) => !url.searchParams.has("child"));
       await page.waitForFunction(() => document.activeElement?.getAttribute("data-part") === "sub-agent", undefined, { timeout: 2_000 }).catch(async () => { throw new Error(`${name}: contextual opener focus was ${await page.evaluate(() => document.activeElement?.outerHTML)}`); });
+      await page.keyboard.press("Enter");
+      await page.waitForURL((url) => url.searchParams.get("child") === "root:2");
+      await page.getByRole("button", { name: "back to parent run" }).click();
+      await page.waitForURL((url) => !url.searchParams.has("child"));
       await desktop.close();
 
       const direct = await browser.newContext({ viewport: { width: 1440, height: 900 } });
@@ -100,6 +106,7 @@ async function run(name: "chromium" | "webkit", engine: BrowserType) {
       const mobilePage = await mobile.newPage();
       await mobilePage.goto(`${origin}/?run=${encodeURIComponent(CHILD_HOLD)}`);
       await waitForApp(mobilePage);
+      if (screenshots) await mobilePage.screenshot({ path: join(screenshots, `${name}-mobile-before.png`), fullPage: true });
       const mobileButton = mobilePage.getByRole("button", { name: /^children / });
       await mobileButton.click();
       const sheet = mobilePage.getByRole("dialog", { name: "children" });
@@ -110,6 +117,17 @@ async function run(name: "chromium" | "webkit", engine: BrowserType) {
       await mobilePage.keyboard.press("Escape");
       await sheet.waitFor({ state: "detached" });
       await mobilePage.waitForFunction(() => document.activeElement?.classList.contains("children-button"));
+      await mobileButton.click();
+      await sheet.waitFor();
+      await sheet.getByRole("button", { name: /reviewer/ }).click();
+      await mobilePage.waitForURL((url) => url.searchParams.get("child") === "root:2");
+      await mobilePage.getByText("saved child transcript is available").waitFor();
+      const identityBounds = await mobilePage.locator(".child-identity").boundingBox();
+      const statusBounds = await mobilePage.locator(".child-meta").boundingBox();
+      if (!identityBounds || !statusBounds || Math.abs(identityBounds.x - statusBounds.x) > 0.5) throw new Error(`${name}: mobile status did not start under the child title`);
+      if (screenshots) await mobilePage.screenshot({ path: join(screenshots, `${name}-mobile-after.png`), fullPage: true });
+      await mobilePage.getByRole("button", { name: "back to parent run" }).click();
+      await mobilePage.waitForURL((url) => !url.searchParams.has("child"));
       await mobile.close();
     } finally {
       await browser.close();
