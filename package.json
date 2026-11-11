@@ -10,7 +10,7 @@
     "build": "tsc -p . && vite build",
     "typecheck": "tsc -p .",
     "test": "bun test",
-    "gate": "bun scripts/command-gate.ts && bun scripts/keys-gate.ts && bun scripts/grants-gate.ts && bun scripts/gate.ts && bun scripts/polish-gate.ts && bun scripts/artifact-gate.ts && bun scripts/round7-gate.ts && bun scripts/round8-gate.ts && bun scripts/round9-gate.ts && bun scripts/round10-gate.ts && bun scripts/navigation-activity-gate.ts && bun scripts/delivery-state-gate.ts && bun scripts/settings-state-gate.ts && bun scripts/session-state-gate.ts && bun scripts/jump-lane-gate.ts && bun scripts/compat-gate.ts && bun scripts/child-hold-gate.ts && bun scripts/a11y-gate.ts && bun scripts/fidelity-gate.ts"
+    "gate": "bun scripts/command-gate.ts && bun scripts/keys-gate.ts && bun scripts/grants-gate.ts && bun scripts/gate.ts && bun scripts/polish-gate.ts && bun scripts/artifact-gate.ts && bun scripts/round7-gate.ts && bun scripts/round8-gate.ts && bun scripts/round9-gate.ts && bun scripts/round10-gate.ts && bun scripts/navigation-activity-gate.ts && bun scripts/delivery-state-gate.ts && bun scripts/settings-state-gate.ts && bun scripts/session-state-gate.ts && bun scripts/jump-lane-gate.ts && bun scripts/compat-gate.ts && bun scripts/child-hold-gate.ts && bun scripts/child-runs-gate.ts && bun scripts/a11y-gate.ts && bun scripts/fidelity-gate.ts"
   },
   "dependencies": {
     "@fulcrum/core": "file:./vendor/fulcrum/fulcrum-core.tgz",

@@ -21,6 +21,9 @@ const VALID: Record<string, Record<string, unknown>> = {
   abort: {},
   session_history: { session_id: ACTIVE },
   session_tree: { session_id: ACTIVE },
+  child_run_list: { session_id: ACTIVE },
+  child_run_send: { session_id: ACTIVE, run_id: "root:2", text: "follow up" },
+  child_run_history: { session_id: ACTIVE, run_id: "root:2" },
   rename_session: { session_id: ACTIVE, name: "renamed" },
   switch_branch: { session_id: ACTIVE, head_id: "head-main" },
   set_settings: { session_id: ACTIVE, model: "gpt-5.1-codex", approval_mode: "ask" },
@@ -32,7 +35,7 @@ const VALID: Record<string, Record<string, unknown>> = {
 // What real zeta 169fb144 rejects with -32602, written out independently of the fake's table (zeta lines are cited
 // there, in PARAM_RULES): required nonempty-string params, exactly-one-of params, and params gated by a feature.
 // steer's text is checked only once a turn runs (delivery.py:233-235), so it has its own rows below.
-const REQUIRED: Record<string, string[]> = { resume: ["session_id"], delivery_status: ["delivery_id"], send_images: ["session_id"], approve: ["request_id"], deny: ["request_id"], session_history: ["session_id"], session_tree: ["session_id"], rename_session: ["session_id"], switch_branch: ["session_id", "head_id"], set_settings: ["session_id", "model", "approval_mode"], session_settings: ["session_id"], slash_list: ["session_id"], slash_run: ["session_id", "text"] };
+const REQUIRED: Record<string, string[]> = { resume: ["session_id"], child_run_list: ["session_id"], child_run_send: ["session_id", "run_id", "text"], child_run_history: ["session_id", "run_id"], delivery_status: ["delivery_id"], send_images: ["session_id"], approve: ["request_id"], deny: ["request_id"], session_history: ["session_id"], session_tree: ["session_id"], rename_session: ["session_id"], switch_branch: ["session_id", "head_id"], set_settings: ["session_id", "model", "approval_mode"], session_settings: ["session_id"], slash_list: ["session_id"], slash_run: ["session_id", "text"] };
 const ONE_OF: Record<string, string[]> = { send: ["text", "input_id"] };
 // Each gated param with a value of the right shape, so only the missing feature can reject it.
 const GATED: Record<string, Record<string, unknown>> = {
@@ -130,7 +133,7 @@ test("the fake rejects each missing required param and each feature-gated param 
 
 test("the fake accepts an unknown param wherever real zeta does, and the feature-gated params zeta accepts", async () => {
   const rows = outcomes();
-  await withFake(["delivery_id", "send_images_delivery_id", "session_grants"], async (request, fake) => {
+  await withFake(["delivery_id", "send_images_delivery_id", "session_grants", "child_runs", "child_run_history"], async (request, fake) => {
     fake.setHoldTurns(true);
     // Each send leaves a held turn; abort it so the next request meets an idle session, as its expected outcome assumes.
     const idle = () => rows.check("abort", "ok", request("abort", {}));
@@ -144,7 +147,8 @@ test("the fake accepts an unknown param wherever real zeta does, and the feature
     for (const method of Object.keys(VALID)) {
       if (method === "steer") await rows.check("send before steer", "ok", request("send", { text: "start" }));
       // server.py:728-747: approval-1 is not pending, so approve and deny get past their params to -32006.
-      await rows.check(`${method} unknown param`, method === "approve" || method === "deny" ? -32006 : "ok", request(method, { ...VALID[method], bogus_param: 1 }));
+      const expected = method === "approve" || method === "deny" ? -32006 : method === "child_run_send" ? -32005 : method === "child_run_history" ? -32012 : "ok";
+      await rows.check(`${method} unknown param`, expected, request(method, { ...VALID[method], bogus_param: 1 }));
       if (method === "new_session") await rows.check("resume", "ok", request("resume", { session_id: ACTIVE }));
       if (method === "send" || method === "steer" || method === "send_images") await idle();
     }
