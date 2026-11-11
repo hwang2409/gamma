@@ -446,7 +446,7 @@ function ChildView({ owner, runId, controller, snapshot, historyAvailable, canLi
     </header>
     {missing ? <div className="child-route-note"><p>{snapshot.catalog.nextOffset !== undefined ? "this child is not in the latest report" : "this child is no longer listed"}</p><div className="actions">{snapshot.catalog.nextOffset !== undefined ? <button type="button" className="ghost" onClick={() => void controller.load(owner, "more")}>load more</button> : null}<button type="button" className="ghost" onClick={() => void controller.load(owner, "refresh")}>refresh</button><button type="button" className="ghost" onClick={onBack}>back</button></div></div> : null}
     {snapshot.historyLoading ? <p className="note" data-tone="busy" role="status">loading saved transcript…</p> : null}
-    {historyAvailable === false ? <p className="note child-history-note" role="status">this zeta version cannot show the child transcript yet; details and follow-up still work</p> : null}
+    {historyAvailable === false ? <p className="note child-history-note" role="status">{canSend ? "this zeta version cannot show the child transcript yet; details and follow-up still work" : "this zeta version cannot show the child transcript yet"}</p> : null}
     {!canSend ? <p className="note" role="status">read-only: follow-ups are available from the controller connection</p> : null}
     {!canSend && !canList ? <p className="note" role="status">this zeta connection cannot list child details</p> : null}
     {errorCopy && historyAvailable !== false ? <div className="note" data-tone="danger" role="alert"><span>{errorCopy}</span> <button type="button" className="ghost" onClick={retry}>try again</button> <button type="button" className="ghost" onClick={onBack}>back</button></div> : null}

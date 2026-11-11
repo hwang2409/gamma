@@ -130,11 +130,14 @@ test("controller work cannot write after authority changes to observer", async (
   observerState.activate("s");
   attach(observerState);
   await Bun.sleep(10);
+  observerState.edit("s", { text: "draft kept while observing" });
   calls.length = 0;
   expect(() => observer.resend("s", "intent-1")).toThrow(ObserverWriteError);
+  expect(() => observer.submit("s", "failed turn retry", false)).toThrow(ObserverWriteError);
   await Bun.sleep(10);
 
   expect(calls).toEqual([]);
+  expect(observerState.get("s").text).toBe("draft kept while observing");
   observer.dispose(); observerState.dispose();
 });
 

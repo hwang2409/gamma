@@ -37,7 +37,7 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
 export type ChildRunAuthority = "controller" | "observer";
 
 export function childNavigationUnavailable({ authority, canList, canOpenHistory }: { authority: ChildRunAuthority; canList: boolean; canOpenHistory: boolean }) {
-  return canOpenHistory || canList ? undefined : "child details need a newer zeta server";
+  return authority === "observer" || canOpenHistory || canList ? undefined : "child details need a newer zeta server";
 }
 
 export function createChildRunsController(client: ZetaClient, now = Date.now, authority: ChildRunAuthority = "controller", draftStore: TextDraftStore = createTextDraftStore()) {

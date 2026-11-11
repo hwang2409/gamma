@@ -82,6 +82,27 @@ async function matrix(type: BrowserType, browserName: string, width: number) {
     if (childRequests.some(({ method }) => method === "child_run_list" || method === "child_run_send")) throw new Error("observer child route listed or sent to children");
     await child.close();
 
+    fake.setChildRunHistoryEnabled(false);
+    fake.attachQuietly(CHILD_HOLD);
+    const noHistoryStart = fake.requests.length;
+    const noHistory = await context.newPage();
+    await noHistory.goto(`${origin}/?run=${CHILD_HOLD}`);
+    await ready(noHistory);
+    const parentRow = noHistory.locator('[data-part="sub-agent"][data-id="sub-agent:root:2"]');
+    await parentRow.waitFor({ timeout: 15_000 });
+    await parentRow.click();
+    await noHistory.waitForURL((url) => url.searchParams.get("child") === "root:2");
+    await noHistory.getByRole("heading", { name: /root:2/ }).waitFor();
+    await noHistory.getByText("read-only: follow-ups are available from the controller connection", { exact: true }).waitFor();
+    const unavailable = noHistory.getByText("this zeta version cannot show the child transcript yet", { exact: true });
+    await unavailable.waitFor();
+    if (await unavailable.getAttribute("role") !== "status") throw new Error("observer no-history note was not neutral");
+    if (await noHistory.getByLabel("child follow-up").count()) throw new Error("observer no-history child exposed its composer");
+    const noHistoryRequests = fake.requests.slice(noHistoryStart).filter(({ method }) => method === "child_run_list" || method === "child_run_send" || method === "child_run_history");
+    if (noHistoryRequests.length) throw new Error(`observer no-history child made requests: ${noHistoryRequests.map(({ method }) => method).join(", ")}`);
+    await noHistory.close();
+    fake.setChildRunHistoryEnabled(true);
+
     fake.setMode("observer-limit");
     const limitStart = fake.requests.length;
     const limited = await context.newPage();
@@ -105,11 +126,46 @@ async function matrix(type: BrowserType, browserName: string, width: number) {
     await controller.goto(`${origin}/?run=${runId}`);
     await controller.locator('.dock textarea[aria-label="message"]').waitFor({ timeout: 15_000 });
     if (await controller.getByText("observing", { exact: true }).count()) throw new Error("controller view showed the observer badge");
-    await controller.locator('.dock textarea[aria-label="message"]').fill("controller send remains enabled");
+    const composer = controller.locator('.dock textarea[aria-label="message"]');
+    await composer.fill("controller send remains enabled");
     await controller.getByRole("button", { name: "send message" }).click();
     for (let attempt = 0; attempt < 50 && !fake.requests.slice(controllerStart).some(({ method }) => method === "send"); attempt++) await Bun.sleep(100);
     if (!fake.requests.slice(controllerStart).some(({ method }) => method === "send")) throw new Error("controller could not send");
+
+    fake.setHoldTurns(true);
+    await composer.fill("hold for observer transition");
+    await controller.getByRole("button", { name: "send message" }).click();
+    await controller.getByRole("button", { name: "stop the running turn" }).waitFor({ timeout: 15_000 });
+    await composer.fill("dropped before observer transition");
+    await controller.getByRole("button", { name: "send message" }).click();
+    await controller.getByRole("button", { name: "stop the running turn" }).click();
+    await controller.getByRole("button", { name: "resend" }).waitFor({ timeout: 15_000 });
+    fake.setHoldTurns(false);
+    await composer.fill("fail this turn before observer transition");
+    await controller.getByRole("button", { name: "send message" }).click();
+    await controller.getByRole("button", { name: "retry" }).waitFor({ timeout: 15_000 });
+    await composer.fill("draft kept across observer transition");
+
+    fake.setMode("controller-busy");
+    fake.drop();
+    await controller.getByText("observing", { exact: true }).waitFor({ timeout: 15_000 });
+    const transitionStart = fake.requests.length;
+    if (await controller.getByRole("button", { name: "resend" }).count()) throw new Error("observer transition kept a resend action");
+    if (await controller.getByRole("button", { name: "retry" }).count()) throw new Error("observer transition kept a retry action");
+    if (await controller.locator('.dock textarea[aria-label="message"]').count()) throw new Error("observer transition kept an editable composer");
+    await Bun.sleep(500);
+    const transitionMutations = fake.requests.slice(transitionStart).filter(({ method }) => mutatingMethods.includes(method as typeof mutatingMethods[number]));
+    if (transitionMutations.length) throw new Error(`observer transition reconciled with mutations: ${transitionMutations.map(({ method }) => method).join(", ")}`);
     await controller.close();
+
+    fake.setMode("ok");
+    fake.attachQuietly(runId);
+    const restored = await context.newPage();
+    await restored.goto(`${origin}/?run=${runId}`);
+    const restoredComposer = restored.locator('.dock textarea[aria-label="message"]');
+    await restoredComposer.waitFor({ timeout: 15_000 });
+    if (await restoredComposer.inputValue() !== "draft kept across observer transition") throw new Error("observer transition lost the draft");
+    await restored.close();
   } finally {
     await context.close();
     await browser.close();

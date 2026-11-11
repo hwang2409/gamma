@@ -22,7 +22,7 @@ describe("child runs controller", () => {
     expect(childNavigationUnavailable({ authority: "controller", canList: true, canOpenHistory: false })).toBeUndefined();
     expect(childNavigationUnavailable({ authority: "observer", canList: true, canOpenHistory: false })).toBeUndefined();
     expect(childNavigationUnavailable({ authority: "controller", canList: false, canOpenHistory: true })).toBeUndefined();
-    expect(childNavigationUnavailable({ authority: "observer", canList: false, canOpenHistory: false })).toBe("child details need a newer zeta server");
+    expect(childNavigationUnavailable({ authority: "observer", canList: false, canOpenHistory: false })).toBeUndefined();
   });
   test("refresh generations and freshness barriers never publish an older page", async () => {
     const calls: Call[] = [];
