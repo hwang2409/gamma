@@ -1084,6 +1084,19 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     setRejectCreate(next: boolean) { rejectCreate = next; },
     activeId() { return active; },
     setHistoryMode(next: HistoryMode) { currentHistoryMode = next; },
+    resetSeededApproval() {
+      if (decide) throw new Error("cannot reset the seeded approval while it is pending");
+      composer.disconnect();
+      if (approvalExpiry) clearTimeout(approvalExpiry);
+      approvalExpiry = null;
+      active = ACTIVE;
+      liveEnabled = true;
+      turnStarted = false;
+      approvalAborted = false;
+      approvalRequestId = "approval-1";
+      approvalCall = { id: "live-2", name: "bash", arguments: { command: "rm -rf packages/zeta/dist && bun run build" } };
+      histories[ACTIVE] = createHistories()[ACTIVE]!;
+    },
     setLive(next: boolean) {
       if (next && !liveEnabled) {
         active = ACTIVE;
