@@ -176,8 +176,10 @@ async function run(name: "chromium" | "webkit", engine: BrowserType) {
       const noHistoryPage = await noHistory.newPage();
       await noHistoryPage.goto(`${origin}/?run=${encodeURIComponent(CHILD_HOLD)}`);
       await waitForApp(noHistoryPage);
-      await noHistoryPage.getByRole("button", { name: /^children(?: |$)/ }).click();
-      await noHistoryPage.getByRole("dialog", { name: "children" }).getByRole("button", { name: /reviewer/ }).click();
+      const parentRow = noHistoryPage.locator('[data-part="sub-agent"][data-id="sub-agent:root:2"]');
+      await parentRow.waitFor({ timeout: 15_000 });
+      if (await parentRow.evaluate((row) => row.tagName) !== "BUTTON") throw new Error(`${name}: no-history parent sub-agent row is not a button`);
+      await parentRow.click();
       await noHistoryPage.waitForURL((url) => url.searchParams.get("child") === "root:2");
       await noHistoryPage.getByText("this zeta version cannot show the child transcript yet; details and follow-up still work", { exact: true }).waitFor({ timeout: 15_000 });
       if (await noHistoryPage.getByText("this zeta version cannot show the child transcript yet; details and follow-up still work", { exact: true }).getAttribute("role") !== "status") throw new Error(`${name}: history-unavailable note was not neutral`);
@@ -191,6 +193,20 @@ async function run(name: "chromium" | "webkit", engine: BrowserType) {
       if (childRequests(fake, "child_run_history").length !== historyBeforeNoHistory) throw new Error(`${name}: history-unavailable row requested child history`);
       if (screenshots) await noHistoryPage.screenshot({ path: join(screenshots, `${name}-no-history.png`), fullPage: true });
       await noHistory.close();
+
+      const enterHistory = await browser.newContext({ viewport: { width: 390, height: 844 } });
+      const enterPage = await enterHistory.newPage();
+      await enterPage.goto(`${origin}/?run=${encodeURIComponent(CHILD_HOLD)}`);
+      await waitForApp(enterPage);
+      const enterRow = enterPage.locator('[data-part="sub-agent"][data-id="sub-agent:root:2"]');
+      await enterRow.waitFor({ timeout: 15_000 });
+      if (await enterRow.evaluate((row) => row.tagName) !== "BUTTON") throw new Error(`${name}: no-history Enter parent sub-agent row is not a button`);
+      await enterRow.focus();
+      await enterRow.press("Enter");
+      await enterPage.waitForURL((url) => url.searchParams.get("child") === "root:2");
+      await enterPage.getByText("this zeta version cannot show the child transcript yet; details and follow-up still work", { exact: true }).waitFor({ timeout: 15_000 });
+      if (childRequests(fake, "child_run_history").length !== historyBeforeNoHistory) throw new Error(`${name}: history-unavailable Enter row requested child history`);
+      await enterHistory.close();
       fake.setChildRunHistoryEnabled(true);
 
       fake.staleChildHistoryFor(5);
