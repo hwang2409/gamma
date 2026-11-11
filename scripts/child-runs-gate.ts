@@ -18,6 +18,26 @@ async function waitForApp(page: Page) {
   });
 }
 
+async function checkChildTranscriptRecovery(page: Page, fake: Awaited<ReturnType<typeof startFakeZeta>>, name: string) {
+  const sendsBefore = childRequests(fake, "child_run_send").length;
+  await page.goto(`${origin}/?run=${encodeURIComponent(CHILD_HOLD)}&child=${encodeURIComponent("root:2")}`);
+  await page.getByText("saved child transcript is available").waitFor({ timeout: 15_000 });
+  const field = page.getByRole("textbox", { name: "child follow-up" });
+  await field.waitFor({ timeout: 15_000 });
+  await field.fill("saved before transcript failure");
+  await page.goto(`${origin}/?run=${encodeURIComponent(CHILD_HOLD)}&child=${encodeURIComponent("root:2")}&__gamma_render_error=transcript`);
+  await page.locator(".render-failure").waitFor({ timeout: 15_000 });
+  const recovered = page.getByRole("textbox", { name: "child follow-up" });
+  if (await recovered.count() !== 1) throw new Error(`${name}: child transcript recovery removed the follow-up composer`);
+  if (await page.getByRole("heading", { name: "child transcript broke" }).count() !== 1) throw new Error(`${name}: child transcript recovery did not use the inner boundary`);
+  if (await recovered.inputValue() !== "saved before transcript failure") throw new Error(`${name}: child transcript recovery lost the draft`);
+  await recovered.fill("saved before transcript failure and edited");
+  if (childRequests(fake, "child_run_send").length !== sendsBefore) throw new Error(`${name}: planted child transcript failure sent without Enter or click`);
+  await recovered.press("Enter");
+  await page.waitForFunction(() => (document.querySelector('[aria-label="child follow-up"]') as HTMLTextAreaElement | null)?.value === "", undefined, { timeout: 15_000 });
+  if (childRequests(fake, "child_run_send").length !== sendsBefore + 1) throw new Error(`${name}: planted child recovery Enter did not send exactly once`);
+}
+
 async function run(name: "chromium" | "webkit", engine: BrowserType) {
   const fake = await startFakeZeta({ origins: [origin], live: false });
   const home = await mkdtemp(join(tmpdir(), `gamma-child-runs-${name}-`));
@@ -98,6 +118,8 @@ async function run(name: "chromium" | "webkit", engine: BrowserType) {
       await page.waitForURL((url) => url.searchParams.get("child") === "root:2");
       await page.getByRole("button", { name: "back to parent run" }).click();
       await page.waitForURL((url) => !url.searchParams.has("child"));
+
+      await checkChildTranscriptRecovery(page, fake, name);
       await desktop.close();
 
       const direct = await browser.newContext({ viewport: { width: 1440, height: 900 } });
@@ -192,6 +214,7 @@ async function run(name: "chromium" | "webkit", engine: BrowserType) {
       await sheet.getByRole("button", { name: /reviewer/ }).click();
       await mobilePage.waitForURL((url) => url.searchParams.get("child") === "root:2");
       await mobilePage.getByText("saved child transcript is available").waitFor();
+      await checkChildTranscriptRecovery(mobilePage, fake, name);
       const identityBounds = await mobilePage.locator(".child-identity").boundingBox();
       const statusBounds = await mobilePage.locator(".child-meta").boundingBox();
       if (!identityBounds || !statusBounds || Math.abs(identityBounds.x - statusBounds.x) > 0.5) throw new Error(`${name}: mobile status did not start under the child title`);
