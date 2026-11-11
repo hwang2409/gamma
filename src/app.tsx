@@ -1,9 +1,9 @@
 import { createHighlighter } from "@fulcrum/highlight";
 import { Markdown, type Fences, type MarkdownProps } from "@fulcrum/markdown/react";
 import { MermaidFence } from "@fulcrum/mermaid";
-import { Approval, Code, Fallback, FileBlock, HighlightContext, ImageBlock, Message, Notification, RunProvider, Timeline, ToolCall, useItemSelector, useRun, useRunStore, useTimeline, type Renderers, type UserMessageItem } from "@fulcrum/react";
+import { Approval, Code, Fallback, FileBlock, HighlightContext, ImageBlock, Message, Notification, RunProvider, SubAgentNavigationProvider, Timeline, ToolCall, useItemSelector, useRun, useRunStore, useTimeline, type Renderers, type SubAgentNavigation, type UserMessageItem } from "@fulcrum/react";
 import { createRunStore } from "@fulcrum/core";
-import { SESSION_GRANTS_FEATURE, type ZetaClient } from "@fulcrum/zeta";
+import { CHILD_RUN_HISTORY_FEATURE, CHILD_RUNS_FEATURE, ChildRunHistoryError, SESSION_GRANTS_FEATURE, type ChildRunRow, type ZetaClient } from "@fulcrum/zeta";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { createPortal } from "react-dom";
 import { commandRequests, createConnection, serveCommand, type Connection, type ConnectionState } from "./connection";
@@ -21,6 +21,7 @@ import { createApprovalDecider, pendingApprovals } from "./approvals";
 import { createClientActions, createLocalActions, type ActionReceipt } from "./client-actions";
 import { alwaysAllowed as getAlwaysAllowed, markAlwaysAllowed, subscribeAlwaysAllowed } from "./always-allowed";
 import { createSessionGrantsModel, type SessionGrantsModel } from "./session-grants";
+import { createChildRunsController, type ChildKey, type ChildRunsController } from "./child-runs";
 
 const highlight = createHighlighter();
 addEventListener("pagehide", () => highlight.dispose(), { once: true });
@@ -170,22 +171,30 @@ function useCountdown(at: number | null) {
 }
 
 const RUN = "gamma-run";
-type BrowserEntry = { gammaEntryId: string; run: string };
+type BrowserEntry = { gammaEntryId: string; run: string; child?: string };
 const draftId = () => `draft:${crypto.randomUUID()}`;
 const entryId = () => crypto.randomUUID();
 const writeEntry = (entry: BrowserEntry, mode: "push" | "replace") => {
   const url = new URL(location.href);
   url.searchParams.set("run", entry.run);
+  if (entry.child) url.searchParams.set("child", entry.child); else url.searchParams.delete("child");
   localStorage.setItem(RUN, entry.run);
-  history[mode === "push" ? "pushState" : "replaceState"]({ ...history.state, ...entry }, "", url);
+  history[mode === "push" ? "pushState" : "replaceState"](entry, "", url);
 };
 const initialEntry = (): BrowserEntry => {
   const state = history.state as Partial<BrowserEntry> | null;
-  const run = new URLSearchParams(location.search).get("run") ?? localStorage.getItem(RUN) ?? draftId();
-  const entry = { gammaEntryId: typeof state?.gammaEntryId === "string" ? state.gammaEntryId : entryId(), run };
+  const params = new URLSearchParams(location.search);
+  const run = params.get("run") ?? localStorage.getItem(RUN) ?? draftId();
+  const child = params.get("child") ?? undefined;
+  const entry = { gammaEntryId: typeof state?.gammaEntryId === "string" ? state.gammaEntryId : entryId(), run, ...(child ? { child } : {}) };
   writeEntry(entry, "replace");
   return entry;
 };
+
+const EMPTY_CHILD_SNAPSHOT: ChildRunsController["snapshot"] = { catalog: { owner: null, runs: [], invalidRows: 0, loading: false, warning: null, reportedAt: null }, history: null, historyError: null, historyLoading: false };
+function useChildSnapshot(controller: ChildRunsController | null) {
+  return useSyncExternalStore(controller ? controller.subscribe : () => () => {}, () => controller?.snapshot ?? EMPTY_CHILD_SNAPSHOT);
+}
 
 export function App() {
   const [theme, setTheme] = useTheme();
@@ -194,10 +203,17 @@ export function App() {
   const firstEntry = useMemo(initialEntry, []);
   const runState = useMemo(() => createRunStateStore(8, localStorage, sessionStorage, { id: firstEntry.gammaEntryId as EntryId, run: firstEntry.run as RunId }), [firstEntry]);
   const workspace = useSyncExternalStore(runState.subscribe, runState.getCatalog);
-  const browserEntry = { gammaEntryId: workspace.entry.id, run: workspace.entry.run };
+  const [browserChild, setBrowserChild] = useState(firstEntry.child);
+  const [suppressComposerFocus, setSuppressComposerFocus] = useState(false);
+  const browserEntry = { gammaEntryId: workspace.entry.id, run: workspace.entry.run, ...(browserChild ? { child: browserChild } : {}) };
+  const childOpener = useRef<HTMLElement | null>(null);
+  const childOpenerId = useRef<string | null>(null);
+  const childWasPushed = useRef(false);
+  const childCatalogOpen = useRef(false);
   useEffect(() => {
-    if (new URLSearchParams(location.search).get("run") !== browserEntry.run) writeEntry(browserEntry, "replace");
-  }, [browserEntry.gammaEntryId, browserEntry.run]);
+    const params = new URLSearchParams(location.search);
+    if (params.get("run") !== browserEntry.run || (params.get("child") ?? undefined) !== browserEntry.child) writeEntry(browserEntry, "replace");
+  }, [browserEntry.gammaEntryId, browserEntry.run, browserEntry.child]);
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
   const runs = useMemo(() => createSessionManager(connection, runState, hostBindings), [connection, runState]);
@@ -215,11 +231,14 @@ export function App() {
     activate(firstEntry.run);
     runs.start();
     const pop = (event: PopStateEvent) => {
-      const raw = new URLSearchParams(location.search).get("run") ?? draftId();
+      const params = new URLSearchParams(location.search);
+      const raw = params.get("run") ?? draftId();
       const canonical = runState.canonical(raw);
+      const child = params.get("child") ?? undefined;
       const state = event.state as Partial<BrowserEntry> | null;
-      const next = { gammaEntryId: typeof state?.gammaEntryId === "string" ? state.gammaEntryId : entryId(), run: canonical };
+      const next = { gammaEntryId: typeof state?.gammaEntryId === "string" ? state.gammaEntryId : entryId(), run: canonical, ...(child ? { child } : {}) };
       if (canonical !== raw || !state?.gammaEntryId) writeEntry(next, "replace");
+      setBrowserChild(child);
       runState.dispatch({ type: "NAVIGATED", entryId: next.gammaEntryId as EntryId, runId: canonical as RunId }); activate(canonical);
     };
     // A page back from the bfcache keeps its memory; it is a new page life, so it must not resend a steer by itself.
@@ -251,6 +270,8 @@ export function App() {
   }, [deliveries, state.phase, view.active, view.attached]);
   const newRun = useCallback(() => {
     const next = { gammaEntryId: entryId(), run: draftId() };
+    setBrowserChild(undefined);
+    setSuppressComposerFocus(false);
     writeEntry(next, "push"); runState.dispatch({ type: "NEW_RUN", entryId: next.gammaEntryId as EntryId, runId: next.run as DraftRunId }); runState.activate(next.run, nextRunModel().model ? { choice: "explicit", model: nextRunModel().model! } : { choice: "default" });
     requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('.dock textarea[aria-label="message"]')?.focus());
   }, [runState]);
@@ -263,15 +284,69 @@ export function App() {
   }, [deliveries, runState]);
   const selectRun = useCallback((id: string) => {
     const next = { gammaEntryId: entryId(), run: id };
+    setBrowserChild(undefined);
+    setSuppressComposerFocus(false);
     writeEntry(next, "push"); runState.dispatch({ type: "NAVIGATED", entryId: next.gammaEntryId as EntryId, runId: id as RunId }); runState.activate(id, { choice: "explicit", model: "" });
   }, [runState]);
   const client = state.phase === "connected" ? connection.client : null;
+  const childController = useMemo(() => client ? createChildRunsController(client) : null, [client]);
+  const childSnapshot = useChildSnapshot(childController);
+  const [childrenOpen, setChildrenOpen] = useState(false);
+  const attachedOwner = open?.id === browserEntry.run ? open.id : null;
+  useEffect(() => () => childController?.dispose(), [childController]);
+  useEffect(() => { childController?.setOwner(attachedOwner); }, [attachedOwner, childController]);
+  useEffect(() => {
+    if (!childController || !client || !browserEntry.child || !attachedOwner || !client.features.includes(CHILD_RUN_HISTORY_FEATURE)) return;
+    void childController.load(attachedOwner);
+    void childController.open({ sessionId: attachedOwner, runId: browserEntry.child }).catch(() => undefined);
+    return () => childController.closeHistory();
+  }, [attachedOwner, browserEntry.child, childController, client]);
+  const openChild = useCallback((runId: string) => {
+    if (!attachedOwner) return;
+    if (!childCatalogOpen.current) {
+      const active = document.activeElement as HTMLElement | null;
+      childOpener.current = active?.dataset.part === "sub-agent" ? active : document.querySelector<HTMLElement>(`[data-part="sub-agent"][data-id="sub-agent:${CSS.escape(runId)}"]`);
+      childOpenerId.current = childOpener.current?.dataset.part === "sub-agent" ? childOpener.current.dataset.id ?? null : null;
+    }
+    childCatalogOpen.current = false;
+    childWasPushed.current = true;
+    const next = { gammaEntryId: entryId(), run: attachedOwner, child: runId };
+    writeEntry(next, "push");
+    setBrowserChild(runId);
+    setChildrenOpen(false);
+  }, [attachedOwner]);
+  const closeChild = useCallback(() => {
+    setSuppressComposerFocus(true);
+    if (childWasPushed.current) {
+      childWasPushed.current = false;
+      history.back();
+    } else {
+      const next = { gammaEntryId: browserEntry.gammaEntryId, run: browserEntry.run };
+      writeEntry(next, "replace");
+      setBrowserChild(undefined);
+    }
+    setTimeout(() => (childOpener.current?.isConnected ? childOpener.current : childOpenerId.current ? document.querySelector<HTMLElement>(`[data-part="sub-agent"][data-id="${CSS.escape(childOpenerId.current)}"]`) : document.querySelector<HTMLElement>(".children-button"))?.focus(), 300);
+  }, [browserEntry.gammaEntryId, browserEntry.run]);
+  const childNavigation = useMemo<SubAgentNavigation | null>(() => client && attachedOwner ? {
+    open: openChild,
+    unavailable: () => client.features.includes(CHILD_RUN_HISTORY_FEATURE) ? undefined : "child details need a newer zeta server",
+  } : null, [attachedOwner, client, openChild]);
+  const openChildren = useCallback((opener: HTMLElement) => {
+    if (!childController || !attachedOwner) return;
+    childOpener.current = opener;
+    childOpenerId.current = null;
+    childCatalogOpen.current = true;
+    setChildrenOpen(true);
+    void childController.load(attachedOwner);
+  }, [attachedOwner, childController]);
+  const closeChildren = useCallback(() => { childCatalogOpen.current = false; setChildrenOpen(false); setTimeout(() => childOpener.current?.focus(), 0); }, []);
   const resendDelivery = useCallback((intent: string) => void deliveries.resend(browserEntry.run, intent), [deliveries, browserEntry.run]);
 
   return (
     <HighlightContext value={highlight}>
       <ApprovalModeContext value={yolo}>
         <RunProvider store={store} highlight={highlight} onRetry={client && open ? () => client.retrySession(open.id) : undefined}>
+          <SubAgentNavigationProvider value={childNavigation}>
           <DeliveryStates value={deliveryStates}>
           <RetryTurn value={retryTurn}>
             <ResendDelivery value={resendDelivery}>
@@ -279,6 +354,7 @@ export function App() {
               <header className="topbar">
                 <span className="brand"><span className="brand-mark" aria-hidden="true" /><span className="brand-name">gamma</span></span>
                 <RunTitle session={view.session} blank={!view.selected} opening={Boolean(view.opening)} />
+                {client?.features.includes(CHILD_RUNS_FEATURE) && attachedOwner ? <button type="button" className="ghost children-button" onClick={(event) => openChildren(event.currentTarget)}>children {childSnapshot.catalog.runs.length}{childSnapshot.catalog.nextOffset !== undefined ? "+" : ""}</button> : null}
                 <YoloIndicator className="topbar-yolo" />
                 <button type="button" className="ghost new-run" aria-label="new run" onClick={() => void newRun()}><span className="new-run-label">new run</span><span className="new-run-short" aria-hidden="true">+</span></button>
                 <SettingsMenu>
@@ -288,18 +364,107 @@ export function App() {
               </header>
               <main className="main">
                 {landedNotice ? <div className="landed-notice" role="status">your message started run {landedNotice.runId} <button type="button" className="ghost" onClick={() => { runState.dismissNotice(); selectRun(landedNotice.runId); }}>open</button><button type="button" className="ghost" onClick={() => runState.dismissNotice()}>dismiss</button></div> : null}
-                <Body state={state} view={view} connection={connection} runs={runs} onNewRun={newRun} onSelectRun={selectRun} followRequest={followRequest} />
-                <Dock key={browserEntry.run} runId={browserEntry.run} runState={runState} onCreated={onCreated} onAccepted={() => setFollowRequest((request) => request + 1)} deliveries={deliveries} receipts={receipts} state={state} view={view} connection={connection} runs={runs} vim={vim} setVim={setVim} theme={theme} setTheme={setTheme} onNewRun={newRun} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />
+                {browserEntry.child ? childController && attachedOwner ? <ChildView key={`${attachedOwner}:${browserEntry.child}`} owner={attachedOwner} runId={browserEntry.child} controller={childController} snapshot={childSnapshot} historyAvailable={client?.features.includes(CHILD_RUN_HISTORY_FEATURE) ?? null} onBack={closeChild} /> : <section className="child-view" aria-label="child run"><button type="button" className="ghost child-back" onClick={closeChild}>back to parent run</button><p className="note" data-tone="busy" role="status">connecting to the parent run…</p></section> : <Body state={state} view={view} connection={connection} runs={runs} onNewRun={newRun} onSelectRun={selectRun} followRequest={followRequest} />}
+                {!browserEntry.child ? <Dock key={browserEntry.run} autoFocus={!suppressComposerFocus} runId={browserEntry.run} runState={runState} onCreated={onCreated} onAccepted={() => setFollowRequest((request) => request + 1)} deliveries={deliveries} receipts={receipts} state={state} view={view} connection={connection} runs={runs} vim={vim} setVim={setVim} theme={theme} setTheme={setTheme} onNewRun={newRun} onRetryTurn={setRetryTurn} onImageOpen={openViewer} /> : null}
+                {childrenOpen && childController && attachedOwner ? <ChildCatalog owner={attachedOwner} controller={childController} snapshot={childSnapshot.catalog} onOpen={openChild} onClose={closeChildren} /> : null}
                 {viewer ? <Inspector value={viewer} onClose={closeViewer} /> : null}
               </main>
             </div>
             </ResendDelivery>
           </RetryTurn>
           </DeliveryStates>
+          </SubAgentNavigationProvider>
         </RunProvider>
       </ApprovalModeContext>
     </HighlightContext>
   );
+}
+
+function childStatus(row: ChildRunRow) {
+  return row.status.value;
+}
+function elapsed(seconds: number) {
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const minutes = Math.floor(seconds / 60);
+  return seconds < 3600 ? `${minutes}m ${Math.round(seconds % 60)}s` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+function ChildCatalog({ owner, controller, snapshot, onOpen, onClose }: { owner: string; controller: ChildRunsController; snapshot: ChildRunsController["snapshot"]["catalog"]; onOpen(runId: string): void; onClose(): void }) {
+  const close = useRef<HTMLButtonElement>(null);
+  useEffect(() => { close.current?.focus(); }, []);
+  const onKeyDown = (event: React.KeyboardEvent) => {
+    if (event.key === "Escape") { event.preventDefault(); onClose(); return; }
+    if (event.key !== "Tab") return;
+    const targets = [...event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), [href], textarea, [tabindex]:not([tabindex="-1"])')];
+    if (!targets.length) return;
+    const first = targets[0]!;
+    const last = targets.at(-1)!;
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  };
+  return <div className="child-catalog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <aside className="child-catalog" role="dialog" aria-modal="true" aria-labelledby="child-catalog-title" aria-busy={snapshot.loading} onKeyDown={onKeyDown}>
+      <header><div><h2 id="child-catalog-title">children</h2>{snapshot.reportedAt ? <p>last reported <time dateTime={new Date(snapshot.reportedAt).toISOString()}>{new Date(snapshot.reportedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></p> : null}</div><button ref={close} type="button" className="ghost child-close" onClick={onClose} aria-label="close children">close</button></header>
+      <div className="child-catalog-actions"><button type="button" className="ghost" disabled={snapshot.loading} onClick={() => void controller.load(owner, "refresh")}>refresh</button></div>
+      {snapshot.warning ? <p className="child-warning" role="alert">{snapshot.warning}</p> : null}
+      {snapshot.loading && snapshot.reportedAt === null ? <p role="status">loading children…</p> : null}
+      {!snapshot.loading && snapshot.reportedAt !== null && snapshot.runs.length === 0 ? <p>no children reported</p> : null}
+      <ol className="child-list">{snapshot.runs.map((row) => <li key={`${row.sessionId}:${row.runId}`}>
+        <button type="button" className="child-row" onClick={() => onOpen(row.runId)}>
+          <span className="child-row-heading"><strong>{row.description || row.runId}</strong><span className="status-mark" data-state={childStatus(row)} aria-hidden="true" /><span>{childStatus(row)}</span></span>
+          <span>{row.agentType || "agent"}{row.currentStep ? ` · ${row.currentStep}` : ""}</span>
+          <span className="child-row-metrics">{elapsed(row.elapsedSeconds)} · {row.turnsUsed} {row.turnsUsed === 1 ? "turn" : "turns"} · {row.toolCount} {row.toolCount === 1 ? "tool" : "tools"}</span>
+        </button>
+      </li>)}</ol>
+      {snapshot.nextOffset !== undefined ? <button type="button" className="ghost load-more" disabled={snapshot.loading} onClick={() => void controller.load(owner, "more")}>load more</button> : null}
+    </aside>
+  </div>;
+}
+
+function ChildView({ owner, runId, controller, snapshot, historyAvailable, onBack }: { owner: string; runId: string; controller: ChildRunsController; snapshot: ChildRunsController["snapshot"]; historyAvailable: boolean | null; onBack(): void }) {
+  const key = useMemo<ChildKey>(() => ({ sessionId: owner, runId }), [owner, runId]);
+  const row = snapshot.catalog.runs.find((candidate) => candidate.sessionId === owner && candidate.runId === runId);
+  const [notice, setNotice] = useState<{ text: string; tone?: "danger" } | null>(null);
+  const draft = controller.draft(key);
+  const sending = controller.sending(key);
+  const send = useCallback(async () => {
+    const text = controller.draft(key);
+    if (!text.trim() || sending) return;
+    setNotice(null);
+    try {
+      const result = await controller.send(key, text);
+      setNotice(result.kind === "accepted" ? { text: "accepted" } : { text: "delivery is unknown; your draft is kept", tone: "danger" });
+    } catch (error) {
+      setNotice({ text: `${error instanceof Error ? error.message : String(error)}; your draft is kept`, tone: "danger" });
+    }
+  }, [controller, key, sending]);
+  const retry = useCallback(() => { controller.closeHistory(); void controller.open(key).catch(() => undefined); }, [controller, key]);
+  const historyError = snapshot.historyError;
+  const errorKind = historyError instanceof ChildRunHistoryError ? historyError.kind : null;
+  const errorCopy = historyAvailable === false ? "transcript view needs a newer zeta server" : errorKind === "not_found" ? "this child transcript was not found" : errorKind === "owner_not_active" ? "the parent run is not active" : errorKind === "corrupt_transcript" ? "this child transcript is corrupt" : errorKind === "history_kept_changing" ? "history kept changing" : errorKind === "not_negotiated" ? "transcript view needs a newer zeta server" : historyError ? "could not load the saved transcript" : null;
+  const missing = !row && snapshot.catalog.reportedAt !== null;
+  return <section className="child-view" aria-label="child run">
+    <header className="child-header">
+      <button type="button" className="ghost child-back" onClick={onBack}>back to parent run</button>
+      <div className="child-identity"><span className="child-owner">{owner}</span><span aria-hidden="true">/</span><strong>{row?.description || runId}</strong><span>{row?.agentType || "child agent"}</span></div>
+      <span className="saved-label">saved transcript</span>
+      {row ? <div className="child-meta"><span className="status-mark" data-state={childStatus(row)} aria-hidden="true" /><span>{childStatus(row)}</span>{row.currentStep ? <span>{row.currentStep}</span> : null}<span>{elapsed(row.elapsedSeconds)}</span><span>{row.turnsUsed} turns</span><span>{row.toolCount} tools</span></div> : null}
+    </header>
+    {missing ? <div className="child-route-note"><p>{snapshot.catalog.nextOffset !== undefined ? "this child is not in the latest report" : "this child is no longer listed"}</p><div className="actions">{snapshot.catalog.nextOffset !== undefined ? <button type="button" className="ghost" onClick={() => void controller.load(owner, "more")}>load more</button> : null}<button type="button" className="ghost" onClick={() => void controller.load(owner, "refresh")}>refresh</button><button type="button" className="ghost" onClick={onBack}>back</button></div></div> : null}
+    {snapshot.historyLoading ? <p className="note" data-tone="busy" role="status">loading saved transcript…</p> : null}
+    {errorCopy ? <div className="note" data-tone="danger" role="alert"><span>{errorCopy}</span> {historyAvailable === false ? null : <button type="button" className="ghost" onClick={retry}>try again</button>} <button type="button" className="ghost" onClick={onBack}>back</button></div> : null}
+    {snapshot.history ? <RunProvider store={snapshot.history.result.lease.store} highlight={highlight}><ChildTimeline /></RunProvider> : null}
+    {row?.acceptsFollowUps ? <div className="child-followup">
+      {notice ? <p role={notice.tone ? "alert" : "status"} data-tone={notice.tone}>{notice.text}</p> : null}
+      <label htmlFor="child-followup">follow up with this child</label>
+      <div><textarea id="child-followup" aria-label="child follow-up" value={draft} disabled={sending} onChange={(event) => controller.setDraft(key, event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} /><button type="button" className="primary" disabled={sending || !draft.trim()} onClick={() => void send()}>{sending ? "sending…" : "send"}</button></div>
+    </div> : row ? <p className="child-ineligible">this child is not accepting follow-ups</p> : null}
+  </section>;
+}
+
+function ChildTimeline() {
+  const scroll = useRef<HTMLDivElement>(null);
+  const [jumpLane, setJumpLane] = useState<HTMLDivElement | null>(null);
+  return <div className="run child-transcript"><div className="scroll" ref={scroll}><Timeline renderers={renderers} virtual scrollRef={scroll} renderJumpToLatest={(control) => jumpLane ? createPortal(control, jumpLane) : null} aria-label="saved child activity" /></div><div className="jump-lane" ref={setJumpLane} /></div>;
 }
 
 /** The first prompt of a run zeta has not titled yet. */
@@ -418,10 +583,10 @@ function dockPhase(state: ConnectionState, opening: boolean, open: OpenRun | nul
   return { kind: "ready" };
 }
 
-function DockComposer({ readOnly, blockedReason, blockedStatic, settingsReason, running, vim, commands, onSubmit, onPreparationFailure, onStop, onImageOpen, onFileInput, client, deliveries, sessionId, runState, runId, createdWithDefault, planMode, grants, permissionsOpenRequest }: { readOnly: string | null; blockedReason: string | null; blockedStatic: boolean; settingsReason?: string; running: boolean; vim: boolean; commands: ReturnType<typeof createUnavailableCommandController>; onSubmit: Submit; onPreparationFailure(error: unknown, images: readonly import("./image-queue").QueuedImage[], text: string): void; onStop(): Promise<unknown>; onImageOpen(block: any): void; onFileInput(input: HTMLInputElement | null): void; client: ZetaClient | null; deliveries: DeliveryManager; sessionId: string | null; runState: RunStateStore; runId: string; createdWithDefault: boolean; planMode: boolean; grants: SessionGrantsModel | null; permissionsOpenRequest: number }) {
+function DockComposer({ autoFocus, readOnly, blockedReason, blockedStatic, settingsReason, running, vim, commands, onSubmit, onPreparationFailure, onStop, onImageOpen, onFileInput, client, deliveries, sessionId, runState, runId, createdWithDefault, planMode, grants, permissionsOpenRequest }: { autoFocus: boolean; readOnly: string | null; blockedReason: string | null; blockedStatic: boolean; settingsReason?: string; running: boolean; vim: boolean; commands: ReturnType<typeof createUnavailableCommandController>; onSubmit: Submit; onPreparationFailure(error: unknown, images: readonly import("./image-queue").QueuedImage[], text: string): void; onStop(): Promise<unknown>; onImageOpen(block: any): void; onFileInput(input: HTMLInputElement | null): void; client: ZetaClient | null; deliveries: DeliveryManager; sessionId: string | null; runState: RunStateStore; runId: string; createdWithDefault: boolean; planMode: boolean; grants: SessionGrantsModel | null; permissionsOpenRequest: number }) {
   const permissions = grants ? <PermissionsControl model={grants} openRequest={permissionsOpenRequest} /> : null;
   if (readOnly !== null) return <GammaComposer state="read-only" reason={readOnly} vim={vim} commands={commands} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onImageOpen={onImageOpen} onFileInput={onFileInput} store={runState} runId={runId} footer={permissions} />;
-  return <GammaComposer state={running ? "steerable" : "idle"} blockedReason={blockedReason ?? undefined} blockedStatic={blockedStatic} vim={vim} commands={commands} autoFocus onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onStop={running ? onStop : undefined} onImageOpen={onImageOpen} onFileInput={onFileInput} store={runState} runId={runId} footer={<>{planMode ? <span className="plan-chip" aria-label="plan mode: on">plan</span> : null}<RunSettings available={Boolean(client)} disabledReason={settingsReason} deliveries={deliveries} sessionId={sessionId} createdWithDefault={createdWithDefault} running={running} store={runState} runId={runId} />{permissions}</>} />;
+  return <GammaComposer state={running ? "steerable" : "idle"} blockedReason={blockedReason ?? undefined} blockedStatic={blockedStatic} vim={vim} commands={commands} autoFocus={autoFocus} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onStop={running ? onStop : undefined} onImageOpen={onImageOpen} onFileInput={onFileInput} store={runState} runId={runId} footer={<>{planMode ? <span className="plan-chip" aria-label="plan mode: on">plan</span> : null}<RunSettings available={Boolean(client)} disabledReason={settingsReason} deliveries={deliveries} sessionId={sessionId} createdWithDefault={createdWithDefault} running={running} store={runState} runId={runId} />{permissions}</>} />;
 }
 
 
@@ -458,8 +623,8 @@ function connectionBlockedReason(state: ConnectionState) {
   return null;
 }
 
-function Dock({ state, view, connection, runs, vim, setVim, theme, setTheme, onNewRun, onRetryTurn, onImageOpen, runState, runId, onCreated, onAccepted, deliveries, receipts }: {
-  state: ConnectionState; view: RunState; connection: Connection; runs: SessionManager; vim: boolean; setVim(value: boolean): void; theme: ThemeChoice; setTheme(value: ThemeChoice): void; onNewRun(): void; onRetryTurn: Dispatch<SetStateAction<RetryAction | null>>; onImageOpen(block: any): void; runState: RunStateStore; runId: string; onCreated(from: string, sessionId: string): void; onAccepted(): void; deliveries: DeliveryManager; receipts: ReceiptStore;
+function Dock({ autoFocus, state, view, connection, runs, vim, setVim, theme, setTheme, onNewRun, onRetryTurn, onImageOpen, runState, runId, onCreated, onAccepted, deliveries, receipts }: {
+  autoFocus: boolean; state: ConnectionState; view: RunState; connection: Connection; runs: SessionManager; vim: boolean; setVim(value: boolean): void; theme: ThemeChoice; setTheme(value: ThemeChoice): void; onNewRun(): void; onRetryTurn: Dispatch<SetStateAction<RetryAction | null>>; onImageOpen(block: any): void; runState: RunStateStore; runId: string; onCreated(from: string, sessionId: string): void; onAccepted(): void; deliveries: DeliveryManager; receipts: ReceiptStore;
 }) {
   const present = view;
   const open = present.open;
@@ -586,7 +751,7 @@ function Dock({ state, view, connection, runs, vim, setVim, theme, setTheme, onN
   }, [approvalStore, receipts, runId, runState]);
   // The opening panel already says what the run waits for; the composer note says what that means for sending.
   const panel = problem || (!open && Boolean(present.opening));
-  return <div className="dock"><>{panel ? null : <StatusLine phase={phase} />}</><CommandReceiptLine store={receipts} runId={runId} /><DockComposer commands={commands} deliveries={deliveries} readOnly={readOnly} blockedReason={blockedReason} blockedStatic={input.block === "waits-for-active" || state.phase === "not_running"} settingsReason={settingsBlockText(input.settingsBlock)} running={running} vim={vim} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onStop={onStop} onImageOpen={onImageOpen} onFileInput={(input) => { fileInput.current = input; }} client={client} sessionId={sessionId} createdWithDefault={record.model.choice === "default"} planMode={record.settings.loaded?.plan_mode === true} runState={runState} runId={runId} grants={grants} permissionsOpenRequest={permissionsOpenRequest} /></div>;
+  return <div className="dock"><>{panel ? null : <StatusLine phase={phase} />}</><CommandReceiptLine store={receipts} runId={runId} /><DockComposer autoFocus={autoFocus} commands={commands} deliveries={deliveries} readOnly={readOnly} blockedReason={blockedReason} blockedStatic={input.block === "waits-for-active" || state.phase === "not_running"} settingsReason={settingsBlockText(input.settingsBlock)} running={running} vim={vim} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onStop={onStop} onImageOpen={onImageOpen} onFileInput={(input) => { fileInput.current = input; }} client={client} sessionId={sessionId} createdWithDefault={record.model.choice === "default"} planMode={record.settings.loaded?.plan_mode === true} runState={runState} runId={runId} grants={grants} permissionsOpenRequest={permissionsOpenRequest} /></div>;
 }
 
 /** The last prompt the user sent, so a failed turn can be retried with it. */
