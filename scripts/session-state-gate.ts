@@ -285,7 +285,9 @@ for (const [engine, type] of [["chromium", chromium], ["webkit", webkit]] as con
       fake.setLive(false);
       const { browser, context, page } = await errorPage(type, width, "/?run=s-themes");
       try {
-        await page.locator(".scroll").focus();
+        const transcript = page.locator(".scroll");
+        await transcript.focus();
+        if (!await transcript.evaluate((node) => document.activeElement === node)) throw new Error("test could not focus the transcript before planting the error");
         await plantRenderError(page, "transcript");
         const recoveryHeading = page.getByRole("heading", { name: "run view broke" });
         await recoveryHeading.waitFor({ timeout: 5_000 });

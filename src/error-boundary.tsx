@@ -24,11 +24,11 @@ export class RenderErrorBoundary extends Component<Props, State> {
   }
 
   componentDidMount() {
-    if (this.props.focusMode === "transcript") document.addEventListener("focusin", this.rememberFocus);
+    if (this.props.focusMode === "transcript") document.addEventListener("focus", this.rememberFocus, true);
   }
 
   componentWillUnmount() {
-    document.removeEventListener("focusin", this.rememberFocus);
+    document.removeEventListener("focus", this.rememberFocus, true);
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
