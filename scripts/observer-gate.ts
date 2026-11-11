@@ -36,6 +36,13 @@ if (screenshots) await mkdir(screenshots, { recursive: true });
 async function ready(page: Page) {
   await page.locator(".app").waitFor({ timeout: 15_000 });
 }
+// Enter only sends once the composer says it can: while the run opens it shows "sending is paused until the run
+// opens" and keeps the draft, so an Enter pressed earlier is (correctly) not a send.
+async function submit(page: Page, text: string) {
+  await page.locator('.dock textarea[aria-label="message"]').fill(text);
+  await page.locator('.dock [data-part="composer-submit"]:not([aria-disabled="true"])').waitFor({ timeout: 15_000 });
+  await page.locator('.dock textarea[aria-label="message"]').press("Enter");
+}
 async function check(name: string, run: () => Promise<void>) {
   try { await run(); passed++; console.log(`PASS ${name}`); }
   catch (error) { const message = error instanceof Error ? error.message : String(error); failures.push(`${name}: ${message}`); console.log(`FAIL ${name}: ${message}`); }
@@ -127,24 +134,20 @@ async function matrix(type: BrowserType, browserName: string, width: number) {
     await controller.locator('.dock textarea[aria-label="message"]').waitFor({ timeout: 15_000 });
     if (await controller.getByText("observing", { exact: true }).count()) throw new Error("controller view showed the observer badge");
     const composer = controller.locator('.dock textarea[aria-label="message"]');
-    await composer.fill("controller send remains enabled");
-    await composer.press("Enter");
+    await submit(controller, "controller send remains enabled");
     for (let attempt = 0; attempt < 50 && !fake.requests.slice(controllerStart).some(({ method }) => method === "send"); attempt++) await Bun.sleep(100);
     if (!fake.requests.slice(controllerStart).some(({ method }) => method === "send")) throw new Error("controller could not send");
     for (let attempt = 0; fake.running && attempt < 200; attempt++) await Bun.sleep(100);
     if (fake.running) throw new Error("controller turn did not finish before transition setup");
 
     fake.setHoldTurns(true);
-    await composer.fill("hold for observer transition");
-    await composer.press("Enter");
+    await submit(controller, "hold for observer transition");
     await controller.getByRole("button", { name: "stop the running turn" }).waitFor({ timeout: 15_000 });
-    await composer.fill("dropped before observer transition");
-    await composer.press("Enter");
+    await submit(controller, "dropped before observer transition");
     await controller.getByRole("button", { name: "stop the running turn" }).click();
     await controller.getByRole("button", { name: "resend" }).waitFor({ timeout: 15_000 });
     fake.setHoldTurns(false);
-    await composer.fill("fail this turn before observer transition");
-    await composer.press("Enter");
+    await submit(controller, "fail this turn before observer transition");
     await controller.getByRole("button", { name: "retry" }).waitFor({ timeout: 15_000 });
     await composer.fill("draft kept across observer transition");
     await Bun.sleep(200);
