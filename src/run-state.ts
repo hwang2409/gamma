@@ -143,6 +143,7 @@ export function mergeDrafts(cached: Draft | undefined, current: Draft): Draft {
   for (const image of [...(cached?.attachments ?? []), ...current.attachments]) {
     const key = `${image.mime_type}\0${image.data}`;
     if (!seen.has(key)) { seen.add(key); attachments.push(image); }
+    else if (!attachments.some(({ url }) => url === image.url)) URL.revokeObjectURL(image.url);
   }
   return { text, attachments };
 }

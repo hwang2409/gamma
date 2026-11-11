@@ -42,6 +42,16 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .app { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
 .main { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
 
+.render-failure { display: flex; gap: 14px; width: min(var(--measure), calc(100% - 48px)); margin: max(32px, 14dvh) auto 32px; padding: 20px 24px; border: 1px solid var(--fulcrum-border); background: var(--fulcrum-bg); }
+.run-render-failure { flex: 1; min-height: 0; overflow: auto; }
+.status-mark { flex: none; width: 9px; height: 9px; margin-top: 8px; overflow: hidden; background: var(--fulcrum-muted); color: transparent; }
+.status-mark[data-tone="danger"] { background: var(--fulcrum-danger); }
+.render-failure-copy { min-width: 0; }
+.render-failure h2 { font-size: 16px; line-height: 1.4; text-wrap: balance; }
+.render-failure p { margin-top: 6px; color: var(--fulcrum-fg); font-size: 14px; text-wrap: pretty; }
+.render-failure-message { overflow-wrap: anywhere; font-size: 12px; }
+.render-failure .primary { min-height: 40px; margin-top: 16px; }
+
 /* Header: brand, the run's title, and the run's two actions. Its content sits on the transcript's measure. */
 .topbar { display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 6px max(var(--gutter), (100% - var(--measure)) / 2); border-bottom: 1px solid var(--fulcrum-border); }
 .brand { display: flex; flex: none; align-items: center; gap: 8px; padding-right: 12px; border-right: 1px solid var(--fulcrum-border); }
@@ -377,10 +387,14 @@ button:active:not(:disabled) { transform: scale(0.97); }
   .model-picker [role="listbox"] { right: auto; left: 0; }
 }
 @media (max-width: 420px) {
-  .topbar { flex-wrap: wrap; }
-  .new-run { margin-left: auto; }
-  .topbar .run-title { order: 2; flex: 0 0 100%; }
-  .topbar-yolo { order: 3; }
+  .topbar { flex-wrap: nowrap; gap: 4px; }
+  .topbar .brand { display: none; }
+  .topbar .run-title { order: initial; flex: 1 1 auto; }
+  .topbar .children-button { padding-inline: 4px; }
+  .topbar .settings-menu > button { width: var(--control); padding: 0; font-size: 0; }
+  .topbar .settings-menu > button::after { content: "•••"; font-size: 12px; letter-spacing: 1px; }
+  .new-run { margin-left: 0; }
+  .topbar-yolo { order: initial; }
   .settings-popover { position: fixed; top: 56px; right: 12px; left: 12px; width: auto; }
   .permissions-popover { position: fixed; right: 12px; bottom: 72px; left: 12px; width: auto; max-height: calc(100dvh - 92px); }
   .dock .composer-tools { flex-wrap: wrap; justify-content: flex-start; }

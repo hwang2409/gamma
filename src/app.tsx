@@ -17,6 +17,7 @@ import { artifactContentUrl, hostBindings, useArtifacts } from "./host-client";
 import type { Artifact } from "./host/types";
 import { createCommandController, createUnavailableCommandController, isSlashCommandText, type ClientActionName, type ComposerAction } from "./commands";
 import { createReceiptStore, type ReceiptStore } from "./receipts";
+import { RenderErrorBoundary } from "./error-boundary";
 import { createApprovalDecider, pendingApprovals } from "./approvals";
 import { createClientActions, createLocalActions, type ActionReceipt } from "./client-actions";
 import { alwaysAllowed as getAlwaysAllowed, markAlwaysAllowed, subscribeAlwaysAllowed } from "./always-allowed";
@@ -191,6 +192,12 @@ const initialEntry = (): BrowserEntry => {
   return entry;
 };
 
+function TestRenderError({ area }: { area: "app" | "transcript" | "composer" }) {
+  if (!import.meta.env.DEV) return null;
+  if (new URL(location.href).searchParams.get("__gamma_render_error") !== area) return null;
+  throw new Error(`planted ${area} render error`);
+}
+
 export function App() {
   const [theme, setTheme] = useTheme();
   const [vim, setVim] = useVimSetting();
@@ -317,6 +324,7 @@ export function App() {
           <RetryTurn value={retryTurn}>
             <ResendDelivery value={resendDelivery}>
             <div className="app">
+              <TestRenderError area="app" />
               <header className="topbar">
                 <span className="brand"><span className="brand-mark" aria-hidden="true" /><span className="brand-name">gamma</span></span>
                 <RunTitle session={view.session} blank={!view.selected} opening={Boolean(view.opening)} />
@@ -330,7 +338,9 @@ export function App() {
               </header>
               <main ref={childRoute.parentRef} className="main" tabIndex={-1}>
                 {landedNotice ? <div className="landed-notice" role="status">your message started run {landedNotice.runId} <button type="button" className="ghost" onClick={() => { runState.dismissNotice(); selectRun(landedNotice.runId); }}>open</button><button type="button" className="ghost" onClick={() => runState.dismissNotice()}>dismiss</button></div> : null}
-                {browserEntry.child ? childController && attachedOwner ? <ChildView key={`${attachedOwner}:${browserEntry.child}`} owner={attachedOwner} runId={browserEntry.child} controller={childController} snapshot={childSnapshot} historyAvailable={client?.features.includes(CHILD_RUN_HISTORY_FEATURE) ?? null} canSend={childRoute.canSend} onBack={childRoute.closeChild} /> : <section className="child-view" aria-label="child run"><button type="button" className="ghost child-back" onClick={childRoute.closeChild}>back to parent run</button><p className="note" data-tone="busy" role="status">connecting to the parent run…</p></section> : <Body state={state} view={view} connection={connection} runs={runs} onNewRun={newRun} onSelectRun={selectRun} followRequest={followRequest} />}
+                <RenderErrorBoundary className="run-render-failure" focusMode="transcript" title="run view broke" description="your draft is safe below. switch runs or reload gamma." resetKey={`${browserEntry.run}:${browserEntry.child ?? ""}`}>
+                  {browserEntry.child ? childController && attachedOwner ? <ChildView key={`${attachedOwner}:${browserEntry.child}`} owner={attachedOwner} runId={browserEntry.child} controller={childController} snapshot={childSnapshot} historyAvailable={client?.features.includes(CHILD_RUN_HISTORY_FEATURE) ?? null} canSend={childRoute.canSend} onBack={childRoute.closeChild} /> : <section className="child-view" aria-label="child run"><button type="button" className="ghost child-back" onClick={childRoute.closeChild}>back to parent run</button><p className="note" data-tone="busy" role="status">connecting to the parent run…</p></section> : <Body state={state} view={view} connection={connection} runs={runs} onNewRun={newRun} onSelectRun={selectRun} followRequest={followRequest} />}
+                </RenderErrorBoundary>
                 {!browserEntry.child ? <Dock key={browserEntry.run} autoFocus={!suppressComposerFocus} runId={browserEntry.run} runState={runState} onCreated={onCreated} onAccepted={() => setFollowRequest((request) => request + 1)} deliveries={deliveries} receipts={receipts} state={state} view={view} connection={connection} runs={runs} vim={vim} setVim={setVim} theme={theme} setTheme={setTheme} onNewRun={newRun} onRetryTurn={setRetryTurn} onImageOpen={openViewer} /> : null}
                 {childRoute.catalogOpen && childController && attachedOwner ? <ChildCatalog owner={attachedOwner} controller={childController} snapshot={childSnapshot.catalog} onOpen={childRoute.openChild} onClose={childRoute.closeCatalog} /> : null}
                 {viewer ? <Inspector value={viewer} onClose={closeViewer} /> : null}
@@ -562,8 +572,8 @@ function dockPhase(state: ConnectionState, opening: boolean, open: OpenRun | nul
 
 function DockComposer({ autoFocus, readOnly, blockedReason, blockedStatic, settingsReason, running, vim, commands, onSubmit, onPreparationFailure, onStop, onImageOpen, onFileInput, client, deliveries, sessionId, runState, runId, createdWithDefault, planMode, grants, permissionsOpenRequest }: { autoFocus: boolean; readOnly: string | null; blockedReason: string | null; blockedStatic: boolean; settingsReason?: string; running: boolean; vim: boolean; commands: ReturnType<typeof createUnavailableCommandController>; onSubmit: Submit; onPreparationFailure(error: unknown, images: readonly import("./image-queue").QueuedImage[], text: string): void; onStop(): Promise<unknown>; onImageOpen(block: any): void; onFileInput(input: HTMLInputElement | null): void; client: ZetaClient | null; deliveries: DeliveryManager; sessionId: string | null; runState: RunStateStore; runId: string; createdWithDefault: boolean; planMode: boolean; grants: SessionGrantsModel | null; permissionsOpenRequest: number }) {
   const permissions = grants ? <PermissionsControl model={grants} openRequest={permissionsOpenRequest} /> : null;
-  if (readOnly !== null) return <GammaComposer state="read-only" reason={readOnly} vim={vim} commands={commands} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onImageOpen={onImageOpen} onFileInput={onFileInput} store={runState} runId={runId} footer={permissions} />;
-  return <GammaComposer state={running ? "steerable" : "idle"} blockedReason={blockedReason ?? undefined} blockedStatic={blockedStatic} vim={vim} commands={commands} autoFocus={autoFocus} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onStop={running ? onStop : undefined} onImageOpen={onImageOpen} onFileInput={onFileInput} store={runState} runId={runId} footer={<>{planMode ? <span className="plan-chip" aria-label="plan mode: on">plan</span> : null}<RunSettings available={Boolean(client)} disabledReason={settingsReason} deliveries={deliveries} sessionId={sessionId} createdWithDefault={createdWithDefault} running={running} store={runState} runId={runId} />{permissions}</>} />;
+  if (readOnly !== null) return <><TestRenderError area="composer" /><GammaComposer state="read-only" reason={readOnly} vim={vim} commands={commands} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onImageOpen={onImageOpen} onFileInput={onFileInput} store={runState} runId={runId} footer={permissions} /></>;
+  return <><TestRenderError area="composer" /><GammaComposer state={running ? "steerable" : "idle"} blockedReason={blockedReason ?? undefined} blockedStatic={blockedStatic} vim={vim} commands={commands} autoFocus={autoFocus} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onStop={running ? onStop : undefined} onImageOpen={onImageOpen} onFileInput={onFileInput} store={runState} runId={runId} footer={<>{planMode ? <span className="plan-chip" aria-label="plan mode: on">plan</span> : null}<RunSettings available={Boolean(client)} disabledReason={settingsReason} deliveries={deliveries} sessionId={sessionId} createdWithDefault={createdWithDefault} running={running} store={runState} runId={runId} />{permissions}</>} /></>;
 }
 
 
@@ -775,6 +785,7 @@ function Run({ client, open, readOnly, followRequest }: { client: ZetaClient | n
   }, [alwaysAllowed, client, open.lease.store, open.stale, readOnly]);
   return (
     <Decisions.Provider value={decisions}>
+      <TestRenderError area="transcript" />
       <ImageViewer.Provider value={openViewer}>
         <Artifacts.Provider value={artifacts}>
           <div ref={scroll} className="scroll" tabIndex={-1} data-stale={open.stale || undefined} data-run-ready={readOnly ? undefined : "true"}>

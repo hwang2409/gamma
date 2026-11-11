@@ -174,16 +174,22 @@ const draftImage = (url: string) => ({ name: `${url}.png`, mime_type: "image/png
 test("mergeDrafts combines different text and deduplicates equal attachment content", () => {
   const cachedShared = draftImage("blob:cached-shared");
   const currentShared = { ...cachedShared, url: "blob:current-shared" };
-  const merged = RunState.mergeDrafts(
-    { text: "cached full-id draft", attachments: [draftImage("blob:full"), cachedShared] },
-    { text: "prefix draft", attachments: [currentShared, draftImage("blob:prefix")] },
-  );
-  expect(merged.text).toBe("cached full-id draft\n\nprefix draft");
-  expect(merged.attachments.map(({ url }) => url)).toEqual(["blob:full", "blob:cached-shared", "blob:prefix"]);
-  expect(RunState.mergeDrafts(
-    { text: "", attachments: [draftImage("blob:first")] },
-    { text: "", attachments: [{ ...draftImage("blob:first"), data: "different" }] },
-  ).attachments.map(({ url }) => url)).toEqual(["blob:first", "blob:first"]);
+  const revoked: string[] = [];
+  const revoke = URL.revokeObjectURL;
+  URL.revokeObjectURL = (url) => { revoked.push(url); };
+  try {
+    const merged = RunState.mergeDrafts(
+      { text: "cached full-id draft", attachments: [draftImage("blob:full"), cachedShared] },
+      { text: "prefix draft", attachments: [currentShared, { ...cachedShared }, draftImage("blob:prefix")] },
+    );
+    expect(merged.text).toBe("cached full-id draft\n\nprefix draft");
+    expect(merged.attachments.map(({ url }) => url)).toEqual(["blob:full", "blob:cached-shared", "blob:prefix"]);
+    expect(revoked).toEqual(["blob:current-shared"]);
+    expect(RunState.mergeDrafts(
+      { text: "", attachments: [draftImage("blob:first")] },
+      { text: "", attachments: [{ ...draftImage("blob:first"), data: "different" }] },
+    ).attachments.map(({ url }) => url)).toEqual(["blob:first", "blob:first"]);
+  } finally { URL.revokeObjectURL = revoke; }
 });
 
 test("mergeDrafts keeps one equal or non-empty draft without a separator", () => {

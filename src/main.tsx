@@ -6,5 +6,10 @@ import "@fulcrum/mermaid/styles.css";
 import "./app.css";
 import { createRoot } from "react-dom/client";
 import { App } from "./app";
+import { RenderErrorBoundary } from "./error-boundary";
 
-createRoot(document.getElementById("root")!).render(<App />);
+createRoot(document.getElementById("root")!).render(
+  <RenderErrorBoundary title="something broke" description="gamma could not draw this page. reload to continue.">
+    <App />
+  </RenderErrorBoundary>,
+);
