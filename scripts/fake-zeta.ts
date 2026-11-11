@@ -125,6 +125,8 @@ function invalidParams(method: string, checks: ParamChecks | undefined, params: 
 }
 
 const SETTINGS_REQUESTS = ["model_catalog", "session_settings", "set_settings", "send_images"];
+// Zeta origin/main src/zeta/server/protocol.py:277-348, 372-374: observers receive only Access.READ methods.
+const OBSERVER_READABLE = new Set(["status", "session_tree", "session_history", "child_run_history", "model_catalog", "session_settings", "delivery_status", "session_grants"]);
 
 // Opaque command inputs by id. Zeta echoes an opaque input's display_text, the typed command line, as the user
 // message (zeta dcc4ce9 src/zeta/core/slash.py:767 display_text=value; src/zeta/server/delivery.py:107-108).
@@ -815,9 +817,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           const reconnect = features.includes("approval_reconnect");
           if (reconnect) reconnectControllers.add(socket as object);
           const advertised = protocolVersion === "1.0" ? ["list_sessions", "new_session", "resume", "send", "steer", "approve", "deny", "abort", "status"] : ["status", "approve", "deny", "rename_session", "session_tree", "switch_branch", "slash_list", "slash_run", ...(sessionGrants ? ["session_grants", "revoke_session_grants"] : []), "child_run_list", "child_run_send", "child_run_history", ...(settingsEnabled ? ["model_catalog", "session_settings", "set_settings", "send_images", ...(advertiseNewSessionSettings ? ["new_session_settings"] : [])] : []), ...extraRequests];
-          // Zeta origin/main src/zeta/server/protocol.py:277-348, 372-374: observers receive only Access.READ methods.
-          const observerReadable = new Set(["status", "session_tree", "session_history", "child_run_history", "model_catalog", "session_settings", "delivery_status", "session_grants"]);
-          const offered = advertised.filter((name) => !omittedRequests.has(name) && (socket.data.role === "controller" || observerReadable.has(name)));
+          const offered = advertised.filter((name) => !omittedRequests.has(name) && (socket.data.role === "controller" || OBSERVER_READABLE.has(name)));
           reply({ result: { ...extraHelloFields, protocol_version: protocolVersion, server: "fake-zeta", capabilities: protocolVersion === "1.0" ? { requests: offered, notifications: ["event"] } : { features, requests: offered } } });
           if (decide && !approvalAborted) {
             if (!reconnect) expireApproval();
@@ -829,6 +829,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           }
           return;
         }
+        if (socket.data.role === "observer" && !OBSERVER_READABLE.has(method)) return reply({ error: { code: -32008, message: "observer is read-only" } });
         // zeta lists the settings requests under hello's `requests`; an older zeta does not know them.
         // delivery_status needs the delivery_id feature itself (zeta 169fb144 src/zeta/server/protocol.py:301, :553-554).
         if (omittedRequests.has(method) || (!settingsEnabled && SETTINGS_REQUESTS.includes(method)) || (method === "delivery_status" && !socket.data.features?.includes("delivery_id"))) return reply({ error: { code: -32601, message: `method not found: ${method}` } });

@@ -151,44 +151,37 @@ export function createConnection({
     // An origin the allowlist lacks fails at the upgrade with no detail, so name it before trying.
     if (discovery.origins.length && !discovery.origins.includes(origin))
       return send({ type: "auth_failed", reason: "origin", origins: discovery.origins, now: now() });
-    let next: ZetaClient;
-    let authority = desiredRole;
-    let timedOut = false;
-    const open = async (role: ZetaRole) => {
-      timedOut = false;
+    type OpenResult = { kind: "connected"; client: ZetaClient } | { kind: "busy" } | { kind: "unresponsive" } | { kind: "version_mismatch" } | { kind: "rejected" };
+    const openRole = async (role: ZetaRole): Promise<OpenResult> => {
+      let timedOut = false;
       let closePending = () => {};
       let connectTimeout: ReturnType<typeof setTimeout> | undefined;
       try {
-        return await Promise.race([
+        const opened = await Promise.race([
           connect(discovery, role, (close) => { closePending = close; }).then((value) => { if (timedOut) value.close(); return value; }),
           new Promise<never>((_, reject) => { connectTimeout = setTimeout(() => { timedOut = true; closePending(); reject(new Error("hello timeout")); }, helloTimeoutMs); }),
         ]);
+        return { kind: "connected", client: opened };
+      } catch (error) {
+        if (timedOut) return { kind: "unresponsive" };
+        const kind = error instanceof ZetaError ? error.kind : "connect_failed";
+        return { kind: kind === "busy" || kind === "version_mismatch" ? kind : "rejected" };
       } finally { clearTimeout(connectTimeout); }
     };
-    try {
-      next = await open(authority);
-    } catch (error) {
-      if (!current()) return;
-      if (timedOut) return send({ type: "unresponsive", now: now() });
-      const kind = error instanceof ZetaError ? error.kind : "connect_failed";
-      if (kind === "busy" && authority === "controller") {
-        desiredRole = authority = "observer";
-        try { next = await open(authority); }
-        catch (observerError) {
-          if (!current()) return;
-          if (timedOut) return send({ type: "unresponsive", now: now() });
-          const observerKind = observerError instanceof ZetaError ? observerError.kind : "connect_failed";
-          if (observerKind === "busy") return send({ type: "observer_limit", now: now() });
-          if (observerKind === "version_mismatch") return send({ type: "incompatible", now: now() });
-          return send({ type: "auth_failed", reason: "rejected", origins: discovery.origins, now: now() });
-        }
-      } else {
-        if (kind === "busy") return send({ type: "observer_limit", now: now() });
-        if (kind === "version_mismatch") return send({ type: "incompatible", now: now() });
-        // The process runs and the origin is allowed, so a refused upgrade means the token was refused.
-        return send({ type: "auth_failed", reason: "rejected", origins: discovery.origins, now: now() });
-      }
+    let authority = desiredRole;
+    let opened = await openRole(authority);
+    if (!current()) return opened.kind === "connected" ? opened.client.close() : undefined;
+    if (opened.kind === "busy" && authority === "controller") {
+      desiredRole = authority = "observer";
+      opened = await openRole(authority);
+      if (!current()) return opened.kind === "connected" ? opened.client.close() : undefined;
     }
+    if (opened.kind === "busy") return send({ type: "observer_limit", now: now() });
+    if (opened.kind === "unresponsive") return send({ type: "unresponsive", now: now() });
+    if (opened.kind === "version_mismatch") return send({ type: "incompatible", now: now() });
+    // The process runs and the origin is allowed, so a refused upgrade means the token was refused.
+    if (opened.kind === "rejected") return send({ type: "auth_failed", reason: "rejected", origins: discovery.origins, now: now() });
+    const next = opened.client;
     if (!current()) return next.close();
     client = next;
     next.onClose(() => {
