@@ -309,7 +309,7 @@ export function App() {
     setBrowserChild(undefined);
   }, [browserEntry.gammaEntryId, browserEntry.run]);
   const childRoute = useChildRoute({
-    client,
+    client: state.phase === "connected" && state.authority === "controller" ? writeClient : client,
     authority: state.phase === "connected" ? state.authority : "controller",
     owner: attachedOwner,
     child: browserEntry.child,

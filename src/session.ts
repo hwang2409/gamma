@@ -91,6 +91,7 @@ export async function openSession(
   registration?: Registration,
   onReplay?: () => void,
   authority: "controller" | "observer" = "controller",
+  writeClient: ZetaClient = client,
 ): Promise<OpenResult> {
   if (client.features.includes("session_replay_seq")) throw new Error("session_replay_seq needs the sequence replay coordinator");
   const approvalReconnect = client.features.includes("approval_reconnect");
@@ -182,12 +183,12 @@ export async function openSession(
   if (authority === "observer") {
     initialStatus = before.session?.session_id === id ? before : { session: null, state: "idle", pending_approvals: [] };
   } else if (registration) {
-    const resumed = await client.request("resume", { session_id: id, host_commands: [registration.command] }, { timeoutMs: 30_000, signal }) as { session?: SessionMeta };
+    const resumed = await writeClient.request("resume", { session_id: id, host_commands: [registration.command] }, { timeoutMs: 30_000, signal }) as { session?: SessionMeta };
     id = resumed.session?.session_id ?? id;
     initialStatus = before.session?.session_id === id ? before : { session: resumed.session ?? null, state: "idle", pending_approvals: [] };
   } else if (before.session?.session_id === id) initialStatus = before;
   else {
-    const resumed = await client.request("resume", { session_id: id }, { timeoutMs: 30_000, signal }) as { session?: SessionMeta };
+    const resumed = await writeClient.request("resume", { session_id: id }, { timeoutMs: 30_000, signal }) as { session?: SessionMeta };
     id = resumed.session?.session_id ?? id;
     initialStatus = { session: resumed.session ?? null, state: "idle", pending_approvals: [] };
   }
@@ -354,10 +355,13 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
       // fulcrum refuses a second replay of a session until the aborted one unwinds (back then forward during an open).
       const prior = replays.get(effect.runId);
       if (prior) { await prior; if (!live(target) || !current(effect.runId, effect.operationId)) return; }
+      const currentAuthority = authority();
+      const writer = currentAuthority === "controller" ? writes.get() : target;
+      if (!writer) throw new Error("not connected to zeta serve");
       const attempt = openSession(target, effect.runId, (messages, complete) => {
         history = { messages, complete };
         runs.dispatch({ type: "OPEN_PROGRESS", runId: effect.runId, operationId: effect.operationId, messages });
-      }, abort.signal, initialStatus, registration, replaced, authority());
+      }, abort.signal, initialStatus, registration, replaced, currentAuthority, writer);
       const settled = attempt.then(() => {}, () => {}).finally(() => { if (replays.get(effect.runId) === settled) replays.delete(effect.runId); });
       replays.set(effect.runId, settled);
       const opened = await attempt;

@@ -17,7 +17,7 @@ export function createWriteClient(current: () => ClientState): WriteClient {
   const authorized = () => {
     const state = current();
     if (state.authority === "observer") throw new ObserverWriteError();
-    return state.client;
+    return state.authority === "controller" ? state.client : null;
   };
   const facade = new Proxy({} as ZetaClient, {
     get(_target, property) {
