@@ -11,7 +11,7 @@ import type { ServerWebSocket } from "bun";
 import { completeSlashCatalog, defaultSlashCatalog } from "./fake-slash-catalog";
 
 type Json = Record<string, unknown>;
-export type Mode = "ok" | "busy" | "incompatible" | "slow" | "slow-catalog" | "broken-session";
+export type Mode = "ok" | "busy" | "controller-busy" | "observer-limit" | "incompatible" | "slow" | "slow-catalog" | "broken-session";
 export type HistoryMode = "new" | "old";
 export type ApprovalHistoryMode = "advertised-with-rows" | "not-advertised-with-rows" | "not-advertised-without-rows";
 
@@ -803,17 +803,21 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         const send = ({ required_feature: feature, ...event }: Json) => { for (const each of sockets) if (!feature || each.data.features?.includes(String(feature))) each.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: event })); };
         if (method === "hello") {
           if (params.role !== socket.data.role) { reply({ error: { code: -32602, message: `credential permits ${socket.data.role} role only` } }); socket.close(); return; }
-          if (mode === "busy" || (socket.data.role === "controller" && controller !== null)) { socket.send(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "server busy" } })); socket.close(); return; }
+          // Zeta origin/main docs/serve-protocol.md:134-143, 289-293: -32001 refuses a controller when its slot is occupied
+          // and refuses an observer when the observer limit is reached. The requested role, not the message, identifies which.
+          if (mode === "busy" || mode === "observer-limit" || (socket.data.role === "controller" && (mode === "controller-busy" || controller !== null))) { socket.send(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "server busy" } })); socket.close(); return; }
           if (mode === "incompatible") { reply({ error: { code: -32002, message: "version mismatch", data: { requested: "1.2", supported: ["1.0"] } } }); socket.close(); return; }
           if (mode === "slow") await wait(helloDelay);
           if (!sockets.has(socket)) return;
           if (socket.data.role === "controller") controller = socket;
-          const features = protocolVersion === "1.0" ? [] : (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "send_images_delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || name === "served_turn_end" || name === "session_history_fidelity" || name === "delivery_session_guard" || (name === "model_input_ids" && modelInputIds) || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings) || (name === "session_grants" && sessionGrants) || name === "child_runs" || (name === "child_run_history" && childRunHistoryEnabled)) ?? [];
+          const features = protocolVersion === "1.0" ? [] : (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "send_images_delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || name === "served_turn_end" || name === "session_history_fidelity" || name === "delivery_session_guard" || (name === "model_input_ids" && modelInputIds) || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings) || (name === "session_grants" && sessionGrants) || name === "child_runs" || name === "serve_observers" || (name === "child_run_history" && childRunHistoryEnabled)) ?? [];
           socket.data.features = features;
           const reconnect = features.includes("approval_reconnect");
           if (reconnect) reconnectControllers.add(socket as object);
           const advertised = protocolVersion === "1.0" ? ["list_sessions", "new_session", "resume", "send", "steer", "approve", "deny", "abort", "status"] : ["status", "approve", "deny", "rename_session", "session_tree", "switch_branch", "slash_list", "slash_run", ...(sessionGrants ? ["session_grants", "revoke_session_grants"] : []), "child_run_list", "child_run_send", "child_run_history", ...(settingsEnabled ? ["model_catalog", "session_settings", "set_settings", "send_images", ...(advertiseNewSessionSettings ? ["new_session_settings"] : [])] : []), ...extraRequests];
-          const offered = advertised.filter((name) => !omittedRequests.has(name));
+          // Zeta origin/main src/zeta/server/protocol.py:277-348, 372-374: observers receive only Access.READ methods.
+          const observerReadable = new Set(["status", "session_tree", "session_history", "child_run_history", "model_catalog", "session_settings", "delivery_status", "session_grants"]);
+          const offered = advertised.filter((name) => !omittedRequests.has(name) && (socket.data.role === "controller" || observerReadable.has(name)));
           reply({ result: { ...extraHelloFields, protocol_version: protocolVersion, server: "fake-zeta", capabilities: protocolVersion === "1.0" ? { requests: offered, notifications: ["event"] } : { features, requests: offered } } });
           if (decide && !approvalAborted) {
             if (!reconnect) expireApproval();

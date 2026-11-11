@@ -41,6 +41,21 @@ const texts = (store: ReturnType<typeof createClient>["store"]) => items(store).
   return [];
 });
 const idleStatus = { session: { session_id: "s", created_at: "", updated_at: "" }, state: "idle", pending_approvals: [] } as const;
+
+test("an observer reads history without resuming the session", async () => {
+  const fake = await server((method) => {
+    if (method === "status") return idleStatus;
+    if (method === "resume") return { session: idleStatus.session };
+    if (method === "session_history") return { messages: [row("saved", "assistant", "saved observer history")], next_offset: null };
+    throw new Error(method);
+  });
+
+  const opened = await openSession(fake.client, "other", undefined, undefined, undefined, undefined, undefined, "observer" as any);
+  await opened.complete;
+
+  expect(fake.calls.filter(([method]) => method === "resume")).toHaveLength(0);
+  expect(texts(opened.lease.store)).toContain("saved observer history");
+});
 const within = async <T>(promise: Promise<T>, name: string, ms = 10_000): Promise<T> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {

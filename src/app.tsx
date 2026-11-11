@@ -263,8 +263,9 @@ export function App() {
   const closeViewer = useCallback(() => { setViewer(null); requestAnimationFrame(() => viewerOpener.current?.focus()); }, []);
   const deliveryStates = selectedRecord.deliveries;
   useEffect(() => {
-    deliveries.observeActive(view.active, state.phase === "connected");
-    if (state.phase === "connected" && view.attached) void deliveries.reconcile(view.attached);
+    const controls = state.phase === "connected" && state.authority === "controller";
+    deliveries.observeActive(view.active, controls);
+    if (controls && view.attached) void deliveries.reconcile(view.attached);
   }, [deliveries, state.phase, view.active, view.attached]);
   const newRun = useCallback(() => {
     const next = { gammaEntryId: entryId(), run: draftId() };
@@ -303,7 +304,7 @@ export function App() {
   }, [browserEntry.gammaEntryId, browserEntry.run]);
   const childRoute = useChildRoute({
     client,
-    authority: "controller",
+    authority: state.phase === "connected" ? state.authority : "controller",
     owner: attachedOwner,
     child: browserEntry.child,
     canList: client?.features.includes(CHILD_RUNS_FEATURE) ?? false,
@@ -328,9 +329,10 @@ export function App() {
               <header className="topbar">
                 <span className="brand"><span className="brand-mark" aria-hidden="true" /><span className="brand-name">gamma</span></span>
                 <RunTitle session={view.session} blank={!view.selected} opening={Boolean(view.opening)} />
+                {state.phase === "connected" && state.authority === "observer" ? <span className="authority-badge"><span className="authority-mark" aria-hidden="true" />observing</span> : null}
                 {childRoute.canList && attachedOwner ? <button ref={childRoute.childrenButtonRef} type="button" className="ghost children-button" onClick={(event) => childRoute.openCatalog(event.currentTarget)}>{childSnapshot.catalog.reportedAt === null ? "children" : `children ${childSnapshot.catalog.runs.length}${childSnapshot.catalog.nextOffset !== undefined ? "+" : ""}`}</button> : null}
                 <YoloIndicator className="topbar-yolo" />
-                <button type="button" className="ghost new-run" aria-label="new run" onClick={() => void newRun()}><span className="new-run-label">new run</span><span className="new-run-short" aria-hidden="true">+</span></button>
+                {state.phase !== "connected" || state.authority === "controller" ? <button type="button" className="ghost new-run" aria-label="new run" onClick={() => void newRun()}><span className="new-run-label">new run</span><span className="new-run-short" aria-hidden="true">+</span></button> : null}
                 <SettingsMenu>
                   <ThemePicker theme={theme} onChange={setTheme} />
                   <VimToggle on={vim} onChange={setVim} />
@@ -628,7 +630,8 @@ function Dock({ autoFocus, state, view, connection, runs, vim, setVim, theme, se
   const starting = record.lifecycle.kind === "creating";
   const input = runInput(runState.getCatalog(), runId as RunId);
   const sessionId = blank || starting || view.attached !== open?.id ? null : open.id;
-  const grants = useMemo(() => client && sessionId && client.features.includes(SESSION_GRANTS_FEATURE) ? createSessionGrantsModel(client, sessionId) : null, [client, sessionId]);
+  const observer = state.phase === "connected" && state.authority === "observer";
+  const grants = useMemo(() => client && !observer && sessionId && client.features.includes(SESSION_GRANTS_FEATURE) ? createSessionGrantsModel(client, sessionId) : null, [client, observer, sessionId]);
   const [permissionsOpenRequest, setPermissionsOpenRequest] = useState(0);
   useEffect(() => {
     if (!grants) return;
@@ -636,10 +639,10 @@ function Dock({ autoFocus, state, view, connection, runs, vim, setVim, theme, se
     return () => grants.stop();
   }, [grants]);
   const requests = client ? commandRequests(client) : new Set<string>();
-  const commands = useMemo(() => client && sessionId
+  const commands = useMemo(() => client && !observer && sessionId
     ? createCommandController(sessionId, (method, params) => client.request(method, params), { features: new Set(client.features), requests: commandRequests(client), turnActive: () => activeRun(runState.getCatalog()) === sessionId })
-    : createUnavailableCommandController(client ? NEEDS_OPEN_RUN : undefined, Boolean(client && !sessionId)), [client, runState, sessionId]);
-  const approvalDisabledReason = !client ? "reconnecting — decisions are disabled until the server confirms this run" : open?.stale ? "reconnecting — decisions are disabled until the server confirms this run" : present.openError ? "opening the run — decisions are paused" : undefined;
+    : createUnavailableCommandController(observer ? "you are observing this run" : client ? NEEDS_OPEN_RUN : undefined, Boolean(client && !sessionId)), [client, observer, runState, sessionId]);
+  const approvalDisabledReason = observer ? "you are observing this run; decisions are off" : !client ? "reconnecting — decisions are disabled until the server confirms this run" : open?.stale ? "reconnecting — decisions are disabled until the server confirms this run" : present.openError ? "opening the run — decisions are paused" : undefined;
 
   const onSubmit: Submit = useCallback(async (action, images, { steer, deliveryId, sourceText }) => {
     // Without an open run nothing was attempted, so the attachments wait for the message that opens one.
@@ -722,7 +725,7 @@ function Dock({ autoFocus, state, view, connection, runs, vim, setVim, theme, se
   const failure = present.openError;
   const problem = (state.phase !== "connected" && state.phase !== "connecting" && state.phase !== "dropped") || Boolean(failure);
   const phase = dockPhase(state, Boolean(present.opening) || input.block === "opening", open, agent, starting);
-  const readOnly = blank ? null : dockReadOnlyReason(open?.id ?? null, view.active);
+  const readOnly = observer ? "you are observing this run; sending is off" : blank ? null : dockReadOnlyReason(open?.id ?? null, view.active);
   const blockedReason = starting ? null : input.block === "pending" || input.block === "waits-for-active" ? inputBlockText(input.block, view.activeTitle) : connectionBlockedReason(state) ?? inputBlockText(input.block, view.activeTitle);
   const onPreparationFailure = useCallback((error: unknown, images: readonly import("./image-queue").QueuedImage[], text: string) => {
     const attachment = runState.getCatalog().attachment;
@@ -755,12 +758,13 @@ function OpenBody({ state, connection, present, runs, followRequest }: { state: 
   const open = present.open!;
   const failed = present.openError;
   const offline = state.phase !== "connected";
-  return <><>{offline && (state.phase !== "connecting" || state.lastFailure) && state.phase !== "dropped" ? <ConnectionNotice state={state} connection={connection} compact /> : null}</><>{!open.history.complete ? <p className="note" data-tone="busy" role="status">loading history… {open.history.messages.toLocaleString("en")} loaded</p> : null}</><>{open.syncing ? <p className="note" data-tone="busy" role="status">live updates paused while this run is busy; it will catch up</p> : null}</><>{failed ? <div className="note" data-tone={failed.busy ? "busy" : "danger"} role="alert"><span>{failed.busy ? `this run waits while ${present.active ?? "another run"} has the active zeta turn` : `could not reopen this run: ${failed.message}`}</span> <button type="button" className="ghost" onClick={() => runs.dismissOpenError(failed.id)}>dismiss</button> <button type="button" className="ghost" onClick={() => runs.retryOpen(failed.id)}>try again</button></div> : null}</><Run client={offline ? null : connection.client} open={open} readOnly={Boolean(failed)} followRequest={followRequest} /></>;
+  return <><>{offline && (state.phase !== "connecting" || state.lastFailure) && state.phase !== "dropped" ? <ConnectionNotice state={state} connection={connection} compact /> : null}</><>{!open.history.complete ? <p className="note" data-tone="busy" role="status">loading history… {open.history.messages.toLocaleString("en")} loaded</p> : null}</><>{open.syncing ? <p className="note" data-tone="busy" role="status">live updates paused while this run is busy; it will catch up</p> : null}</><>{failed ? <div className="note" data-tone={failed.busy ? "busy" : "danger"} role="alert"><span>{failed.busy ? `this run waits while ${present.active ?? "another run"} has the active zeta turn` : `could not reopen this run: ${failed.message}`}</span> <button type="button" className="ghost" onClick={() => runs.dismissOpenError(failed.id)}>dismiss</button> <button type="button" className="ghost" onClick={() => runs.retryOpen(failed.id)}>try again</button></div> : null}</><Run client={offline ? null : connection.client} open={open} readOnly={Boolean(failed)} observer={state.phase === "connected" && state.authority === "observer"} followRequest={followRequest} /></>;
 }
 function Body({ state, view, connection, runs, onNewRun, onSelectRun, followRequest }: { state: ConnectionState; view: RunState; connection: Connection; runs: SessionManager; onNewRun(): void; onSelectRun(id: string): void; followRequest: number }) {
   const present = view;
   const offline = state.phase !== "connected";
-  const ownerActions = present.active ? <div className="actions"><button type="button" className="primary" onClick={() => onSelectRun(present.active!)}>go to running run</button><button type="button" className="ghost" onClick={() => connection.client && void stopTurn(connection.client)}>stop running run</button></div> : null;
+  const observer = state.phase === "connected" && state.authority === "observer";
+  const ownerActions = present.active ? <div className="actions"><button type="button" className="primary" onClick={() => onSelectRun(present.active!)}>go to running run</button>{observer ? null : <button type="button" className="ghost" onClick={() => connection.client && void stopTurn(connection.client)}>stop running run</button>}</div> : null;
   if (present.open) return <OpenBody state={state} connection={connection} present={present} runs={runs} followRequest={followRequest} />;
   if (offline && (state.phase !== "connecting" || state.lastFailure) && state.phase !== "dropped") return <div className="scroll"><ConnectionNotice state={state} connection={connection} /></div>;
   if (present.opening) return <div className="scroll"><Panel title="opening the run" tone="busy"><p>{present.active ? `this run waits while ${present.active} has the active zeta turn` : !present.opening.loading ? "waiting for zeta to attach this run" : `loading history${present.opening.messages ? ` · ${present.opening.messages.toLocaleString("en")} messages` : ""}`}</p>{ownerActions}</Panel></div>;
@@ -769,7 +773,7 @@ function Body({ state, view, connection, runs, onNewRun, onSelectRun, followRequ
   return <div className="scroll"><div className="empty-run" role="note"><h2>start a conversation</h2><p>write below to start. zeta creates the run when you send the first message.</p></div></div>;
 }
 
-function Run({ client, open, readOnly, followRequest }: { client: ZetaClient | null; open: OpenRun; readOnly: boolean; followRequest: number }) {
+function Run({ client, open, readOnly, observer, followRequest }: { client: ZetaClient | null; open: OpenRun; readOnly: boolean; observer: boolean; followRequest: number }) {
   const scroll = useRef<HTMLDivElement>(null);
   const [jumpLane, setJumpLane] = useState<HTMLDivElement | null>(null);
   const artifacts = useArtifacts(open.id, open.lease.store);
@@ -779,10 +783,10 @@ function Run({ client, open, readOnly, followRequest }: { client: ZetaClient | n
   const closeViewer = useCallback(() => { setViewer(null); requestAnimationFrame(() => viewerOpener.current?.focus()); }, []);
   const alwaysAllowed = useSyncExternalStore((listener) => subscribeAlwaysAllowed(open.id, listener), () => getAlwaysAllowed(open.id));
   const decisions = useMemo(() => {
-    if (!client || open.stale || readOnly) return { disabledReason: readOnly ? "opening the run — decisions are paused" : "reconnecting — decisions are disabled until the server confirms this run" };
+    if (!client || open.stale || readOnly || observer) return { disabledReason: observer ? "you are observing this run; decisions are off" : readOnly ? "opening the run — decisions are paused" : "reconnecting — decisions are disabled until the server confirms this run" };
     const decide = createApprovalDecider(client, open.lease.store);
     return { approve: (requestId: string) => decide("approve", requestId), always: (requestId: string) => decide("approve", requestId, true), deny: (requestId: string) => decide("deny", requestId), alwaysAllowed, markAlways: (toolId: string) => markAlwaysAllowed(open.id, toolId) };
-  }, [alwaysAllowed, client, open.lease.store, open.stale, readOnly]);
+  }, [alwaysAllowed, client, observer, open.lease.store, open.stale, readOnly]);
   return (
     <Decisions.Provider value={decisions}>
       <TestRenderError area="transcript" />
@@ -898,7 +902,8 @@ function formatConnectionNotice(state: ConnectionState, command: string) {
     case "not_running": return { title: lost ? "connection lost: zeta serve stopped" : "zeta serve is not running", tone: "danger", detail: "start zeta serve", copy: true, body: <><p>start it with this page's origin in the allowlist. this page connects as soon as it is up.</p><Copy value={command} /></> };
     case "auth_failed": return { title: "auth failed", tone: "danger", detail: state.reason === "origin" ? "this page origin is not allowed" : "controller credential refused; restart zeta serve", copy: true, body: state.reason === "origin" ? <><p>zeta serve does not allow this page's origin <code>{location.origin}</code>. restart it with this origin:</p><Copy value={command} /></> : <><p>zeta serve refused this controller credential. restart zeta serve so the dev server can hand gamma the new credential:</p><Copy value={command} /></> };
     case "unresponsive": return { title: "zeta serve did not answer", tone: "danger", detail: "hello did not finish within 15 seconds", body: <p>the server accepted the socket but did not finish hello within 15 seconds. check its terminal, then retry.</p> };
-    case "busy": return { title: "zeta serve is in use", tone: "warn", detail: "another client has the controller", body: <p>zeta serve accepts one client at a time. close the other client (another tab, the playground, or the zeta app) and this page takes over.</p> };
+    case "busy": return { title: "zeta serve is in use", tone: "warn", detail: "another client has the controller", body: <p>zeta serve accepts one controller at a time. close the other controller, then retry.</p> };
+    case "observer_limit": return { title: "observer limit reached", tone: "warn", detail: "zeta serve has no observer slot available", body: <p>close another observer, then retry.</p> };
     case "incompatible": return { title: "unsupported protocol version", tone: "danger", detail: "zeta serve does not speak protocol 1.2; update zeta", body: <><p>gamma requires zeta protocol 1.2, but the server rejected that version. update zeta, then reload this page to retry.</p><button type="button" className="ghost" onClick={() => location.reload()}>reload and retry</button></> };
   }
 }
@@ -906,9 +911,9 @@ function formatConnectionNotice(state: ConnectionState, command: string) {
 function ConnectionNotice({ state, connection, compact = false }: { state: ConnectionState; connection: Connection; compact?: boolean }) {
   const wait = useCountdown("retryAt" in state ? state.retryAt : null);
   const command = serveCommand(location.origin, connection.port);
-  const retry = wait === null ? null : (
+  const retry = wait === null && state.phase !== "observer_limit" ? null : (
     <div className="actions">
-      <span className="wait" aria-live="off">{wait > 0 ? `retrying in ${wait}s` : "retrying"}</span>
+      {wait !== null ? <span className="wait" aria-live="off">{wait > 0 ? `retrying in ${wait}s` : "retrying"}</span> : null}
       <button type="button" className="primary" onClick={() => connection.retryNow()}>retry now</button>
     </div>
   );
@@ -920,7 +925,7 @@ function ConnectionNotice({ state, connection, compact = false }: { state: Conne
         <strong>{notice.title}</strong>
         <span>{notice.detail}</span>
         <span className="wait">{wait === null ? "" : wait > 0 ? `retrying in ${wait}s` : "retrying"}</span>
-        {wait !== null ? <button type="button" className="ghost" onClick={() => connection.retryNow()}>retry now</button> : null}
+        {wait !== null || state.phase === "observer_limit" ? <button type="button" className="ghost" onClick={() => connection.retryNow()}>retry now</button> : null}
         {notice.copy ? <Copy value={command} /> : null}
       </div>
     );

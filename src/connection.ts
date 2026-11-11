@@ -1,4 +1,4 @@
-import { createClient, discoverZeta, webSocketTransport, ZetaError, type ZetaClient, type ZetaDiscovery } from "@fulcrum/zeta";
+import { createClient, discoverZeta, webSocketTransport, ZetaError, type ZetaClient, type ZetaDiscovery, type ZetaRole } from "@fulcrum/zeta";
 
 /**
  * Connection states. Every waiting state carries `attempt` (failures in a row) and `retryAt` (epoch ms of the next
@@ -6,19 +6,20 @@ import { createClient, discoverZeta, webSocketTransport, ZetaError, type ZetaCli
  */
 export type ConnectionState =
   | { phase: "connecting"; attempt: number; lost: boolean; lastFailure?: "unresponsive" }
-  | { phase: "connected" }
+  | { phase: "connected"; authority: ZetaRole }
   | { phase: "not_running"; attempt: number; retryAt: number; lost: boolean }
   | { phase: "auth_failed"; reason: "origin" | "rejected"; origins: string[]; attempt: number; retryAt: number; lost: boolean }
   | { phase: "busy"; attempt: number; retryAt: number; lost: boolean }
+  | { phase: "observer_limit"; attempt: number; lost: boolean }
   | { phase: "dropped"; attempt: number; retryAt: number; lost: true }
   | { phase: "unresponsive" | "incompatible"; attempt: number; retryAt: number; lost: boolean };
 
 export type ConnectionEvent =
   | { type: "attempt" }
-  | { type: "connected" }
+  | { type: "connected"; authority: ZetaRole }
   | { type: "not_running"; now: number }
   | { type: "auth_failed"; reason: "origin" | "rejected"; origins: string[]; now: number }
-  | { type: "busy" | "unresponsive" | "incompatible"; now: number }
+  | { type: "busy" | "observer_limit" | "unresponsive" | "incompatible"; now: number }
   | { type: "closed"; now: number };
 
 /** The command that starts a server this page may connect to. The origin is exact: localhost and 127.0.0.1 differ. */
@@ -38,7 +39,7 @@ export function reduceConnection(state: ConnectionState, event: ConnectionEvent)
     case "attempt":
       return state.phase === "connected" ? state : { phase: "connecting", attempt: attemptOf(state), lost, ...(state.phase === "unresponsive" || (state.phase === "connecting" && state.lastFailure === "unresponsive") ? { lastFailure: "unresponsive" as const } : {}) };
     case "connected":
-      return { phase: "connected" };
+      return { phase: "connected", authority: event.authority };
     case "closed":
       return state.phase === "connected" ? { phase: "dropped", attempt: 1, retryAt: event.now + backoff(1), lost: true } : state;
 
@@ -47,6 +48,7 @@ export function reduceConnection(state: ConnectionState, event: ConnectionEvent)
       const attempt = state.attempt + 1;
       const retryAt = event.now + backoff(attempt);
       if (event.type === "auth_failed") return { phase: "auth_failed", reason: event.reason, origins: event.origins, attempt, retryAt, lost };
+      if (event.type === "observer_limit") return { phase: "observer_limit", attempt, lost };
       return { phase: event.type, attempt, retryAt, lost };
     }
   }
@@ -56,7 +58,7 @@ export type ConnectionDeps = {
   /** The page origin the server's `--ws-origin` allowlist must contain. */
   origin: string;
   discover?: () => Promise<ZetaDiscovery | null>;
-  connect?: (discovery: ZetaDiscovery, opened?: (close: () => void) => void) => Promise<ZetaClient>;
+  connect?: (discovery: ZetaDiscovery, role: ZetaRole, opened?: (close: () => void) => void) => Promise<ZetaClient>;
   now?: () => number;
   setTimer?: (callback: () => void, ms: number) => unknown;
   clearTimer?: (timer: unknown) => void;
@@ -76,20 +78,21 @@ export type Connection = {
   stop(): void;
 };
 
-export const FEATURES = ["list_sessions_paging", "approval_history", "approval_reconnect", "delivery_id", "delivery_session_guard", "user_message_event", "user_message_delivery_id", "served_turn_end", "session_replay_seq", "session_host_commands", "new_session_settings", "model_input_ids", "session_grants", "session_history_fidelity", "child_runs", "child_run_history"];
+export const FEATURES = ["list_sessions_paging", "approval_history", "approval_reconnect", "delivery_id", "delivery_session_guard", "user_message_event", "user_message_delivery_id", "served_turn_end", "session_replay_seq", "session_host_commands", "new_session_settings", "model_input_ids", "session_grants", "session_history_fidelity", "child_runs", "child_run_history", "serve_observers"];
 
 const negotiatedRequests = new WeakMap<ZetaClient, ReadonlySet<string>>();
 export const commandRequests = (client: ZetaClient) => negotiatedRequests.get(client) ?? new Set<string>();
 
-async function connectController(discovery: ZetaDiscovery, opened?: (close: () => void) => void) {
+async function connectRole(discovery: ZetaDiscovery, role: ZetaRole, opened?: (close: () => void) => void) {
   const url = new URL(discovery.url);
   for (const key of [...url.searchParams.keys()]) if (key.toLowerCase() === "token") url.searchParams.delete(key);
   let transport;
-  try { transport = await webSocketTransport(url.toString(), ["zeta.v1", `zeta.bearer.${discovery.controller_token}`]); }
+  const token = role === "controller" ? discovery.controller_token : discovery.observer_token;
+  try { transport = await webSocketTransport(url.toString(), ["zeta.v1", `zeta.bearer.${token}`]); }
   catch { throw new ZetaError("connect_failed"); }
   opened?.(() => transport.close());
   const client = createClient(transport, undefined, (handshaken, code) => new ZetaError(handshaken ? "closed" : "connect_failed", code));
-  try { const hello = await client.hello(FEATURES, "controller"); negotiatedRequests.set(client, new Set(hello.capabilities?.requests ?? [])); }
+  try { const hello = await client.hello(FEATURES, role); negotiatedRequests.set(client, new Set(hello.capabilities?.requests ?? [])); }
   catch (error) {
     transport.close();
     const code = (error as { code?: unknown }).code;
@@ -106,7 +109,7 @@ async function connectController(discovery: ZetaDiscovery, opened?: (close: () =
 export function createConnection({
   origin,
   discover = discoverZeta,
-  connect = connectController,
+  connect = connectRole,
   now = Date.now,
   setTimer = (callback, ms) => setTimeout(callback, ms),
   clearTimer = (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
@@ -119,6 +122,7 @@ export function createConnection({
   let timer: unknown = null;
   let generation = 0;
   let stopped = false;
+  let desiredRole: ZetaRole = "controller";
   const listeners = new Set<() => void>();
   const send = (event: ConnectionEvent) => {
     const next = reduceConnection(state, event);
@@ -149,24 +153,42 @@ export function createConnection({
     if (discovery.origins.length && !discovery.origins.includes(origin))
       return send({ type: "auth_failed", reason: "origin", origins: discovery.origins, now: now() });
     let next: ZetaClient;
+    let authority = desiredRole;
     let timedOut = false;
-    let closePending = () => {};
-    let connectTimeout: ReturnType<typeof setTimeout> | undefined;
+    const open = async (role: ZetaRole) => {
+      timedOut = false;
+      let closePending = () => {};
+      let connectTimeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          connect(discovery, role, (close) => { closePending = close; }).then((value) => { if (timedOut) value.close(); return value; }),
+          new Promise<never>((_, reject) => { connectTimeout = setTimeout(() => { timedOut = true; closePending(); reject(new Error("hello timeout")); }, helloTimeoutMs); }),
+        ]);
+      } finally { clearTimeout(connectTimeout); }
+    };
     try {
-      next = await Promise.race([
-        connect(discovery, (close) => { closePending = close; }).then((value) => { if (timedOut) value.close(); return value; }),
-        new Promise<never>((_, reject) => { connectTimeout = setTimeout(() => { timedOut = true; closePending(); reject(new Error("hello timeout")); }, helloTimeoutMs); }),
-      ]);
-      clearTimeout(connectTimeout);
+      next = await open(authority);
     } catch (error) {
-      clearTimeout(connectTimeout);
       if (!current()) return;
       if (timedOut) return send({ type: "unresponsive", now: now() });
       const kind = error instanceof ZetaError ? error.kind : "connect_failed";
-      if (kind === "busy") return send({ type: "busy", now: now() });
-      if (kind === "version_mismatch") return send({ type: "incompatible", now: now() });
-      // The process runs and the origin is allowed, so a refused upgrade means the token was refused.
-      return send({ type: "auth_failed", reason: "rejected", origins: discovery.origins, now: now() });
+      if (kind === "busy" && authority === "controller") {
+        desiredRole = authority = "observer";
+        try { next = await open(authority); }
+        catch (observerError) {
+          if (!current()) return;
+          if (timedOut) return send({ type: "unresponsive", now: now() });
+          const observerKind = observerError instanceof ZetaError ? observerError.kind : "connect_failed";
+          if (observerKind === "busy") return send({ type: "observer_limit", now: now() });
+          if (observerKind === "version_mismatch") return send({ type: "incompatible", now: now() });
+          return send({ type: "auth_failed", reason: "rejected", origins: discovery.origins, now: now() });
+        }
+      } else {
+        if (kind === "busy") return send({ type: "observer_limit", now: now() });
+        if (kind === "version_mismatch") return send({ type: "incompatible", now: now() });
+        // The process runs and the origin is allowed, so a refused upgrade means the token was refused.
+        return send({ type: "auth_failed", reason: "rejected", origins: discovery.origins, now: now() });
+      }
     }
     if (!current()) return next.close();
     client = next;
@@ -175,7 +197,7 @@ export function createConnection({
       client = null;
       send({ type: "closed", now: now() });
     });
-    send({ type: "connected" });
+    send({ type: "connected", authority });
   };
   void attempt();
   return {

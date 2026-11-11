@@ -66,6 +66,8 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .run-meta .cwd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topbar .ghost { padding: 0 12px; font-size: 12px; }
 .children-button { flex: none; }
+.authority-badge { display: inline-flex; flex: none; align-items: center; gap: 7px; min-height: var(--control); color: var(--fulcrum-fg); font-size: 12px; font-weight: 700; }
+.authority-mark { width: 7px; height: 7px; background: var(--fulcrum-accent); outline: 1px solid var(--fulcrum-bg); }
 .new-run-short { display: none; }
 .yolo-indicator { display: inline-flex; flex: none; align-items: center; min-height: var(--control); padding: 3px 8px; border: 1px solid var(--fulcrum-danger); color: var(--fulcrum-fg); font-size: 12px; font-weight: 700; white-space: nowrap; }
 /* A danger mark: fulcrum's 7 px square, ringed in bg so it reads against bg wherever it sits. The word next to it stays fg and bold:

@@ -89,6 +89,7 @@ export async function openSession(
   knownStatus?: ServerStatus,
   registration?: Registration,
   onReplay?: () => void,
+  authority: "controller" | "observer" = "controller",
 ): Promise<OpenResult> {
   if (client.features.includes("session_replay_seq")) throw new Error("session_replay_seq needs the sequence replay coordinator");
   const approvalReconnect = client.features.includes("approval_reconnect");
@@ -177,7 +178,9 @@ export async function openSession(
   // Attach before the replay: fulcrum's replay disposes the session's old store first, so a busy or failed resume
   // leaves the last transcript readable.
   const before = knownStatus ?? await getStatus(client, signal);
-  if (registration) {
+  if (authority === "observer") {
+    initialStatus = before.session?.session_id === id ? before : { session: null, state: "idle", pending_approvals: [] };
+  } else if (registration) {
     const resumed = await client.request("resume", { session_id: id, host_commands: [registration.command] }, { timeoutMs: 30_000, signal }) as { session?: SessionMeta };
     id = resumed.session?.session_id ?? id;
     initialStatus = before.session?.session_id === id ? before : { session: resumed.session ?? null, state: "idle", pending_approvals: [] };
@@ -260,7 +263,7 @@ export type RunState = {
   attached: string | null;
 };
 
-type Source = { readonly client: ZetaClient | null; subscribe(listener: () => void): () => void };
+type Source = { readonly client: ZetaClient | null; readonly state?: { phase: string; authority?: "controller" | "observer" }; subscribe(listener: () => void): () => void };
 type RunStateStore = import("./run-state").RunStateStore;
 type WorkspaceEffect = import("./run-state").WorkspaceEffect;
 type OperationId = import("./run-state").OperationId;
@@ -292,7 +295,8 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
   const knownStatus = new Map<string, ServerStatus>();
   const pending = new Map<string, { resolve(value: unknown): void; reject(error: unknown): void }>();
   const live = (target: ZetaClient) => client === target;
-  const register = (target: ZetaClient, id?: string) => bindings && target.features.includes("session_host_commands") ? bindings.register(id) : undefined;
+  const authority = () => connection.state?.authority ?? "controller";
+  const register = (target: ZetaClient, id?: string) => authority() === "controller" && bindings && target.features.includes("session_host_commands") ? bindings.register(id) : undefined;
   const finish = (operationId: OperationId | undefined, value?: unknown, error?: unknown) => {
     if (!operationId) return;
     const waiter = pending.get(operationId); if (!waiter) return;
@@ -352,7 +356,7 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
       const attempt = openSession(target, effect.runId, (messages, complete) => {
         history = { messages, complete };
         runs.dispatch({ type: "OPEN_PROGRESS", runId: effect.runId, operationId: effect.operationId, messages });
-      }, abort.signal, initialStatus, registration, replaced);
+      }, abort.signal, initialStatus, registration, replaced, authority());
       const settled = attempt.then(() => {}, () => {}).finally(() => { if (replays.get(effect.runId) === settled) replays.delete(effect.runId); });
       replays.set(effect.runId, settled);
       const opened = await attempt;
@@ -383,7 +387,7 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
   };
   const handleCreate = async (effect: Extract<WorkspaceEffect, { type: "new-session" }>) => {
     const target = client;
-    if (!target) { const error = new Error("not connected to zeta serve"); runs.dispatch({ type: "NEW_SESSION_FAIL", runId: effect.runId, operationId: effect.operationId, error: error.message }); return finish(effect.operationId, undefined, error); }
+    if (!target || authority() !== "controller") { const error = new Error(target ? "observer connections are read-only" : "not connected to zeta serve"); runs.dispatch({ type: "NEW_SESSION_FAIL", runId: effect.runId, operationId: effect.operationId, error: error.message }); return finish(effect.operationId, undefined, error); }
     try {
       const binding = await register(target);
       const { approval_mode, ...sessionChoice } = effect.choice ?? {};
