@@ -2,15 +2,21 @@
 
 public prototype surface for testing fulcrum as an npm consumer.
 
-## run
+## setup
 
-gamma packs the sibling fulcrum checkout into local tarballs before development. this tests the same package contents and dependency rewrites that npm users receive.
+gamma uses packed fulcrum packages through their public exports, like an npm consumer. clone fulcrum on `main` next to gamma, or set `FULCRUM_DIR` to the fulcrum checkout and revision you want to test. a fresh fulcrum checkout needs its build dependencies before gamma can pack it.
 
 ```sh
-cd ~/me/fun/gamma
-bun run fulcrum:pack
-bun install
+git clone https://github.com/hwang2409/fulcrum.git ../fulcrum
+FULCRUM_DIR="${FULCRUM_DIR:-../fulcrum}"
+bun install --cwd "$FULCRUM_DIR" --frozen-lockfile --ignore-scripts
+FULCRUM_DIR="$FULCRUM_DIR" bun run fulcrum:pack
+bun install --frozen-lockfile
 ```
+
+`fulcrum:pack` defaults to `../fulcrum`. it needs bun and the fulcrum checkout's build dependencies, but it does not need gamma's `node_modules`. if the packed tarballs are missing, gamma's install stops with the command that creates them.
+
+## run
 
 terminal 1:
 
