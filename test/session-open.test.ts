@@ -50,7 +50,7 @@ test("an observer reads history without resuming the session", async () => {
     throw new Error(method);
   });
 
-  const opened = await openSession(fake.client, "other", undefined, undefined, undefined, undefined, undefined, "observer" as any);
+  const opened = await openSession(fake.client, "other", undefined, undefined, undefined, undefined, undefined, "observer");
   await opened.complete;
 
   expect(fake.calls.filter(([method]) => method === "resume")).toHaveLength(0);

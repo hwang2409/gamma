@@ -803,8 +803,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         const send = ({ required_feature: feature, ...event }: Json) => { for (const each of sockets) if (!feature || each.data.features?.includes(String(feature))) each.send(JSON.stringify({ jsonrpc: "2.0", method: "event", params: event })); };
         if (method === "hello") {
           if (params.role !== socket.data.role) { reply({ error: { code: -32602, message: `credential permits ${socket.data.role} role only` } }); socket.close(); return; }
-          // Zeta origin/main docs/serve-protocol.md:134-143, 289-293: -32001 refuses a controller when its slot is occupied
-          // and refuses an observer when the observer limit is reached. The requested role, not the message, identifies which.
+          // Zeta origin/main docs/serve-protocol.md:15-17, 39-40, 1844: -32001 refuses a requested role at capacity,
+          // and an observer credential never promotes. The requested role, not the message, identifies which limit was reached.
           if (mode === "busy" || mode === "observer-limit" || (socket.data.role === "controller" && (mode === "controller-busy" || controller !== null))) { socket.send(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "server busy" } })); socket.close(); return; }
           if (mode === "incompatible") { reply({ error: { code: -32002, message: "version mismatch", data: { requested: "1.2", supported: ["1.0"] } } }); socket.close(); return; }
           if (mode === "slow") await wait(helloDelay);

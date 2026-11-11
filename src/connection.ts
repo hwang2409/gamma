@@ -9,7 +9,6 @@ export type ConnectionState =
   | { phase: "connected"; authority: ZetaRole }
   | { phase: "not_running"; attempt: number; retryAt: number; lost: boolean }
   | { phase: "auth_failed"; reason: "origin" | "rejected"; origins: string[]; attempt: number; retryAt: number; lost: boolean }
-  | { phase: "busy"; attempt: number; retryAt: number; lost: boolean }
   | { phase: "observer_limit"; attempt: number; lost: boolean }
   | { phase: "dropped"; attempt: number; retryAt: number; lost: true }
   | { phase: "unresponsive" | "incompatible"; attempt: number; retryAt: number; lost: boolean };
@@ -19,7 +18,7 @@ export type ConnectionEvent =
   | { type: "connected"; authority: ZetaRole }
   | { type: "not_running"; now: number }
   | { type: "auth_failed"; reason: "origin" | "rejected"; origins: string[]; now: number }
-  | { type: "busy" | "observer_limit" | "unresponsive" | "incompatible"; now: number }
+  | { type: "observer_limit" | "unresponsive" | "incompatible"; now: number }
   | { type: "closed"; now: number };
 
 /** The command that starts a server this page may connect to. The origin is exact: localhost and 127.0.0.1 differ. */

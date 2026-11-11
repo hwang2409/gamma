@@ -18,9 +18,9 @@ test("a failure only ends an attempt in flight and counts up", () => {
   let state: ConnectionState = initialConnection;
   state = reduceConnection(state, { type: "not_running", now: 0 });
   expect(state).toEqual({ phase: "not_running", attempt: 1, retryAt: 500, lost: false });
-  expect(reduceConnection(state, { type: "busy", now: 5 })).toBe(state);
-  state = reduceConnection(reduceConnection(state, { type: "attempt" }), { type: "busy", now: 1000 });
-  expect(state).toEqual({ phase: "busy", attempt: 2, retryAt: 2000, lost: false });
+  expect(reduceConnection(state, { type: "unresponsive", now: 5 })).toBe(state);
+  state = reduceConnection(reduceConnection(state, { type: "attempt" }), { type: "unresponsive", now: 1000 });
+  expect(state).toEqual({ phase: "unresponsive", attempt: 2, retryAt: 2000, lost: false });
 });
 
 test("a hello timeout stays visible during the next attempt", () => {
