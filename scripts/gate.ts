@@ -141,7 +141,7 @@ try {
       ["not-running", () => fake.stop(), /zeta serve is not running/, true],
       ["auth-failed-origin", async () => { await fake.start(); await fake.foreignOrigin(); }, /auth failed/, true],
       ["auth-failed-token", async () => { await fake.start(); await fake.wrongToken(); }, /auth failed/, true],
-      ["busy", async () => { await fake.start(); fake.setMode("busy"); }, /zeta serve is in use/, false],
+      ["observer-limit", async () => { await fake.start(); fake.setMode("busy"); }, /observer limit reached/, false],
       ["incompatible", async () => { fake.setMode("incompatible"); }, /unsupported protocol version/, false],
     ];
     for (const [name, arrange, title, command] of states) {
