@@ -3,7 +3,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "preinstall": "bun scripts/check-fulcrum-vendor.ts",
     "fulcrum:pack": "bun scripts/fulcrum.ts",
     "predev": "bun run fulcrum:pack",
     "dev": "vite --port ${GAMMA_PORT:-5190}",

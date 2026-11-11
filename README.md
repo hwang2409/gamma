@@ -14,7 +14,7 @@ FULCRUM_DIR="$FULCRUM_DIR" bun run fulcrum:pack
 bun install --frozen-lockfile
 ```
 
-`fulcrum:pack` defaults to `../fulcrum`. it needs bun and the fulcrum checkout's build dependencies, but it does not need gamma's `node_modules`. if the packed tarballs are missing, gamma's install stops with the command that creates them.
+`fulcrum:pack` defaults to `../fulcrum`. it needs bun and the fulcrum checkout's build dependencies, but it does not need gamma's `node_modules`. if `bun install` runs before the pack step, bun reports `error: ENOENT extracting tarball from @fulcrum/zeta`; run `bun run fulcrum:pack`, then retry the install.
 
 ## run
 
