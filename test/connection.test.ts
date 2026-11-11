@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { ZetaError, type ZetaClient, type ZetaDiscovery } from "@fulcrum/zeta";
 import { backoff, createConnection, FEATURES, initialConnection, reduceConnection, serveCommand, type ConnectionState } from "../src/connection";
+import { openSession } from "../src/session";
 
 const ORIGIN = "http://localhost:5180";
 const found: ZetaDiscovery = { url: "ws://127.0.0.1:8765/", controller_token: "controller-secret", observer_token: "observer-secret", origins: [ORIGIN] };
@@ -160,4 +161,45 @@ test("port is the last discovered server's port, and stays after the server goes
   expect(connection.state.phase).toBe("not_running");
   expect(connection.port).toBe(18765);
   expect(serveCommand("http://localhost:5180", connection.port)).toBe("zeta serve --ws 18765 --ws-origin http://localhost:5180");
+});
+
+/**
+ * Zeta's hello answer, as zeta 0f29a2b3 builds it: server.py:658-660 accepts the requested features that its FEATURES
+ * tuple lists, in that order, and server.py:681-684 echoes them in capabilities.features. protocol.py:234-264 is that
+ * tuple (session_replay_seq at :257), so a real zeta grants every listed feature gamma asks for.
+ */
+const ZETA_FEATURES = ["session_cwd", "new_session_settings", "user_message_event", "user_message_delivery_id", "send_images_delivery_id", "list_sessions_paging", "memory_updated", "live_config_changed", "ping", "assistant_reset", "model_input_ids", "projects", "projects-memory-v2", "abort_scope", "turn_context", "delivery_id", "serve_observers", "approval_history", "approval_reconnect", "session_history_backward", "session_host_commands", "session_history_fidelity", "session_replay_seq", "child_run_history", "served_turn_end", "content_read", "session_grants", "path_completion", "child_runs", "delivery_session_guard", "run_work"];
+
+test("a session opens over the real hello against a zeta that offers session_replay_seq", async () => {
+  const session = { session_id: "s1", created_at: "", updated_at: "" };
+  const handlers: Record<string, (params: Record<string, unknown>) => unknown> = {
+    hello: (params) => ({ protocol_version: "1.2", capabilities: { requests: ["status", "resume", "session_history"], notifications: ["event"], features: ZETA_FEATURES.filter((name) => (params.features as string[]).includes(name)) } }),
+    status: () => ({ session: null, state: "idle", pending_approvals: [] }),
+    resume: () => ({ session }),
+    session_history: () => ({ messages: [{ id: "m1", role: "assistant", content: [{ type: "text", text: "hi" }], tool_result: null }], next_offset: null }),
+  };
+  const fake = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: (request, server) => server.upgrade(request, { headers: { "Sec-WebSocket-Protocol": "zeta.v1" } }) ? undefined : new Response("upgrade required", { status: 426 }),
+    websocket: {
+      message(socket, text) {
+        const { id, method, params } = JSON.parse(String(text));
+        socket.send(JSON.stringify({ jsonrpc: "2.0", id, result: handlers[method]!(params ?? {}) }));
+      },
+    },
+  });
+  const connection = createConnection({ origin: ORIGIN, discover: async () => ({ ...found, url: `ws://127.0.0.1:${fake.port}/` }) });
+  try {
+    const deadline = Date.now() + 5_000;
+    while (!connection.client && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(connection.state.phase).toBe("connected");
+    const opened = await openSession(connection.client!, "s1");
+    expect(opened.session?.session_id).toBe("s1");
+    await opened.complete;
+    opened.lease.release();
+  } finally {
+    connection.stop();
+    fake.stop(true);
+  }
 });
