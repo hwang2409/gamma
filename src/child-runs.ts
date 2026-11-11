@@ -1,5 +1,6 @@
 import type { SubAgentNavigation } from "@fulcrum/react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type RefObject } from "react";
+import { createTextDraftStore, type TextDraftStore } from "./run-state";
 import {
   listChildRuns,
   openChildRun,
@@ -29,12 +30,13 @@ export type ChildRunsSnapshot = { readonly catalog: ChildCatalog; readonly histo
 
 type Listener = () => void;
 const pair = ({ sessionId, runId }: ChildKey) => `${sessionId}\u0000${runId}`;
+const draftKey = ({ sessionId, runId }: ChildKey) => `child:${JSON.stringify([sessionId, runId])}`;
 const same = (left: ChildKey, right: ChildKey) => left.sessionId === right.sessionId && left.runId === right.runId;
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 export type ChildRunAuthority = "controller" | "observer";
 
-export function createChildRunsController(client: ZetaClient, now = Date.now, authority: ChildRunAuthority = "controller", draftStore = new Map<string, string>()) {
+export function createChildRunsController(client: ZetaClient, now = Date.now, authority: ChildRunAuthority = "controller", draftStore: TextDraftStore = createTextDraftStore()) {
   let catalog: ChildCatalog = { owner: null, runs: [], invalidRows: 0, loading: false, warning: null, reportedAt: null };
   let generation = 0;
   let listAbort: AbortController | null = null;
@@ -151,7 +153,7 @@ export function createChildRunsController(client: ZetaClient, now = Date.now, au
     try {
       const result = await sendChildRun(client, key, text);
       if (result.kind === "accepted" && result.runId === key.runId) {
-        if (drafts.get(id) === text) drafts.delete(id);
+        if (drafts.get(draftKey(key)) === text) drafts.delete(draftKey(key));
         if (catalog.owner === key.sessionId) await load(key.sessionId, "refresh");
       }
       return result;
@@ -169,8 +171,8 @@ export function createChildRunsController(client: ZetaClient, now = Date.now, au
     load,
     open,
     closeHistory,
-    draft(key: ChildKey) { return drafts.get(pair(key)) ?? ""; },
-    setDraft(key: ChildKey, value: string) { drafts.set(pair(key), value); emit(); },
+    draft(key: ChildKey) { return drafts.get(draftKey(key)) ?? ""; },
+    setDraft(key: ChildKey, value: string) { if (value) drafts.set(draftKey(key), value); else drafts.delete(draftKey(key)); emit(); },
     sending(key: ChildKey) { return sending.has(pair(key)); },
     send,
     dispose() { setOwner(null); closeHistory(); listeners.clear(); },
@@ -202,7 +204,7 @@ export function useChildRoute({
   onBack(): void;
   onReplaceParent(): void;
 }) {
-  const drafts = useRef(new Map<string, string>());
+  const drafts = useRef<TextDraftStore>(createTextDraftStore());
   const controller = useMemo(() => client ? createChildRunsController(client, Date.now, authority, drafts.current) : null, [authority, client]);
   const snapshot = useSyncExternalStore(controller ? controller.subscribe : () => () => {}, () => controller?.snapshot ?? EMPTY_CHILD_SNAPSHOT);
   const [catalogOpen, setCatalogOpen] = useState(false);

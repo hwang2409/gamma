@@ -634,7 +634,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
       return true;
     }
     const first = { run_id: childRunId, session_id: CHILD_HOLD, parent_run_id: null, description: "reviewer", agent_type: "reviewer", status: "idle", accepts_follow_ups: true, turns_used: childTurns, tool_count: 3, current_step: "waiting for follow-up", started_at: "2099-01-08T10:40:00+00:00", finished_at: null, elapsed_seconds: 305 };
-    const rows = active === CHILD_HOLD ? [first, ...Array.from({ length: Math.max(0, childCatalogRows - 1) }, (_, index) => ({ ...first, run_id: `root:extra:${index + 1}`, description: `worker ${index + 1}`, agent_type: "worker", accepts_follow_ups: false }))] : [];
+    const rows = active === CHILD_HOLD ? [first, ...Array.from({ length: Math.max(0, childCatalogRows - 1) }, (_, index) => ({ ...first, run_id: `root:extra:${index + 1}`, description: `worker ${index + 1}`, agent_type: "worker", accepts_follow_ups: index === 0 }))] : [];
     const offset = Number(params.offset ?? 0);
     const limit = Number(params.limit ?? 100);
     const page = rows.slice(offset, offset + limit);

@@ -163,6 +163,40 @@ describe("child runs controller", () => {
     controller.closeHistory();
   });
 
+  test("reload restores only the matching child draft and matched acceptance clears it", async () => {
+    const saved = new Map<string, string>();
+    const storage = {
+      getItem(key: string) { return saved.get(key) ?? null; },
+      setItem(key: string, value: string) { saved.set(key, value); },
+    };
+    const previous = globalThis.sessionStorage;
+    Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: storage });
+    const calls: Call[] = [];
+    const zeta = client((method) => Promise.resolve(method === "child_run_send" ? { accepted: true, run_id: "child" } : { runs: [] }), calls);
+    const key = { sessionId: "owner", runId: "child" };
+    const other = { sessionId: "other-owner", runId: "child" };
+    try {
+      const beforeReload = createChildRunsController(zeta);
+      beforeReload.setDraft(key, "kept through reload");
+      beforeReload.setDraft(other, "other pair");
+      beforeReload.dispose();
+
+      const afterReload = createChildRunsController(zeta);
+      expect(afterReload.draft(key)).toBe("kept through reload");
+      expect(afterReload.draft(other)).toBe("other pair");
+      expect(calls.filter((call) => call.method === "child_run_send")).toHaveLength(0);
+      await afterReload.send(key, "kept through reload");
+
+      const afterAcceptance = createChildRunsController(zeta);
+      expect(afterAcceptance.draft(key)).toBe("");
+      expect(afterAcceptance.draft(other)).toBe("other pair");
+      afterReload.dispose();
+      afterAcceptance.dispose();
+    } finally {
+      Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: previous });
+    }
+  });
+
   test("open, history completion, reconnect, owner switch, and refresh keep drafts without sending", async () => {
     const calls: Call[] = [];
     const drafts = new Map<string, string>();

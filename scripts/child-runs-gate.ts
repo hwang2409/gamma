@@ -109,6 +109,43 @@ async function run(name: "chromium" | "webkit", engine: BrowserType) {
       if (await directPage.getByText("saved transcript", { exact: true }).count()) throw new Error(`${name}: direct-link back did not replace the child route`);
       await direct.close();
 
+      const draftProof = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+      const draftPage = await draftProof.newPage();
+      await draftPage.goto(`${origin}/?run=${encodeURIComponent(CHILD_HOLD)}&child=${encodeURIComponent("root:2")}`);
+      const draftField = draftPage.getByRole("textbox", { name: "child follow-up" });
+      await draftField.waitFor({ timeout: 15_000 });
+      const sendsBeforeDraftProof = childRequests(fake, "child_run_send").length;
+      await draftField.fill("draft stays with this child");
+      await draftPage.reload();
+      await draftPage.getByRole("textbox", { name: "child follow-up" }).waitFor({ timeout: 15_000 });
+      if (await draftPage.getByRole("textbox", { name: "child follow-up" }).inputValue() !== "draft stays with this child") throw new Error(`${name}: reload lost the child draft`);
+      if (childRequests(fake, "child_run_send").length !== sendsBeforeDraftProof) throw new Error(`${name}: reload sent the child draft`);
+
+      await draftPage.goto(`${origin}/?run=${encodeURIComponent(CHILD_HOLD)}&child=${encodeURIComponent("root:extra:1")}`);
+      const otherChildField = draftPage.getByRole("textbox", { name: "child follow-up" });
+      await otherChildField.waitFor({ timeout: 15_000 });
+      if (await otherChildField.inputValue()) throw new Error(`${name}: another child restored the first child's draft`);
+      await draftPage.goBack();
+      await draftPage.getByRole("textbox", { name: "child follow-up" }).waitFor({ timeout: 15_000 });
+      if (await draftPage.getByRole("textbox", { name: "child follow-up" }).inputValue() !== "draft stays with this child") throw new Error(`${name}: returning from another child lost the pair draft`);
+
+      await draftPage.goto(`${origin}/?run=${encodeURIComponent("s-themes")}`);
+      await draftPage.waitForURL((url) => url.searchParams.get("run") === "s-themes" && !url.searchParams.has("child"));
+      await draftPage.locator(".run-title h1").waitFor({ timeout: 15_000 });
+      await draftPage.goBack();
+      await draftPage.getByRole("textbox", { name: "child follow-up" }).waitFor({ timeout: 15_000 });
+      if (await draftPage.getByRole("textbox", { name: "child follow-up" }).inputValue() !== "draft stays with this child") throw new Error(`${name}: run switch lost the pair draft`);
+      if (childRequests(fake, "child_run_send").length !== sendsBeforeDraftProof) throw new Error(`${name}: run switch sent the child draft`);
+
+      const historiesBeforeReconnect = childRequests(fake, "child_run_history").length;
+      fake.drop();
+      for (let attempt = 0; childRequests(fake, "child_run_history").length === historiesBeforeReconnect && attempt < 150; attempt++) await Bun.sleep(100);
+      if (childRequests(fake, "child_run_history").length === historiesBeforeReconnect) throw new Error(`${name}: reconnect did not reopen child history`);
+      await draftPage.getByRole("textbox", { name: "child follow-up" }).waitFor({ timeout: 15_000 });
+      if (await draftPage.getByRole("textbox", { name: "child follow-up" }).inputValue() !== "draft stays with this child") throw new Error(`${name}: reconnect lost the pair draft`);
+      if (childRequests(fake, "child_run_send").length !== sendsBeforeDraftProof) throw new Error(`${name}: reconnect sent the child draft`);
+      await draftProof.close();
+
       fake.setChildRunHistoryEnabled(false);
       const listBeforeNoHistory = childRequests(fake, "child_run_list").length;
       const historyBeforeNoHistory = childRequests(fake, "child_run_history").length;
@@ -139,6 +176,8 @@ async function run(name: "chromium" | "webkit", engine: BrowserType) {
       const mobileButton = mobilePage.getByRole("button", { name: /^children(?: |$)/ });
       const mobileButtonSize = await mobileButton.evaluate((button) => ({ client: button.clientWidth, scroll: button.scrollWidth, text: button.textContent }));
       if (mobileButtonSize.text !== "children" || mobileButtonSize.scroll > mobileButtonSize.client) throw new Error(`${name}: mobile children control was clipped: ${JSON.stringify(mobileButtonSize)}`);
+      const mobileTitle = await mobilePage.locator(".run-title h1").evaluate((title) => ({ client: title.clientWidth, text: title.textContent }));
+      if (!mobileTitle.text?.includes("child hold notification") || mobileTitle.client < 160) throw new Error(`${name}: mobile run title did not keep a readable row: ${JSON.stringify(mobileTitle)}`);
       await mobileButton.click();
       const sheet = mobilePage.getByRole("dialog", { name: "children" });
       const sheetBounds = await sheet.boundingBox();

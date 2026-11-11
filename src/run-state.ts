@@ -360,6 +360,23 @@ type RunStorage = Pick<globalThis.Storage, "getItem" | "setItem">;
 const DEFAULTS_KEY = "gamma-run-defaults";
 /** One entry per run (SavedRun): its draft text, unconfirmed retry id, and open deliveries, keyed by run id. */
 const DRAFTS_KEY = "gamma-run-drafts";
+
+export type TextDraftStore = {
+  get(key: string): string | undefined;
+  set(key: string, value: string): unknown;
+  delete(key: string): boolean;
+};
+/** Stores auxiliary text drafts beside main composer drafts in the same tab-scoped record. */
+export const createTextDraftStore = (storage: RunStorage | undefined = globalThis.sessionStorage): TextDraftStore => {
+  const memory = new Map<string, string>();
+  const read = (): Record<string, SavedRun> => { try { const value = JSON.parse(storage?.getItem(DRAFTS_KEY) ?? "null"); return value && typeof value === "object" ? value : {}; } catch { return {}; } };
+  const write = (entries: Record<string, SavedRun>) => { try { storage?.setItem(DRAFTS_KEY, JSON.stringify(entries)); } catch {} };
+  return {
+    get(key) { const text = read()[key]?.text; return typeof text === "string" ? text : memory.get(key); },
+    set(key, text) { memory.set(key, text); const entries = read(); entries[key] = { text }; write(entries); return this; },
+    delete(key) { const memoryFound = memory.delete(key); const entries = read(); const found = key in entries; delete entries[key]; if (found) write(entries); return found || memoryFound; },
+  };
+};
 const DEFAULTS_LIMIT = 32;
 const parseMap = (storage: RunStorage | undefined, key: string): Record<string, string> => { try { const value = JSON.parse(storage?.getItem(key) ?? "null"); return value && typeof value === "object" ? value : {}; } catch { return {}; } };
 
