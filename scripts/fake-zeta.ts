@@ -125,8 +125,9 @@ function invalidParams(method: string, checks: ParamChecks | undefined, params: 
 }
 
 const SETTINGS_REQUESTS = ["model_catalog", "session_settings", "set_settings", "send_images"];
-// Zeta origin/main src/zeta/server/protocol.py:277-348, 372-374: observers receive only Access.READ methods.
-const OBSERVER_READABLE = new Set(["status", "session_tree", "session_history", "child_run_history", "model_catalog", "session_settings", "delivery_status", "session_grants"]);
+// Zeta origin/main src/zeta/server/protocol.py:277-357, 372-384: observers receive only Access.READ methods.
+// child_run_list became Access.READ in zeta #1175 (protocol.py:357); before it, it was CONTROLLER_READ (a88e60133^1).
+const OBSERVER_READABLE = new Set(["status", "session_tree", "session_history", "child_run_history", "child_run_list", "model_catalog", "session_settings", "delivery_status", "session_grants"]);
 
 // Opaque command inputs by id. Zeta echoes an opaque input's display_text, the typed command line, as the user
 // message (zeta dcc4ce9 src/zeta/core/slash.py:767 display_text=value; src/zeta/server/delivery.py:107-108).
@@ -549,6 +550,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
   let childCatalogRows = 1;
   let staleChildHistory = 0;
   let childRunHistoryEnabled = true;
+  let observerChildList = true;
+  const observerReadable = (method: string) => OBSERVER_READABLE.has(method) && (method !== "child_run_list" || observerChildList);
   const home = await mkdtemp(join(tmpdir(), "fulcrum-web-zeta-"));
   await mkdir(join(home, "run"), { recursive: true });
   const discovery = join(home, "run", "serve.ws.json");
@@ -627,7 +630,6 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
       return true;
     }
     if (!socket.data.features?.includes("child_runs")) { reply({ error: { code: -32601, message: "method not found" } }); return true; }
-    if (socket.data.role === "observer") { reply({ error: { code: -32008, message: "observer is read-only" } }); return true; }
     if (params.session_id !== active) { reply({ error: { code: -32003, message: "owner is not active" } }); return true; }
     if (method === "child_run_send") {
       if (params.run_id !== childRunId || active !== CHILD_HOLD) { reply({ error: { code: -32005, message: "child run is not available" } }); return true; }
@@ -640,7 +642,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     const offset = Number(params.offset ?? 0);
     const limit = Number(params.limit ?? 100);
     const page = rows.slice(offset, offset + limit);
-    // Zeta origin/main src/zeta/server/protocol.py:347-348 and handlers/child_runs.py:13-53 define controller-only list paging.
+    // Zeta origin/main src/zeta/server/protocol.py:357 and handlers/child_runs.py:13-53 define list paging for both roles.
     reply({ result: { runs: page, ...(offset + page.length < rows.length ? { next_offset: offset + page.length } : {}) } });
     return true;
   };
@@ -817,7 +819,7 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           const reconnect = features.includes("approval_reconnect");
           if (reconnect) reconnectControllers.add(socket as object);
           const advertised = protocolVersion === "1.0" ? ["list_sessions", "new_session", "resume", "send", "steer", "approve", "deny", "abort", "status"] : ["status", "approve", "deny", "rename_session", "session_tree", "switch_branch", "slash_list", "slash_run", ...(sessionGrants ? ["session_grants", "revoke_session_grants"] : []), "child_run_list", "child_run_send", "child_run_history", ...(settingsEnabled ? ["model_catalog", "session_settings", "set_settings", "send_images", ...(advertiseNewSessionSettings ? ["new_session_settings"] : [])] : []), ...extraRequests];
-          const offered = advertised.filter((name) => !omittedRequests.has(name) && (socket.data.role === "controller" || OBSERVER_READABLE.has(name)));
+          const offered = advertised.filter((name) => !omittedRequests.has(name) && (socket.data.role === "controller" || observerReadable(name)));
           reply({ result: { ...extraHelloFields, protocol_version: protocolVersion, server: "fake-zeta", capabilities: protocolVersion === "1.0" ? { requests: offered, notifications: ["event"] } : { features, requests: offered } } });
           if (decide && !approvalAborted) {
             if (!reconnect) expireApproval();
@@ -829,7 +831,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           }
           return;
         }
-        if (socket.data.role === "observer" && !OBSERVER_READABLE.has(method)) return reply({ error: { code: -32008, message: "observer is read-only" } });
+        // Zeta origin/main docs/serve-protocol.md:1864, src/zeta/server/protocol.py:116-118: the observer_read_only error.
+        if (socket.data.role === "observer" && !observerReadable(method)) return reply({ error: { code: -32008, message: "a read-only observer requested a write method", data: { code: "observer_read_only", method } } });
         // zeta lists the settings requests under hello's `requests`; an older zeta does not know them.
         // delivery_status needs the delivery_id feature itself (zeta 169fb144 src/zeta/server/protocol.py:301, :553-554).
         if (omittedRequests.has(method) || (!settingsEnabled && SETTINGS_REQUESTS.includes(method)) || (method === "delivery_status" && !socket.data.features?.includes("delivery_id"))) return reply({ error: { code: -32601, message: `method not found: ${method}` } });
@@ -1034,6 +1037,8 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
     setChildCatalogRows(count: number) { childCatalogRows = Math.max(1, Math.floor(count)); },
     staleChildHistoryFor(count: number) { staleChildHistory = Math.max(0, Math.floor(count)); },
     setChildRunHistoryEnabled(enabled: boolean) { childRunHistoryEnabled = enabled; },
+    /** `false`: a zeta before #1175, which neither offers child_run_list to observers nor serves it to them. */
+    setObserverChildList(enabled: boolean) { observerChildList = enabled; },
     busyNext(method: "resume" | "new_session", count = 1) { transientBusy.set(method, count); },
     get running() { return running; },
     /** Every accepted send and steer, in order. */

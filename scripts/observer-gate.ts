@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, webkit, type BrowserType, type Page } from "playwright";
-import { CHILD_HOLD, startFakeZeta } from "./fake-zeta";
+import { ACTIVE, CHILD_HOLD, startFakeZeta } from "./fake-zeta";
 
 const root = new URL("..", import.meta.url).pathname;
 const port = Number(process.env.OBSERVER_GATE_PORT ?? 4357);
@@ -57,12 +57,12 @@ async function matrix(type: BrowserType, browserName: string, width: number) {
     const observer = await context.newPage();
     await observer.goto(`${origin}/?run=${runId}`);
     await ready(observer);
-    if (screenshots) { await Bun.sleep(800); await observer.screenshot({ path: join(screenshots, `after-${browserName}-${width}.png`), fullPage: true }); }
     await observer.getByText("observing", { exact: true }).waitFor({ timeout: 15_000 });
     const reason = observer.getByText("another client controls this run; you are observing, sending is off", { exact: true });
     await reason.waitFor();
     await observer.getByText("idle", { exact: true }).waitFor();
     if (await observer.getByText("ready", { exact: true }).count()) throw new Error("observer footer still said ready");
+    if (screenshots) { await Bun.sleep(400); await observer.screenshot({ path: join(screenshots, `observer-run-${browserName}-${width}.png`), fullPage: true }); }
     const marks = await observer.locator(".authority-mark").evaluate((header, reasonElement) => {
       const reasonMark = getComputedStyle(reasonElement as Element, "::before");
       return { header: getComputedStyle(header).backgroundColor, reason: reasonMark.backgroundColor, shape: reasonMark.outlineStyle };
@@ -78,16 +78,56 @@ async function matrix(type: BrowserType, browserName: string, width: number) {
     if (mutated.length) throw new Error(`observer made mutating calls: ${mutated.map(({ method }) => method).join(", ")}`);
     await observer.close();
 
+    // Zeta origin/main src/zeta/server/protocol.py:357 (#1175): an observer lists children; child_run_send stays controller-only.
     fake.attachQuietly(CHILD_HOLD);
     const childStart = fake.requests.length;
     const child = await context.newPage();
-    await child.goto(`${origin}/?run=${CHILD_HOLD}&child=${encodeURIComponent("root:2")}`);
+    await child.goto(`${origin}/?run=${CHILD_HOLD}`);
     await ready(child);
-    await child.getByRole("log", { name: "saved child activity" }).getByText("saved child transcript is available", { exact: true }).waitFor({ timeout: 15_000 });
-    if (await child.getByLabel("child follow-up").count()) throw new Error("observer child view exposed its composer");
+    const openCatalog = async () => {
+      await child.getByRole("button", { name: /^children/ }).click({ timeout: 15_000 });
+      const row = child.getByRole("dialog", { name: "children" }).locator(".child-row").first();
+      await row.waitFor({ timeout: 15_000 });
+      return row;
+    };
+    const assertChildView = async (how: string) => {
+      await child.waitForURL((url) => url.searchParams.get("child") === "root:2");
+      await child.getByRole("log", { name: "saved child activity" }).getByText("saved child transcript is available", { exact: true }).waitFor({ timeout: 15_000 });
+      await child.getByText("read-only: follow-ups are available from the controller connection", { exact: true }).waitFor();
+      if (await child.getByLabel("child follow-up").count()) throw new Error(`observer child view opened by ${how} exposed its composer`);
+      if (await child.locator('.dock textarea[aria-label="message"]').count()) throw new Error(`observer child view opened by ${how} exposed the run composer`);
+    };
+    await (await openCatalog()).click();
+    await assertChildView("click");
+    if (screenshots) { await Bun.sleep(400); await child.screenshot({ path: join(screenshots, `observer-child-${browserName}-${width}.png`), fullPage: true }); }
+    await child.getByRole("button", { name: "back to parent run" }).click();
+    await child.waitForURL((url) => !url.searchParams.has("child"));
+    const keyboardRow = await openCatalog();
+    await keyboardRow.focus();
+    await child.keyboard.press("Enter");
+    await assertChildView("Enter");
     const childRequests = fake.requests.slice(childStart);
-    if (childRequests.some(({ method }) => method === "child_run_list" || method === "child_run_send")) throw new Error("observer child route listed or sent to children");
+    if (!childRequests.some(({ method }) => method === "child_run_list")) throw new Error("observer did not list children");
+    const childWrites = childRequests.filter(({ method }) => mutatingMethods.includes(method as typeof mutatingMethods[number]));
+    if (childWrites.length) throw new Error(`observer child route made mutating calls: ${childWrites.map(({ method }) => method).join(", ")}`);
     await child.close();
+
+    // A zeta before #1175 neither offers nor serves child_run_list to observers (CONTROLLER_READ at a88e60133^1).
+    fake.setObserverChildList(false);
+    fake.attachQuietly(CHILD_HOLD);
+    const olderStart = fake.requests.length;
+    const older = await context.newPage();
+    await older.goto(`${origin}/?run=${CHILD_HOLD}&child=${encodeURIComponent("root:2")}`);
+    await ready(older);
+    const olderNote = older.getByText("this zeta connection cannot list child details", { exact: true });
+    await olderNote.waitFor({ timeout: 15_000 });
+    if (await olderNote.getAttribute("role") !== "status") throw new Error("older-zeta child list note was not neutral");
+    if (await older.getByRole("button", { name: /^children/ }).count()) throw new Error("older zeta still offered the child list to an observer");
+    await Bun.sleep(500);
+    const olderLists = fake.requests.slice(olderStart).filter(({ method }) => method === "child_run_list" || method === "child_run_send");
+    if (olderLists.length) throw new Error(`observer on an older zeta requested ${olderLists.map(({ method }) => method).join(", ")}`);
+    await older.close();
+    fake.setObserverChildList(true);
 
     fake.setChildRunHistoryEnabled(false);
     fake.attachQuietly(CHILD_HOLD);
@@ -99,16 +139,53 @@ async function matrix(type: BrowserType, browserName: string, width: number) {
     await parentRow.waitFor({ timeout: 15_000 });
     await parentRow.click();
     await noHistory.waitForURL((url) => url.searchParams.get("child") === "root:2");
-    await noHistory.getByRole("heading", { name: /root:2/ }).waitFor();
+    await noHistory.getByRole("heading", { name: /reviewer/ }).waitFor();
     await noHistory.getByText("read-only: follow-ups are available from the controller connection", { exact: true }).waitFor();
     const unavailable = noHistory.getByText("this zeta version cannot show the child transcript yet", { exact: true });
     await unavailable.waitFor();
     if (await unavailable.getAttribute("role") !== "status") throw new Error("observer no-history note was not neutral");
     if (await noHistory.getByLabel("child follow-up").count()) throw new Error("observer no-history child exposed its composer");
-    const noHistoryRequests = fake.requests.slice(noHistoryStart).filter(({ method }) => method === "child_run_list" || method === "child_run_send" || method === "child_run_history");
+    const noHistoryRequests = fake.requests.slice(noHistoryStart).filter(({ method }) => method === "child_run_send" || method === "child_run_history");
     if (noHistoryRequests.length) throw new Error(`observer no-history child made requests: ${noHistoryRequests.map(({ method }) => method).join(", ")}`);
     await noHistory.close();
     fake.setChildRunHistoryEnabled(true);
+
+    // Zeta origin/main src/zeta/server/handlers/lifecycle.py:178-209 (#1218): status gives an observer the controller's
+    // pending_approvals rows; approve and deny stay controller-only (-32008, protocol.py:116-118).
+    fake.attachQuietly(ACTIVE);
+    const approvalStart = fake.requests.length;
+    const watcher = await context.newPage();
+    await watcher.goto(`${origin}/?run=${ACTIVE}`);
+    await ready(watcher);
+    const assertReadOnlyApproval = async (page: Page, how: string) => {
+      const card = page.locator('[data-part="approval"][data-state="pending"]');
+      await card.waitFor({ timeout: 15_000 });
+      await page.locator(".observer-approval").filter({ has: card }).getByText("waiting for the controller to approve", { exact: true }).waitFor();
+      if (await page.getByRole("button", { name: /approve|deny|always allow/ }).count()) throw new Error(`observer ${how} approval offered a decision button`);
+      await card.focus();
+      for (const key of ["Enter", " ", "y", "a", "n", "d"]) await page.keyboard.press(key);
+    };
+    await assertReadOnlyApproval(watcher, "live");
+    await watcher.locator(".status-line").getByText("waiting for the controller to approve", { exact: true }).waitFor();
+    if (screenshots) { await Bun.sleep(400); await watcher.screenshot({ path: join(screenshots, `observer-approval-${browserName}-${width}.png`), fullPage: true }); }
+    const baseline = await context.newPage();
+    await baseline.goto(`${origin}/?run=${ACTIVE}`);
+    await ready(baseline);
+    await assertReadOnlyApproval(baseline, "status baseline");
+    await Bun.sleep(300);
+    const approvalWrites = fake.requests.slice(approvalStart).filter(({ method }) => mutatingMethods.includes(method as typeof mutatingMethods[number]));
+    if (approvalWrites.length) throw new Error(`observer approval made mutating calls: ${approvalWrites.map(({ method }) => method).join(", ")}`);
+    await watcher.close();
+    await baseline.close();
+    // The controller still decides, which also ends the held turn so the next row starts clean.
+    fake.setMode("ok");
+    const decider = await context.newPage();
+    await decider.goto(`${origin}/?run=${ACTIVE}`);
+    await decider.getByRole("button", { name: "deny", exact: true }).click({ timeout: 15_000 });
+    for (let attempt = 0; fake.running && attempt < 100; attempt++) await Bun.sleep(100);
+    if (fake.running) throw new Error("controller deny did not end the approval turn");
+    await decider.close();
+    fake.resetSeededApproval();
 
     fake.setMode("observer-limit");
     const limitStart = fake.requests.length;
@@ -133,6 +210,7 @@ async function matrix(type: BrowserType, browserName: string, width: number) {
     await controller.goto(`${origin}/?run=${runId}`);
     await controller.locator('.dock textarea[aria-label="message"]').waitFor({ timeout: 15_000 });
     if (await controller.getByText("observing", { exact: true }).count()) throw new Error("controller view showed the observer badge");
+    if (screenshots) { await controller.locator('.dock [data-part="composer-submit"]').waitFor(); await Bun.sleep(400); await controller.screenshot({ path: join(screenshots, `controller-run-${browserName}-${width}.png`), fullPage: true }); }
     const composer = controller.locator('.dock textarea[aria-label="message"]');
     await submit(controller, "controller send remains enabled");
     for (let attempt = 0; attempt < 50 && !fake.requests.slice(controllerStart).some(({ method }) => method === "send"); attempt++) await Bun.sleep(100);
@@ -177,8 +255,7 @@ async function matrix(type: BrowserType, browserName: string, width: number) {
 try {
   for (const [type, name] of [[chromium, "chromium"], [webkit, "webkit"]] as const) {
     if (process.env.OBSERVER_GATE_BROWSER && process.env.OBSERVER_GATE_BROWSER !== name) continue;
-    for (const width of [1440, 390]) {
-      if (process.env.OBSERVER_GATE_WIDTH && Number(process.env.OBSERVER_GATE_WIDTH) !== width) continue;
+    for (const width of process.env.OBSERVER_GATE_WIDTH ? [Number(process.env.OBSERVER_GATE_WIDTH)] : [1440, 390]) {
       await check(`${name} observer mode at ${width}`, () => matrix(type, name, width));
     }
   }

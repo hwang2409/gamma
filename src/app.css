@@ -179,6 +179,10 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .dock { flex: none; padding: 6px var(--gutter) max(16px, env(safe-area-inset-bottom)); }
 .dock > * { max-width: var(--measure); margin-inline: auto; }
 
+/* An observer never decides: hide the decision row even when a disabled_reason would draw disabled buttons. */
+.observer-approval [data-part="approval-actions"] { display: none; }
+.observer-approval > .note { width: auto; margin: 0; padding: 6px 13px 0; }
+
 /* Status line: one state word with its square mark; a waiting approval is a link to it. Never a problem. */
 .status-line { --tone: var(--fulcrum-muted); display: flex; align-items: center; gap: 10px; min-height: 28px; font-size: 12px; }
 .status-line[data-tone="ok"] { --tone: var(--fulcrum-ok); }

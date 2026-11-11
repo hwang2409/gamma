@@ -32,10 +32,13 @@ const RichMarkdown = (props: MarkdownProps) => <Markdown {...props} highlight={h
 
 // Renderers stay module-level so appends never re-render every row; approvals reach the live client through context.
 type Decide = (requestId: string) => Promise<unknown>;
-const Decisions = createContext<{ approve?: Decide; always?: Decide; deny?: Decide; disabledReason?: string; alwaysAllowed?: ReadonlySet<string>; markAlways?(toolId: string): void } | null>(null);
+const Decisions = createContext<{ approve?: Decide; always?: Decide; deny?: Decide; disabledReason?: string; alwaysAllowed?: ReadonlySet<string>; markAlways?(toolId: string): void; observer?: true } | null>(null);
 function ZetaApproval({ id }: { id: string }) {
   const decide = useContext(Decisions);
   const toolId = useItemSelector(id, (item) => item?.type === "approval" && item.request.type === "approval_request" ? item.request.tool_call.id : "");
+  const pending = useItemSelector(id, (item) => item?.type === "approval" && !item.ended);
+  // An observer sees the request but has no decision to make: no buttons (css hides any a disabled_reason would draw).
+  if (decide?.observer) return <div className="observer-approval"><Approval id={id} />{pending ? <p className="note" role="status">waiting for the controller to approve</p> : null}</div>;
   const approveAlways = decide?.always;
   const always = approveAlways && ((requestId: string) => approveAlways(requestId).then((result) => { decide?.markAlways?.(toolId); return result; }));
   return <Approval id={id} onApprove={decide?.approve} onApproveAlways={always} approveAlwaysLabel="always allow" onDeny={decide?.deny} disabledReason={decide?.disabledReason} />;
@@ -313,7 +316,9 @@ export function App() {
     authority: state.phase === "connected" ? state.authority : "controller",
     owner: attachedOwner,
     child: browserEntry.child,
-    canList: client?.features.includes(CHILD_RUNS_FEATURE) ?? false,
+    // Zeta offers each role only the methods it may call (zeta origin/main src/zeta/server/protocol.py:372-384): an observer
+    // gets child_run_list from #1175 (protocol.py:357), an older zeta keeps it controller-only and refuses it with -32008.
+    canList: (client?.features.includes(CHILD_RUNS_FEATURE) && commandRequests(client).has("child_run_list")) ?? false,
     canOpenHistory: client?.features.includes(CHILD_RUN_HISTORY_FEATURE) ?? false,
     onPushChild: pushChild,
     onBack: backFromChild,
@@ -534,7 +539,9 @@ function StatusLine({ phase, observer }: { phase: RunPhase; observer: boolean })
   const text = idle ? "idle" : { ready: "ready", thinking: "working…", connecting: "connecting…", reconnecting: "reconnecting…", opening: "opening the run…", approval: "", running: "" }[phase.kind];
   return (
     <div className="status-line" data-state={idle ? "idle" : phase.kind} data-tone={tone} role="status">
-      {phase.kind === "approval" ? (
+      {phase.kind === "approval" && observer ? (
+        <span className="status-text">waiting for the controller to approve</span>
+      ) : phase.kind === "approval" ? (
         <button type="button" className="status-link" onClick={focusApproval}>waiting for your approval</button>
       ) : (
         <span className="status-text">{phase.kind === "running" ? `running ${phase.tool}` : text}</span>
@@ -796,7 +803,8 @@ function Run({ client, open, readOnly, observer, followRequest }: { client: Zeta
   const closeViewer = useCallback(() => { setViewer(null); requestAnimationFrame(() => viewerOpener.current?.focus()); }, []);
   const alwaysAllowed = useSyncExternalStore((listener) => subscribeAlwaysAllowed(open.id, listener), () => getAlwaysAllowed(open.id));
   const decisions = useMemo(() => {
-    if (!client || open.stale || readOnly || observer) return { disabledReason: observer ? "you are observing this run; decisions are off" : readOnly ? "opening the run — decisions are paused" : "reconnecting — decisions are disabled until the server confirms this run" };
+    if (observer) return { observer: true as const };
+    if (!client || open.stale || readOnly) return { disabledReason: readOnly ? "opening the run — decisions are paused" : "reconnecting — decisions are disabled until the server confirms this run" };
     const decide = createApprovalDecider(client, open.lease.store);
     return { approve: (requestId: string) => decide("approve", requestId), always: (requestId: string) => decide("approve", requestId, true), deny: (requestId: string) => decide("deny", requestId), alwaysAllowed, markAlways: (toolId: string) => markAlwaysAllowed(open.id, toolId) };
   }, [alwaysAllowed, client, observer, open.lease.store, open.stale, readOnly]);

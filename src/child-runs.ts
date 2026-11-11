@@ -56,7 +56,6 @@ export function createChildRunsController(client: ZetaClient, now = Date.now, au
   const publish = (next: ChildCatalog) => { catalog = next; emit(); };
 
   const load = async (owner: string, mode: "open" | "refresh" | "more" = "open") => {
-    if (authority !== "controller") return;
     if (mode === "open" && catalog.owner === owner && (catalog.loading || catalog.reportedAt !== null)) return;
     const continuation = mode === "more";
     const offset = continuation ? catalog.nextOffset : 0;
@@ -235,10 +234,10 @@ export function useChildRoute({
   useEffect(() => { controller?.setOwner(owner); }, [controller, owner]);
   useEffect(() => {
     if (!controller || !child || !owner) return;
-    if (authority === "controller" && canList) void controller.load(owner);
+    if (canList) void controller.load(owner);
     if (canOpenHistory) void controller.open({ sessionId: owner, runId: child }).catch(() => undefined);
     return () => controller.closeHistory();
-  }, [authority, canList, canOpenHistory, child, controller, owner]);
+  }, [canList, canOpenHistory, child, controller, owner]);
 
   const openChild = useCallback((runId: string) => {
     if (!owner) return;
@@ -263,12 +262,12 @@ export function useChildRoute({
     }, 300);
   }, [onBack, onReplaceParent]);
   const openCatalog = useCallback((element: HTMLElement) => {
-    if (!controller || !owner || authority !== "controller" || !canList) return;
+    if (!controller || !owner || !canList) return;
     opener.current = element;
     openedFromCatalog.current = true;
     setCatalogOpen(true);
     void controller.load(owner);
-  }, [authority, canList, controller, owner]);
+  }, [canList, controller, owner]);
   const closeCatalog = useCallback(() => {
     openedFromCatalog.current = false;
     setCatalogOpen(false);
@@ -290,7 +289,7 @@ export function useChildRoute({
     closeCatalog,
     childrenButtonRef,
     parentRef: parentRef as RefObject<HTMLElement>,
-    canList: authority === "controller" && canList,
+    canList,
     canSend: authority === "controller",
   };
 }
