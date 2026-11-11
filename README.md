@@ -11,10 +11,10 @@ git clone https://github.com/hwang2409/fulcrum.git ../fulcrum
 FULCRUM_DIR="${FULCRUM_DIR:-../fulcrum}"
 bun install --cwd "$FULCRUM_DIR" --frozen-lockfile --ignore-scripts
 FULCRUM_DIR="$FULCRUM_DIR" bun run fulcrum:pack
-bun install --frozen-lockfile
+bun install --force
 ```
 
-`fulcrum:pack` defaults to `../fulcrum`. it needs bun and the fulcrum checkout's build dependencies, but it does not need gamma's `node_modules`. if `bun install` runs before the pack step, bun reports `error: ENOENT extracting tarball from @fulcrum/zeta`; run `bun run fulcrum:pack`, then retry the install.
+`fulcrum:pack` defaults to `../fulcrum`. it needs bun and the fulcrum checkout's build dependencies, but it does not need gamma's `node_modules`. `--force` refreshes the lockfile integrity for the newly packed archives. if `bun install` runs before the pack step, bun reports `error: ENOENT extracting tarball from @fulcrum/zeta`; run `bun run fulcrum:pack`, then retry the install.
 
 ## run
 
