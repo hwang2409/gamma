@@ -296,7 +296,7 @@ export function App() {
               </header>
               <main className="main">
                 {landedNotice ? <div className="landed-notice" role="status">your message started run {landedNotice.runId} <button type="button" className="ghost" onClick={() => { runState.dismissNotice(); selectRun(landedNotice.runId); }}>open</button><button type="button" className="ghost" onClick={() => runState.dismissNotice()}>dismiss</button></div> : null}
-                <RenderErrorBoundary className="run-render-failure" title="run view broke" description="your draft is safe below. switch runs or reload gamma." resetKey={browserEntry.run}>
+                <RenderErrorBoundary className="run-render-failure" focusMode="transcript" title="run view broke" description="your draft is safe below. switch runs or reload gamma." resetKey={browserEntry.run}>
                   <Body state={state} view={view} connection={connection} runs={runs} onNewRun={newRun} onSelectRun={selectRun} followRequest={followRequest} />
                 </RenderErrorBoundary>
                 <Dock key={browserEntry.run} runId={browserEntry.run} runState={runState} onCreated={onCreated} onAccepted={() => setFollowRequest((request) => request + 1)} deliveries={deliveries} receipts={receipts} state={state} view={view} connection={connection} runs={runs} vim={vim} setVim={setVim} theme={theme} setTheme={setTheme} onNewRun={newRun} onRetryTurn={setRetryTurn} onImageOpen={openViewer} />

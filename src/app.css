@@ -48,7 +48,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .status-mark[data-tone="danger"] { background: var(--fulcrum-danger); }
 .render-failure-copy { min-width: 0; }
 .render-failure h2 { font-size: 16px; line-height: 1.4; text-wrap: balance; }
-.render-failure p { margin-top: 6px; color: var(--fulcrum-fg); text-wrap: pretty; }
+.render-failure p { margin-top: 6px; color: var(--fulcrum-fg); font-size: 14px; text-wrap: pretty; }
 .render-failure-message { overflow-wrap: anywhere; font-size: 12px; }
 .render-failure .primary { min-height: 40px; margin-top: 16px; }
 

@@ -266,8 +266,10 @@ for (const [engine, type] of [["chromium", chromium], ["webkit", webkit]] as con
         await composer.fill("draft survives transcript failure");
         const sent = fake.sent.length;
         await plantRenderError(page, "transcript");
-        await page.getByRole("heading", { name: "run view broke" }).waitFor({ timeout: 5_000 });
+        const recoveryHeading = page.getByRole("heading", { name: "run view broke" });
+        await recoveryHeading.waitFor({ timeout: 5_000 });
         if (await composer.inputValue() !== "draft survives transcript failure") throw new Error("the transcript failure lost the draft");
+        if (!await composer.evaluate((node) => document.activeElement === node)) throw new Error("transcript failure stole focus from the composer");
         await composer.fill("draft stays usable");
         await page.screenshot({ path: join(errorShots, `${engine}-${width}-transcript-fallback.png`) });
         await Bun.sleep(200);
@@ -279,6 +281,18 @@ for (const [engine, type] of [["chromium", chromium], ["webkit", webkit]] as con
       } finally { await context.close(); await browser.close(); }
     });
 
+    await check(`${engine} transcript render failure focuses recovery when transcript had focus at ${width}px`, async () => {
+      fake.setLive(false);
+      const { browser, context, page } = await errorPage(type, width, "/?run=s-themes");
+      try {
+        await page.locator(".scroll").focus();
+        await plantRenderError(page, "transcript");
+        const recoveryHeading = page.getByRole("heading", { name: "run view broke" });
+        await recoveryHeading.waitFor({ timeout: 5_000 });
+        if (!await recoveryHeading.evaluate((node) => document.activeElement === node)) throw new Error("transcript failure did not focus its recovery heading");
+      } finally { await context.close(); await browser.close(); }
+    });
+
     for (const area of ["app", "composer"] as const) await check(`${engine} ${area} render failure restores the ${width}px draft after reload`, async () => {
       const { browser, context, page } = await errorPage(type, width);
       try {
@@ -286,7 +300,9 @@ for (const [engine, type] of [["chromium", chromium], ["webkit", webkit]] as con
         const draft = `draft survives ${area} failure`;
         await composer.fill(draft);
         await plantRenderError(page, area);
-        await page.getByRole("heading", { name: "something broke" }).waitFor({ timeout: 5_000 });
+        const recoveryHeading = page.getByRole("heading", { name: "something broke" });
+        await recoveryHeading.waitFor({ timeout: 5_000 });
+        if (!await recoveryHeading.evaluate((node) => document.activeElement === node)) throw new Error(`${area} failure did not focus the outer recovery heading`);
         await page.getByText(`planted ${area} render error`, { exact: false }).waitFor();
         await page.screenshot({ path: join(errorShots, `${engine}-${width}-${area}-fallback.png`) });
         await page.getByRole("button", { name: "reload gamma" }).click();
