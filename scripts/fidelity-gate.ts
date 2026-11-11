@@ -249,7 +249,7 @@ async function checkOmittedPrivacy(page: Page, origin: string) {
 }
 
 async function settleSeededApproval(page: Page, fake: Fake, origin: string) {
-  fake.setLive(true);
+  fake.resetSeededApproval();
   await page.goto(`${origin}/?theme=tokyo-night&run=${ACTIVE}`);
   await ready(page);
   const approval = page.locator('[data-part="approval"][data-state="pending"]');
@@ -319,7 +319,7 @@ async function checkFailedStopReloadJourney(page: Page, fake: Fake, origin: stri
 }
 
 async function checkStopReload(page: Page, fake: Fake, origin: string) {
-  fake.setLive(true);
+  fake.resetSeededApproval();
   await page.goto(`${origin}/?theme=tokyo-night&run=${ACTIVE}`);
   await ready(page);
   await waitFor(page.getByText("needs approval"), 15_000, "seeded approval");

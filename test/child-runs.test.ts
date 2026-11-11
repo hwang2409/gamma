@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ZetaClient } from "@fulcrum/zeta";
-import { createChildRunsController } from "../src/child-runs";
+import { childNavigationUnavailable, createChildRunsController } from "../src/child-runs";
 
 const row = (runId: string, status = "idle") => ({
   run_id: runId, session_id: "owner", parent_run_id: null, description: `child ${runId}`, agent_type: "worker", status,
@@ -18,6 +18,12 @@ function client(request: (method: string, params: Record<string, unknown>) => Pr
 }
 
 describe("child runs controller", () => {
+  test("child rows open with or without transcript history for either authority", () => {
+    expect(childNavigationUnavailable({ authority: "controller", canList: true, canOpenHistory: false })).toBeUndefined();
+    expect(childNavigationUnavailable({ authority: "observer", canList: true, canOpenHistory: false })).toBeUndefined();
+    expect(childNavigationUnavailable({ authority: "controller", canList: false, canOpenHistory: true })).toBeUndefined();
+    expect(childNavigationUnavailable({ authority: "observer", canList: false, canOpenHistory: false })).toBe("child details need a newer zeta server");
+  });
   test("refresh generations and freshness barriers never publish an older page", async () => {
     const calls: Call[] = [];
     const first = deferred<unknown>();
