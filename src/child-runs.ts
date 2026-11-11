@@ -1,3 +1,5 @@
+import type { SubAgentNavigation } from "@fulcrum/react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type RefObject } from "react";
 import {
   listChildRuns,
   openChildRun,
@@ -30,7 +32,9 @@ const pair = ({ sessionId, runId }: ChildKey) => `${sessionId}\u0000${runId}`;
 const same = (left: ChildKey, right: ChildKey) => left.sessionId === right.sessionId && left.runId === right.runId;
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
-export function createChildRunsController(client: ZetaClient, now = Date.now) {
+export type ChildRunAuthority = "controller" | "observer";
+
+export function createChildRunsController(client: ZetaClient, now = Date.now, authority: ChildRunAuthority = "controller", draftStore = new Map<string, string>()) {
   let catalog: ChildCatalog = { owner: null, runs: [], invalidRows: 0, loading: false, warning: null, reportedAt: null };
   let generation = 0;
   let listAbort: AbortController | null = null;
@@ -38,7 +42,7 @@ export function createChildRunsController(client: ZetaClient, now = Date.now) {
   let history: ChildHistory | null = null;
   let historyError: unknown = null;
   let historyLoading = false;
-  const drafts = new Map<string, string>();
+  const drafts = draftStore;
   const sending = new Set<string>();
   const listeners = new Set<Listener>();
   let snapshot: ChildRunsSnapshot = { catalog, history, historyError, historyLoading };
@@ -46,6 +50,7 @@ export function createChildRunsController(client: ZetaClient, now = Date.now) {
   const publish = (next: ChildCatalog) => { catalog = next; emit(); };
 
   const load = async (owner: string, mode: "open" | "refresh" | "more" = "open") => {
+    if (authority !== "controller") return;
     if (mode === "open" && catalog.owner === owner && (catalog.loading || catalog.reportedAt !== null)) return;
     const continuation = mode === "more";
     const offset = continuation ? catalog.nextOffset : 0;
@@ -138,6 +143,7 @@ export function createChildRunsController(client: ZetaClient, now = Date.now) {
   };
 
   const send = async (key: ChildKey, text: string) => {
+    if (authority !== "controller") return { kind: "read_only" as const };
     const id = pair(key);
     if (sending.has(id)) return { kind: "busy" as const };
     sending.add(id);
@@ -146,7 +152,7 @@ export function createChildRunsController(client: ZetaClient, now = Date.now) {
       const result = await sendChildRun(client, key, text);
       if (result.kind === "accepted" && result.runId === key.runId) {
         if (drafts.get(id) === text) drafts.delete(id);
-        await load(key.sessionId, "refresh");
+        if (catalog.owner === key.sessionId) await load(key.sessionId, "refresh");
       }
       return result;
     } finally {
@@ -157,6 +163,7 @@ export function createChildRunsController(client: ZetaClient, now = Date.now) {
 
   return {
     subscribe(listener: Listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    get authority() { return authority; },
     get snapshot() { return snapshot; },
     setOwner,
     load,
@@ -171,3 +178,113 @@ export function createChildRunsController(client: ZetaClient, now = Date.now) {
 }
 
 export type ChildRunsController = ReturnType<typeof createChildRunsController>;
+
+const EMPTY_CHILD_SNAPSHOT: ChildRunsSnapshot = { catalog: { owner: null, runs: [], invalidRows: 0, loading: false, warning: null, reportedAt: null }, history: null, historyError: null, historyLoading: false };
+
+export function useChildRoute({
+  client,
+  authority,
+  owner,
+  child,
+  canList,
+  canOpenHistory,
+  onPushChild,
+  onBack,
+  onReplaceParent,
+}: {
+  client: ZetaClient | null;
+  authority: ChildRunAuthority;
+  owner: string | null;
+  child: string | undefined;
+  canList: boolean;
+  canOpenHistory: boolean;
+  onPushChild(runId: string): void;
+  onBack(): void;
+  onReplaceParent(): void;
+}) {
+  const drafts = useRef(new Map<string, string>());
+  const controller = useMemo(() => client ? createChildRunsController(client, Date.now, authority, drafts.current) : null, [authority, client]);
+  const snapshot = useSyncExternalStore(controller ? controller.subscribe : () => () => {}, () => controller?.snapshot ?? EMPTY_CHILD_SNAPSHOT);
+  const [catalogOpen, setCatalogOpen] = useState(false);
+  const opener = useRef<HTMLElement | null>(null);
+  const activationTarget = useRef<HTMLElement | null>(null);
+  const pushed = useRef(false);
+  const openedFromCatalog = useRef(false);
+  const childrenButtonRef = useRef<HTMLButtonElement>(null);
+  const parentRef = useRef<HTMLElement>(null);
+  const focusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => controller?.dispose(), [controller]);
+  useEffect(() => () => { if (focusTimer.current) clearTimeout(focusTimer.current); }, []);
+  useEffect(() => {
+    const remember = (event: Event) => {
+      const target = event.composedPath().find((candidate) => candidate instanceof HTMLElement && candidate.matches("button, a[href], [tabindex]"));
+      activationTarget.current = target instanceof HTMLElement ? target : null;
+      queueMicrotask(() => { if (activationTarget.current === target) activationTarget.current = null; });
+    };
+    document.addEventListener("click", remember, true);
+    document.addEventListener("keydown", remember, true);
+    return () => { document.removeEventListener("click", remember, true); document.removeEventListener("keydown", remember, true); };
+  }, []);
+  useEffect(() => { controller?.setOwner(owner); }, [controller, owner]);
+  useEffect(() => {
+    if (!controller || !child || !owner) return;
+    if (authority === "controller" && canList) void controller.load(owner);
+    if (canOpenHistory) void controller.open({ sessionId: owner, runId: child }).catch(() => undefined);
+    return () => controller.closeHistory();
+  }, [authority, canList, canOpenHistory, child, controller, owner]);
+
+  const openChild = useCallback((runId: string) => {
+    if (!owner) return;
+    if (focusTimer.current) { clearTimeout(focusTimer.current); focusTimer.current = null; }
+    if (!openedFromCatalog.current) {
+      const active = document.activeElement;
+      opener.current = activationTarget.current ?? (active instanceof HTMLElement && active !== document.body ? active : null);
+    }
+    openedFromCatalog.current = false;
+    pushed.current = true;
+    onPushChild(runId);
+    setCatalogOpen(false);
+  }, [onPushChild, owner]);
+  const closeChild = useCallback(() => {
+    if (pushed.current) {
+      pushed.current = false;
+      onBack();
+    } else onReplaceParent();
+    focusTimer.current = setTimeout(() => {
+      focusTimer.current = null;
+      (opener.current?.isConnected ? opener.current : childrenButtonRef.current ?? parentRef.current)?.focus();
+    }, 300);
+  }, [onBack, onReplaceParent]);
+  const openCatalog = useCallback((element: HTMLElement) => {
+    if (!controller || !owner || authority !== "controller" || !canList) return;
+    opener.current = element;
+    openedFromCatalog.current = true;
+    setCatalogOpen(true);
+    void controller.load(owner);
+  }, [authority, canList, controller, owner]);
+  const closeCatalog = useCallback(() => {
+    openedFromCatalog.current = false;
+    setCatalogOpen(false);
+    setTimeout(() => opener.current?.focus(), 0);
+  }, []);
+  const navigation = useMemo<SubAgentNavigation | null>(() => client && owner ? {
+    open: openChild,
+    unavailable: () => canOpenHistory ? undefined : "child details need a newer zeta server",
+  } : null, [canOpenHistory, client, openChild, owner]);
+
+  return {
+    controller,
+    snapshot,
+    catalogOpen,
+    navigation,
+    openChild,
+    closeChild,
+    openCatalog,
+    closeCatalog,
+    childrenButtonRef,
+    parentRef: parentRef as RefObject<HTMLElement>,
+    canList: authority === "controller" && canList,
+    canSend: authority === "controller",
+  };
+}

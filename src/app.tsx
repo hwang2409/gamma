@@ -1,7 +1,7 @@
 import { createHighlighter } from "@fulcrum/highlight";
 import { Markdown, type Fences, type MarkdownProps } from "@fulcrum/markdown/react";
 import { MermaidFence } from "@fulcrum/mermaid";
-import { Approval, Code, Fallback, FileBlock, HighlightContext, ImageBlock, Message, Notification, RunProvider, SubAgentNavigationProvider, Timeline, ToolCall, useItemSelector, useRun, useRunStore, useTimeline, type Renderers, type SubAgentNavigation, type UserMessageItem } from "@fulcrum/react";
+import { Approval, Code, Fallback, FileBlock, HighlightContext, ImageBlock, Message, Notification, RunProvider, SubAgentNavigationProvider, Timeline, ToolCall, useItemSelector, useRun, useRunStore, useTimeline, type Renderers, type UserMessageItem } from "@fulcrum/react";
 import { createRunStore } from "@fulcrum/core";
 import { CHILD_RUN_HISTORY_FEATURE, CHILD_RUNS_FEATURE, ChildRunHistoryError, SESSION_GRANTS_FEATURE, type ChildRunRow, type ZetaClient } from "@fulcrum/zeta";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type Dispatch, type ReactNode, type SetStateAction } from "react";
@@ -21,7 +21,7 @@ import { createApprovalDecider, pendingApprovals } from "./approvals";
 import { createClientActions, createLocalActions, type ActionReceipt } from "./client-actions";
 import { alwaysAllowed as getAlwaysAllowed, markAlwaysAllowed, subscribeAlwaysAllowed } from "./always-allowed";
 import { createSessionGrantsModel, type SessionGrantsModel } from "./session-grants";
-import { createChildRunsController, type ChildKey, type ChildRunsController } from "./child-runs";
+import { useChildRoute, type ChildKey, type ChildRunsController } from "./child-runs";
 
 const highlight = createHighlighter();
 addEventListener("pagehide", () => highlight.dispose(), { once: true });
@@ -191,11 +191,6 @@ const initialEntry = (): BrowserEntry => {
   return entry;
 };
 
-const EMPTY_CHILD_SNAPSHOT: ChildRunsController["snapshot"] = { catalog: { owner: null, runs: [], invalidRows: 0, loading: false, warning: null, reportedAt: null }, history: null, historyError: null, historyLoading: false };
-function useChildSnapshot(controller: ChildRunsController | null) {
-  return useSyncExternalStore(controller ? controller.subscribe : () => () => {}, () => controller?.snapshot ?? EMPTY_CHILD_SNAPSHOT);
-}
-
 export function App() {
   const [theme, setTheme] = useTheme();
   const [vim, setVim] = useVimSetting();
@@ -206,10 +201,6 @@ export function App() {
   const [browserChild, setBrowserChild] = useState(firstEntry.child);
   const [suppressComposerFocus, setSuppressComposerFocus] = useState(false);
   const browserEntry = { gammaEntryId: workspace.entry.id, run: workspace.entry.run, ...(browserChild ? { child: browserChild } : {}) };
-  const childOpener = useRef<HTMLElement | null>(null);
-  const childOpenerId = useRef<string | null>(null);
-  const childWasPushed = useRef(false);
-  const childCatalogOpen = useRef(false);
   useEffect(() => {
     const params = new URLSearchParams(location.search);
     if (params.get("run") !== browserEntry.run || (params.get("child") ?? undefined) !== browserEntry.child) writeEntry(browserEntry, "replace");
@@ -289,64 +280,39 @@ export function App() {
     writeEntry(next, "push"); runState.dispatch({ type: "NAVIGATED", entryId: next.gammaEntryId as EntryId, runId: id as RunId }); runState.activate(id, { choice: "explicit", model: "" });
   }, [runState]);
   const client = state.phase === "connected" ? connection.client : null;
-  const childController = useMemo(() => client ? createChildRunsController(client) : null, [client]);
-  const childSnapshot = useChildSnapshot(childController);
-  const [childrenOpen, setChildrenOpen] = useState(false);
   const attachedOwner = open?.id === browserEntry.run ? open.id : null;
-  useEffect(() => () => childController?.dispose(), [childController]);
-  useEffect(() => { childController?.setOwner(attachedOwner); }, [attachedOwner, childController]);
-  useEffect(() => {
-    if (!childController || !client || !browserEntry.child || !attachedOwner || !client.features.includes(CHILD_RUN_HISTORY_FEATURE)) return;
-    void childController.load(attachedOwner);
-    void childController.open({ sessionId: attachedOwner, runId: browserEntry.child }).catch(() => undefined);
-    return () => childController.closeHistory();
-  }, [attachedOwner, browserEntry.child, childController, client]);
-  const openChild = useCallback((runId: string) => {
+  const pushChild = useCallback((runId: string) => {
     if (!attachedOwner) return;
-    if (!childCatalogOpen.current) {
-      const active = document.activeElement as HTMLElement | null;
-      childOpener.current = active?.dataset.part === "sub-agent" ? active : document.querySelector<HTMLElement>(`[data-part="sub-agent"][data-id="sub-agent:${CSS.escape(runId)}"]`);
-      childOpenerId.current = childOpener.current?.dataset.part === "sub-agent" ? childOpener.current.dataset.id ?? null : null;
-    }
-    childCatalogOpen.current = false;
-    childWasPushed.current = true;
     const next = { gammaEntryId: entryId(), run: attachedOwner, child: runId };
     writeEntry(next, "push");
     setBrowserChild(runId);
-    setChildrenOpen(false);
   }, [attachedOwner]);
-  const closeChild = useCallback(() => {
+  const backFromChild = useCallback(() => { setSuppressComposerFocus(true); history.back(); }, []);
+  const replaceChild = useCallback(() => {
     setSuppressComposerFocus(true);
-    if (childWasPushed.current) {
-      childWasPushed.current = false;
-      history.back();
-    } else {
-      const next = { gammaEntryId: browserEntry.gammaEntryId, run: browserEntry.run };
-      writeEntry(next, "replace");
-      setBrowserChild(undefined);
-    }
-    setTimeout(() => (childOpener.current?.isConnected ? childOpener.current : childOpenerId.current ? document.querySelector<HTMLElement>(`[data-part="sub-agent"][data-id="${CSS.escape(childOpenerId.current)}"]`) : document.querySelector<HTMLElement>(".children-button"))?.focus(), 300);
+    const next = { gammaEntryId: browserEntry.gammaEntryId, run: browserEntry.run };
+    writeEntry(next, "replace");
+    setBrowserChild(undefined);
   }, [browserEntry.gammaEntryId, browserEntry.run]);
-  const childNavigation = useMemo<SubAgentNavigation | null>(() => client && attachedOwner ? {
-    open: openChild,
-    unavailable: () => client.features.includes(CHILD_RUN_HISTORY_FEATURE) ? undefined : "child details need a newer zeta server",
-  } : null, [attachedOwner, client, openChild]);
-  const openChildren = useCallback((opener: HTMLElement) => {
-    if (!childController || !attachedOwner) return;
-    childOpener.current = opener;
-    childOpenerId.current = null;
-    childCatalogOpen.current = true;
-    setChildrenOpen(true);
-    void childController.load(attachedOwner);
-  }, [attachedOwner, childController]);
-  const closeChildren = useCallback(() => { childCatalogOpen.current = false; setChildrenOpen(false); setTimeout(() => childOpener.current?.focus(), 0); }, []);
+  const childRoute = useChildRoute({
+    client,
+    authority: "controller",
+    owner: attachedOwner,
+    child: browserEntry.child,
+    canList: client?.features.includes(CHILD_RUNS_FEATURE) ?? false,
+    canOpenHistory: client?.features.includes(CHILD_RUN_HISTORY_FEATURE) ?? false,
+    onPushChild: pushChild,
+    onBack: backFromChild,
+    onReplaceParent: replaceChild,
+  });
+  const { controller: childController, snapshot: childSnapshot } = childRoute;
   const resendDelivery = useCallback((intent: string) => void deliveries.resend(browserEntry.run, intent), [deliveries, browserEntry.run]);
 
   return (
     <HighlightContext value={highlight}>
       <ApprovalModeContext value={yolo}>
         <RunProvider store={store} highlight={highlight} onRetry={client && open ? () => client.retrySession(open.id) : undefined}>
-          <SubAgentNavigationProvider value={childNavigation}>
+          <SubAgentNavigationProvider value={childRoute.navigation}>
           <DeliveryStates value={deliveryStates}>
           <RetryTurn value={retryTurn}>
             <ResendDelivery value={resendDelivery}>
@@ -354,7 +320,7 @@ export function App() {
               <header className="topbar">
                 <span className="brand"><span className="brand-mark" aria-hidden="true" /><span className="brand-name">gamma</span></span>
                 <RunTitle session={view.session} blank={!view.selected} opening={Boolean(view.opening)} />
-                {client?.features.includes(CHILD_RUNS_FEATURE) && attachedOwner ? <button type="button" className="ghost children-button" onClick={(event) => openChildren(event.currentTarget)}>children {childSnapshot.catalog.runs.length}{childSnapshot.catalog.nextOffset !== undefined ? "+" : ""}</button> : null}
+                {childRoute.canList && attachedOwner ? <button ref={childRoute.childrenButtonRef} type="button" className="ghost children-button" onClick={(event) => childRoute.openCatalog(event.currentTarget)}>{childSnapshot.catalog.reportedAt === null ? "children" : `children ${childSnapshot.catalog.runs.length}${childSnapshot.catalog.nextOffset !== undefined ? "+" : ""}`}</button> : null}
                 <YoloIndicator className="topbar-yolo" />
                 <button type="button" className="ghost new-run" aria-label="new run" onClick={() => void newRun()}><span className="new-run-label">new run</span><span className="new-run-short" aria-hidden="true">+</span></button>
                 <SettingsMenu>
@@ -362,11 +328,11 @@ export function App() {
                   <VimToggle on={vim} onChange={setVim} />
                 </SettingsMenu>
               </header>
-              <main className="main">
+              <main ref={childRoute.parentRef} className="main" tabIndex={-1}>
                 {landedNotice ? <div className="landed-notice" role="status">your message started run {landedNotice.runId} <button type="button" className="ghost" onClick={() => { runState.dismissNotice(); selectRun(landedNotice.runId); }}>open</button><button type="button" className="ghost" onClick={() => runState.dismissNotice()}>dismiss</button></div> : null}
-                {browserEntry.child ? childController && attachedOwner ? <ChildView key={`${attachedOwner}:${browserEntry.child}`} owner={attachedOwner} runId={browserEntry.child} controller={childController} snapshot={childSnapshot} historyAvailable={client?.features.includes(CHILD_RUN_HISTORY_FEATURE) ?? null} onBack={closeChild} /> : <section className="child-view" aria-label="child run"><button type="button" className="ghost child-back" onClick={closeChild}>back to parent run</button><p className="note" data-tone="busy" role="status">connecting to the parent run…</p></section> : <Body state={state} view={view} connection={connection} runs={runs} onNewRun={newRun} onSelectRun={selectRun} followRequest={followRequest} />}
+                {browserEntry.child ? childController && attachedOwner ? <ChildView key={`${attachedOwner}:${browserEntry.child}`} owner={attachedOwner} runId={browserEntry.child} controller={childController} snapshot={childSnapshot} historyAvailable={client?.features.includes(CHILD_RUN_HISTORY_FEATURE) ?? null} canSend={childRoute.canSend} onBack={childRoute.closeChild} /> : <section className="child-view" aria-label="child run"><button type="button" className="ghost child-back" onClick={childRoute.closeChild}>back to parent run</button><p className="note" data-tone="busy" role="status">connecting to the parent run…</p></section> : <Body state={state} view={view} connection={connection} runs={runs} onNewRun={newRun} onSelectRun={selectRun} followRequest={followRequest} />}
                 {!browserEntry.child ? <Dock key={browserEntry.run} autoFocus={!suppressComposerFocus} runId={browserEntry.run} runState={runState} onCreated={onCreated} onAccepted={() => setFollowRequest((request) => request + 1)} deliveries={deliveries} receipts={receipts} state={state} view={view} connection={connection} runs={runs} vim={vim} setVim={setVim} theme={theme} setTheme={setTheme} onNewRun={newRun} onRetryTurn={setRetryTurn} onImageOpen={openViewer} /> : null}
-                {childrenOpen && childController && attachedOwner ? <ChildCatalog owner={attachedOwner} controller={childController} snapshot={childSnapshot.catalog} onOpen={openChild} onClose={closeChildren} /> : null}
+                {childRoute.catalogOpen && childController && attachedOwner ? <ChildCatalog owner={attachedOwner} controller={childController} snapshot={childSnapshot.catalog} onOpen={childRoute.openChild} onClose={childRoute.closeCatalog} /> : null}
                 {viewer ? <Inspector value={viewer} onClose={closeViewer} /> : null}
               </main>
             </div>
@@ -423,8 +389,10 @@ function ChildCatalog({ owner, controller, snapshot, onOpen, onClose }: { owner:
   </div>;
 }
 
-function ChildView({ owner, runId, controller, snapshot, historyAvailable, onBack }: { owner: string; runId: string; controller: ChildRunsController; snapshot: ChildRunsController["snapshot"]; historyAvailable: boolean | null; onBack(): void }) {
+function ChildView({ owner, runId, controller, snapshot, historyAvailable, canSend, onBack }: { owner: string; runId: string; controller: ChildRunsController; snapshot: ChildRunsController["snapshot"]; historyAvailable: boolean | null; canSend: boolean; onBack(): void }) {
   const key = useMemo<ChildKey>(() => ({ sessionId: owner, runId }), [owner, runId]);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const focused = useRef(false);
   const row = snapshot.catalog.runs.find((candidate) => candidate.sessionId === owner && candidate.runId === runId);
   const [notice, setNotice] = useState<{ text: string; tone?: "danger" } | null>(null);
   const draft = controller.draft(key);
@@ -445,10 +413,16 @@ function ChildView({ owner, runId, controller, snapshot, historyAvailable, onBac
   const errorKind = historyError instanceof ChildRunHistoryError ? historyError.kind : null;
   const errorCopy = historyAvailable === false ? "transcript view needs a newer zeta server" : errorKind === "not_found" ? "this child transcript was not found" : errorKind === "owner_not_active" ? "the parent run is not active" : errorKind === "corrupt_transcript" ? "this child transcript is corrupt" : errorKind === "history_kept_changing" ? "history kept changing" : errorKind === "not_negotiated" ? "transcript view needs a newer zeta server" : historyError ? "could not load the saved transcript" : null;
   const missing = !row && snapshot.catalog.reportedAt !== null;
-  return <section className="child-view" aria-label="child run">
+  useEffect(() => {
+    if (!focused.current && (row || snapshot.history || errorCopy || historyAvailable === false)) {
+      focused.current = true;
+      heading.current?.focus();
+    }
+  }, [errorCopy, historyAvailable, row, snapshot.history]);
+  return <section className="child-view" aria-label="child run" onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); onBack(); } }}>
     <header className="child-header">
       <button type="button" className="ghost child-back" onClick={onBack}>back to parent run</button>
-      <div className="child-identity"><span className="child-owner">{owner}</span><span aria-hidden="true">/</span><strong>{row?.description || runId}</strong>{row && childAgentType(row) ? <span>{childAgentType(row)}</span> : null}</div>
+      <h2 ref={heading} tabIndex={-1} className="child-identity"><span className="child-owner">{owner}</span><span aria-hidden="true">/</span><strong>{row?.description || runId}</strong>{row && childAgentType(row) ? <span>{childAgentType(row)}</span> : null}</h2>
       <span className="saved-label">saved transcript</span>
       {row ? <div className="child-meta"><span className="status-mark" data-state={childStatus(row)} aria-hidden="true" /><span>{childStatus(row)}</span>{row.currentStep ? <span>{row.currentStep}</span> : null}<span>{elapsed(row.elapsedSeconds)}</span><span>{row.turnsUsed} turns</span><span>{row.toolCount} tools</span></div> : null}
     </header>
@@ -456,11 +430,11 @@ function ChildView({ owner, runId, controller, snapshot, historyAvailable, onBac
     {snapshot.historyLoading ? <p className="note" data-tone="busy" role="status">loading saved transcript…</p> : null}
     {errorCopy ? <div className="note" data-tone="danger" role="alert"><span>{errorCopy}</span> {historyAvailable === false ? null : <button type="button" className="ghost" onClick={retry}>try again</button>} <button type="button" className="ghost" onClick={onBack}>back</button></div> : null}
     {snapshot.history ? <RunProvider store={snapshot.history.result.lease.store} highlight={highlight}><ChildTimeline /></RunProvider> : null}
-    {row?.acceptsFollowUps ? <div className="child-followup">
+    {canSend && row?.acceptsFollowUps ? <div className="child-followup">
       {notice ? <p role={notice.tone ? "alert" : "status"} data-tone={notice.tone}>{notice.text}</p> : null}
       <label htmlFor="child-followup">follow up with this child</label>
       <div><textarea id="child-followup" aria-label="child follow-up" value={draft} onChange={(event) => controller.setDraft(key, event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} /><button type="button" className="child-send" disabled={!draft.trim()} onClick={() => void send()}>{sending ? "sending…" : "send"}</button></div>
-    </div> : row ? <p className="child-ineligible">this child is not accepting follow-ups</p> : null}
+    </div> : canSend && row ? <p className="child-ineligible">this child is not accepting follow-ups</p> : null}
   </section>;
 }
 

@@ -13,7 +13,7 @@ const screenshots = process.env.CHILD_RUNS_SCREENSHOT_DIR;
 const childRequests = (fake: Awaited<ReturnType<typeof startFakeZeta>>, method: string) => fake.requests.filter((request) => request.method === method);
 
 async function waitForApp(page: Page) {
-  await page.getByRole("button", { name: /^children / }).waitFor({ timeout: 15_000 }).catch(async () => {
+  await page.getByRole("button", { name: /^children(?: |$)/ }).waitFor({ timeout: 15_000 }).catch(async () => {
     throw new Error(`expected negotiated child catalog button; body=${(await page.locator("body").innerText()).slice(0, 2500)}`);
   });
 }
@@ -38,6 +38,7 @@ async function run(name: "chromium" | "webkit", engine: BrowserType) {
     }
     const browser = await engine.launch();
     try {
+      fake.setChildCatalogRows(101);
       const desktop = await browser.newContext({ viewport: { width: 1440, height: 900 } });
       const page = await desktop.newPage();
       await page.goto(`${origin}/?run=${encodeURIComponent(CHILD_HOLD)}`);
@@ -45,18 +46,22 @@ async function run(name: "chromium" | "webkit", engine: BrowserType) {
       if (screenshots) await page.screenshot({ path: join(screenshots, `${name}-before.png`), fullPage: true });
       if (childRequests(fake, "child_run_send").length !== 0) throw new Error(`${name}: opening the owner sent a child follow-up`);
 
-      const children = page.getByRole("button", { name: /^children / });
+      const children = page.getByRole("button", { name: /^children(?: |$)/ });
+      if (await children.innerText() !== "children") throw new Error(`${name}: unopened catalog exposed a count`);
       await children.click();
       const drawer = page.getByRole("dialog", { name: "children" });
       await drawer.waitFor();
       const bounds = await drawer.boundingBox();
       if (!bounds || bounds.width < 400 || bounds.width > 450) throw new Error(`${name}: desktop drawer width was ${bounds?.width}`);
+      await drawer.getByRole("button", { name: "load more" }).click();
+      await drawer.getByRole("button", { name: /worker 100/ }).waitFor();
       const childRow = drawer.getByRole("button", { name: /reviewer/ });
       await childRow.click();
       await page.waitForURL((url) => url.searchParams.get("child") === "root:2");
       await page.getByText("saved child transcript is available").waitFor();
       await page.getByText("check the reconnect evidence").waitFor();
       await page.getByText("saved transcript", { exact: true }).waitFor();
+      await page.waitForFunction(() => document.activeElement?.classList.contains("child-identity"));
       const history = childRequests(fake, "child_run_history");
       if (history.length !== 2 || history[0]?.params.before !== null || history[1]?.params.before !== 1) throw new Error(`${name}: saved history did not page newest then older: ${JSON.stringify(history)}`);
       if (await page.locator(".dock").count()) throw new Error(`${name}: owner dock remained in the child view`);
@@ -78,7 +83,8 @@ async function run(name: "chromium" | "webkit", engine: BrowserType) {
       if (childRequests(fake, "child_run_send").length !== 2) throw new Error(`${name}: click did not send exactly once`);
       if (childRequests(fake, "child_run_list").length < 3) throw new Error(`${name}: accepted sends did not create later catalog refreshes`);
 
-      await page.getByRole("button", { name: "back to parent run" }).click();
+      await field.focus();
+      await page.keyboard.press("Escape");
       await page.waitForURL((url) => !url.searchParams.has("child"));
       await page.waitForFunction(() => document.activeElement?.classList.contains("children-button"), undefined, { timeout: 2_000 }).catch(async () => { throw new Error(`${name}: catalog opener focus was ${await page.evaluate(() => document.activeElement?.outerHTML)}`); });
       const subagent = page.locator('[data-part="sub-agent"]', { hasText: "reviewer" });
@@ -86,7 +92,8 @@ async function run(name: "chromium" | "webkit", engine: BrowserType) {
       await page.waitForURL((url) => url.searchParams.get("child") === "root:2");
       await page.getByRole("button", { name: "back to parent run" }).click();
       await page.waitForURL((url) => !url.searchParams.has("child"));
-      await page.waitForFunction(() => document.activeElement?.getAttribute("data-part") === "sub-agent", undefined, { timeout: 2_000 }).catch(async () => { throw new Error(`${name}: contextual opener focus was ${await page.evaluate(() => document.activeElement?.outerHTML)}`); });
+      await page.waitForFunction(() => document.activeElement?.getAttribute("data-part") === "sub-agent" || document.activeElement?.classList.contains("children-button"), undefined, { timeout: 2_000 }).catch(async () => { throw new Error(`${name}: contextual fallback focus was ${await page.evaluate(() => document.activeElement?.outerHTML)}`); });
+      await subagent.focus();
       await page.keyboard.press("Enter");
       await page.waitForURL((url) => url.searchParams.get("child") === "root:2");
       await page.getByRole("button", { name: "back to parent run" }).click();
@@ -102,12 +109,36 @@ async function run(name: "chromium" | "webkit", engine: BrowserType) {
       if (await directPage.getByText("saved transcript", { exact: true }).count()) throw new Error(`${name}: direct-link back did not replace the child route`);
       await direct.close();
 
+      fake.setChildRunHistoryEnabled(false);
+      const listBeforeNoHistory = childRequests(fake, "child_run_list").length;
+      const historyBeforeNoHistory = childRequests(fake, "child_run_history").length;
+      const noHistory = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+      const noHistoryPage = await noHistory.newPage();
+      await noHistoryPage.goto(`${origin}/?run=${encodeURIComponent(CHILD_HOLD)}&child=${encodeURIComponent("root:2")}`);
+      await noHistoryPage.getByText("transcript view needs a newer zeta server").waitFor({ timeout: 15_000 });
+      await noHistoryPage.getByRole("heading", { name: /reviewer/ }).waitFor();
+      if (childRequests(fake, "child_run_list").length <= listBeforeNoHistory) throw new Error(`${name}: history-unavailable deep link did not load child metadata`);
+      if (childRequests(fake, "child_run_history").length !== historyBeforeNoHistory) throw new Error(`${name}: history-unavailable deep link requested child history`);
+      await noHistory.close();
+      fake.setChildRunHistoryEnabled(true);
+
+      fake.staleChildHistoryFor(5);
+      const stale = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+      const stalePage = await stale.newPage();
+      await stalePage.goto(`${origin}/?run=${encodeURIComponent(CHILD_HOLD)}&child=${encodeURIComponent("root:2")}`);
+      await stalePage.getByText("history kept changing", { exact: true }).waitFor({ timeout: 15_000 });
+      await stalePage.getByRole("button", { name: "try again" }).waitFor();
+      await stale.close();
+      fake.staleChildHistoryFor(0);
+
       const mobile = await browser.newContext({ viewport: { width: 390, height: 844 } });
       const mobilePage = await mobile.newPage();
       await mobilePage.goto(`${origin}/?run=${encodeURIComponent(CHILD_HOLD)}`);
       await waitForApp(mobilePage);
       if (screenshots) await mobilePage.screenshot({ path: join(screenshots, `${name}-mobile-before.png`), fullPage: true });
-      const mobileButton = mobilePage.getByRole("button", { name: /^children / });
+      const mobileButton = mobilePage.getByRole("button", { name: /^children(?: |$)/ });
+      const mobileButtonSize = await mobileButton.evaluate((button) => ({ client: button.clientWidth, scroll: button.scrollWidth, text: button.textContent }));
+      if (mobileButtonSize.text !== "children" || mobileButtonSize.scroll > mobileButtonSize.client) throw new Error(`${name}: mobile children control was clipped: ${JSON.stringify(mobileButtonSize)}`);
       await mobileButton.click();
       const sheet = mobilePage.getByRole("dialog", { name: "children" });
       const sheetBounds = await sheet.boundingBox();

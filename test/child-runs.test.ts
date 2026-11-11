@@ -131,37 +131,59 @@ describe("child runs controller", () => {
     expect(controller.draft(second)).toBe("second owner");
   });
 
-  test("mismatched and malformed sends keep the captured pair and a newer route draft", async () => {
+  test("accepted send cannot replace a newer owner or refresh the stale owner", async () => {
     const calls: Call[] = [];
     const pending = deferred<unknown>();
-    const responses = [{ accepted: true, run_id: "wrong" }, { accepted: "yes", run_id: "child" }];
-    const zeta = client((method) => method === "child_run_send" ? Promise.resolve(responses.shift()) : Promise.resolve({ runs: [] }), calls);
+    const zeta = client((method) => method === "child_run_send" ? pending.promise : Promise.resolve({ runs: [] }), calls);
     const controller = createChildRunsController(zeta);
-    const key = { sessionId: "owner", runId: "child" };
-    const next = { sessionId: "owner", runId: "next" };
-    controller.setOwner("owner");
-    controller.setDraft(key, "keep me");
-    await controller.send(key, "keep me");
-    await controller.send(key, "keep me");
-    controller.setDraft(next, "new route draft");
-    pending.resolve(undefined);
-    expect(controller.draft(key)).toBe("keep me");
-    expect(controller.draft(next)).toBe("new route draft");
+    const key = { sessionId: "owner-a", runId: "child" };
+    controller.setOwner("owner-a");
+    controller.setDraft(key, "follow up");
+    const sent = controller.send(key, "follow up");
+    controller.setOwner("owner-b");
+    pending.resolve({ accepted: true, run_id: "child" });
+    await sent;
+    expect(controller.snapshot.catalog.owner).toBe("owner-b");
+    expect(calls.map((call) => call.method)).toEqual(["child_run_send"]);
+    expect(controller.draft(key)).toBe("");
   });
 
-  test("open, history completion, draft, focus-like reads, and refresh send no follow-up", async () => {
+  test("observer authority opens history without list or send requests", async () => {
     const calls: Call[] = [];
+    const zeta = client((method) => Promise.resolve(method === "child_run_history"
+      ? { messages: [], next_before: null, history_validator: { end: 0, entry_id: null } }
+      : method === "child_run_send" ? { accepted: true, run_id: "child" } : { runs: [] }), calls);
+    const controller = createChildRunsController(zeta, Date.now, "observer");
+    const key = { sessionId: "owner", runId: "child" };
+    controller.setOwner("owner");
+    await controller.load("owner");
+    await controller.open(key);
+    await controller.send(key, "must not send");
+    expect(calls.map((call) => call.method)).toEqual(["child_run_history"]);
+    controller.closeHistory();
+  });
+
+  test("open, history completion, reconnect, owner switch, and refresh keep drafts without sending", async () => {
+    const calls: Call[] = [];
+    const drafts = new Map<string, string>();
     const zeta = client((method) => Promise.resolve(method === "child_run_history"
       ? { messages: [{ id: "saved", role: "assistant", content: [{ type: "text", text: "saved" }], tool_result: null }], next_before: null, history_validator: { end: 1, entry_id: "saved" } }
       : { runs: [row("child")] }), calls);
-    const controller = createChildRunsController(zeta);
+    const key = { sessionId: "owner", runId: "child" };
+    const controller = createChildRunsController(zeta, Date.now, "controller", drafts);
     controller.setOwner("owner");
     await controller.load("owner");
-    const opened = await controller.open({ sessionId: "owner", runId: "child" });
+    const opened = await controller.open(key);
     await opened.complete;
-    controller.setDraft({ sessionId: "owner", runId: "child" }, "not sent");
-    void controller.snapshot;
+    controller.setDraft(key, "not sent");
+    controller.setOwner("other");
+    controller.setOwner("owner");
+    controller.dispose();
+    const reconnected = createChildRunsController(zeta, Date.now, "controller", drafts);
+    reconnected.setOwner("owner");
+    await reconnected.load("owner", "refresh");
+    expect(reconnected.draft(key)).toBe("not sent");
     expect(calls.filter((call) => call.method === "child_run_send")).toHaveLength(0);
-    controller.closeHistory();
+    reconnected.dispose();
   });
 });

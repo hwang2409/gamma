@@ -55,6 +55,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .run-meta { display: flex; min-width: 0; color: var(--fulcrum-muted); font-size: 12px; }
 .run-meta .cwd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topbar .ghost { padding: 0 12px; font-size: 12px; }
+.children-button { flex: none; }
 .new-run-short { display: none; }
 .yolo-indicator { display: inline-flex; flex: none; align-items: center; min-height: var(--control); padding: 3px 8px; border: 1px solid var(--fulcrum-danger); color: var(--fulcrum-fg); font-size: 12px; font-weight: 700; white-space: nowrap; }
 /* A danger mark: fulcrum's 7 px square, ringed in bg so it reads against bg wherever it sits. The word next to it stays fg and bold:
@@ -410,7 +411,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .load-more { margin-top: 8px; }
 .child-view { display: flex; flex: 1; flex-direction: column; min-height: 0; }
 .child-header { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px 16px; width: min(var(--measure), calc(100% - 2 * var(--gutter))); margin: 0 auto; padding: 12px 0; border-bottom: 1px solid var(--fulcrum-border); }
-.child-identity { display: flex; align-items: baseline; gap: 7px; min-width: 0; overflow: hidden; white-space: nowrap; }
+.child-identity { display: flex; align-items: baseline; gap: 7px; min-width: 0; overflow: hidden; margin: 0; font-size: inherit; white-space: nowrap; }
 .child-identity > * { overflow: hidden; text-overflow: ellipsis; }
 .child-owner, .child-identity > span:last-child, .saved-label { color: var(--fulcrum-muted); font-size: 12px; }
 .saved-label { justify-self: end; }
