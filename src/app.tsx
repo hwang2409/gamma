@@ -519,11 +519,12 @@ function focusApproval() {
  * one action: connection and run-open problems in the main panel, a failed turn on its transcript row, a failed send,
  * steer, or stop in the composer note. While a problem panel shows, the status line is absent.
  */
-function StatusLine({ phase }: { phase: RunPhase }) {
-  const tone = phase.kind === "approval" ? "warn" : phase.kind === "ready" ? "ok" : "busy";
-  const text = { ready: "ready", thinking: "working…", connecting: "connecting…", reconnecting: "reconnecting…", opening: "opening the run…", approval: "", running: "" }[phase.kind];
+function StatusLine({ phase, observer }: { phase: RunPhase; observer: boolean }) {
+  const idle = observer && phase.kind === "ready";
+  const tone = phase.kind === "approval" ? "warn" : idle ? "neutral" : phase.kind === "ready" ? "ok" : "busy";
+  const text = idle ? "idle" : { ready: "ready", thinking: "working…", connecting: "connecting…", reconnecting: "reconnecting…", opening: "opening the run…", approval: "", running: "" }[phase.kind];
   return (
-    <div className="status-line" data-state={phase.kind} data-tone={tone} role="status">
+    <div className="status-line" data-state={idle ? "idle" : phase.kind} data-tone={tone} role="status">
       {phase.kind === "approval" ? (
         <button type="button" className="status-link" onClick={focusApproval}>waiting for your approval</button>
       ) : (
@@ -725,7 +726,7 @@ function Dock({ autoFocus, state, view, connection, runs, vim, setVim, theme, se
   const failure = present.openError;
   const problem = (state.phase !== "connected" && state.phase !== "connecting" && state.phase !== "dropped") || Boolean(failure);
   const phase = dockPhase(state, Boolean(present.opening) || input.block === "opening", open, agent, starting);
-  const readOnly = observer ? "you are observing this run; sending is off" : blank ? null : dockReadOnlyReason(open?.id ?? null, view.active);
+  const readOnly = observer ? "another client controls this run; you are observing, sending is off" : blank ? null : dockReadOnlyReason(open?.id ?? null, view.active);
   const blockedReason = starting ? null : input.block === "pending" || input.block === "waits-for-active" ? inputBlockText(input.block, view.activeTitle) : connectionBlockedReason(state) ?? inputBlockText(input.block, view.activeTitle);
   const onPreparationFailure = useCallback((error: unknown, images: readonly import("./image-queue").QueuedImage[], text: string) => {
     const attachment = runState.getCatalog().attachment;
@@ -741,7 +742,7 @@ function Dock({ autoFocus, state, view, connection, runs, vim, setVim, theme, se
   }, [approvalStore, receipts, runId, runState]);
   // The opening panel already says what the run waits for; the composer note says what that means for sending.
   const panel = problem || (!open && Boolean(present.opening));
-  return <div className="dock"><>{panel ? null : <StatusLine phase={phase} />}</><CommandReceiptLine store={receipts} runId={runId} /><DockComposer autoFocus={autoFocus} commands={commands} deliveries={deliveries} readOnly={readOnly} blockedReason={blockedReason} blockedStatic={input.block === "waits-for-active" || state.phase === "not_running"} settingsReason={settingsBlockText(input.settingsBlock)} running={running} vim={vim} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onStop={onStop} onImageOpen={onImageOpen} onFileInput={(input) => { fileInput.current = input; }} client={client} sessionId={sessionId} createdWithDefault={record.model.choice === "default"} planMode={record.settings.loaded?.plan_mode === true} runState={runState} runId={runId} grants={grants} permissionsOpenRequest={permissionsOpenRequest} /></div>;
+  return <div className="dock" data-authority={observer ? "observer" : undefined}><>{panel ? null : <StatusLine phase={phase} observer={observer} />}</><CommandReceiptLine store={receipts} runId={runId} /><DockComposer autoFocus={autoFocus} commands={commands} deliveries={deliveries} readOnly={readOnly} blockedReason={blockedReason} blockedStatic={input.block === "waits-for-active" || state.phase === "not_running"} settingsReason={settingsBlockText(input.settingsBlock)} running={running} vim={vim} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onStop={onStop} onImageOpen={onImageOpen} onFileInput={(input) => { fileInput.current = input; }} client={client} sessionId={sessionId} createdWithDefault={record.model.choice === "default"} planMode={record.settings.loaded?.plan_mode === true} runState={runState} runId={runId} grants={grants} permissionsOpenRequest={permissionsOpenRequest} /></div>;
 }
 
 /** The last prompt the user sent, so a failed turn can be retried with it. */

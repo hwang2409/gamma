@@ -52,7 +52,19 @@ async function matrix(type: BrowserType, browserName: string, width: number) {
     await ready(observer);
     if (screenshots) { await Bun.sleep(800); await observer.screenshot({ path: join(screenshots, `after-${browserName}-${width}.png`), fullPage: true }); }
     await observer.getByText("observing", { exact: true }).waitFor({ timeout: 15_000 });
-    await observer.getByText("you are observing this run; sending is off", { exact: true }).waitFor();
+    const reason = observer.getByText("another client controls this run; you are observing, sending is off", { exact: true });
+    await reason.waitFor();
+    await observer.getByText("idle", { exact: true }).waitFor();
+    if (await observer.getByText("ready", { exact: true }).count()) throw new Error("observer footer still said ready");
+    const marks = await observer.locator(".authority-mark").evaluate((header, reasonElement) => {
+      const reasonMark = getComputedStyle(reasonElement as Element, "::before");
+      return { header: getComputedStyle(header).backgroundColor, reason: reasonMark.backgroundColor, shape: reasonMark.outlineStyle };
+    }, await reason.elementHandle());
+    if (marks.header !== marks.reason || marks.shape === "none") throw new Error(`observer marks did not match: ${JSON.stringify(marks)}`);
+    if (width === 390) {
+      const gap = await observer.locator(".authority-badge").evaluate((badge) => badge.getBoundingClientRect().left - (document.querySelector(".run-title")?.getBoundingClientRect().right ?? 0));
+      if (gap < 11) throw new Error(`mobile title-to-status gap was ${gap}px`);
+    }
     if (await observer.locator('.dock textarea[aria-label="message"]').count()) throw new Error("observer composer remained editable");
     const observerRequests = fake.requests.slice(observerStart);
     const mutated = observerRequests.filter(({ method }) => mutatingMethods.includes(method as typeof mutatingMethods[number]));
