@@ -743,7 +743,7 @@ function Dock({ autoFocus, state, view, connection, writes, runs, vim, setVim, t
 
   const failure = present.openError;
   const problem = (state.phase !== "connected" && state.phase !== "connecting" && state.phase !== "dropped") || Boolean(failure);
-  const phase = dockPhase(state, Boolean(present.opening) || input.block === "opening", open, agent, starting);
+  const phase = dockPhase(state, Boolean(present.opening) || input.block === "opening" || input.block === "syncing", open, agent, starting);
   // Both roles were refused: this tab can never send until a manual retry gets a slot, so nothing is editable.
   const readOnly = state.phase === "observer_limit" ? "this run has the most observers zeta allows; close another observer tab, then retry"
     : observer ? "another client controls this run; you are observing, sending is off" : blank ? null : dockReadOnlyReason(open?.id ?? null, view.active);
