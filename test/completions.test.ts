@@ -214,6 +214,27 @@ describe("@path completion", () => {
     }
   });
 
+  test("typing in the same @ token keeps the shown rows until the newer reply replaces them; ending the token closes at once", async () => {
+    const clock = fakeClock();
+    const plain = (text: string, startPosition: number): CompletionRow => ({ trigger: "@", text, display: `@${text}`, kind: "file", startPosition });
+    const { commands } = recorder(clock, async (text) => text.endsWith("@s") ? [plain("src.ts", -1), plain("story.md", -1)] : [plain("src.ts", -2)]);
+    const model = new CompletionModel(commands, clock.api);
+    model.update("see @s", 6);
+    await clock.advance(100);
+    const first = model.getSnapshot();
+    model.key("ArrowDown");
+    model.update("see @sr", 7);
+    expect(model.getSnapshot()).toEqual({ ...first, activeIndex: 1 });
+    await clock.advance(99);
+    expect(model.getSnapshot().open).toBe(true);
+    // A kept row replaces the whole token it was offered for, not a span counted from the caret now.
+    expect(model.accept()).toEqual({ value: "see @story.md", caret: 13 });
+    await clock.advance(1);
+    expect(model.getSnapshot()).toEqual({ open: true, rows: [plain("src.ts", -2)], activeIndex: 0 });
+    model.update("see @sr ", 8);
+    expect(model.getSnapshot().open).toBe(false);
+  });
+
   test("a newer input aborts the lookup in flight, and only the newest reply opens the list", async () => {
     const clock = fakeClock();
     const replies: Array<(rows: CompletionRow[]) => void> = [];
