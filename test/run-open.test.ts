@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { createDeliveryManager } from "../src/delivery";
+import { createWriteClient } from "../src/write-client";
 import * as RunState from "../src/run-state";
 import { createRunStateStore, workspaceRunState, type DraftRunId, type EntryId, type RunId } from "../src/run-state";
 import { createSessionManager } from "../src/session";
@@ -123,9 +124,10 @@ async function world(options: { attached?: string | null; selected?: string; han
   const connection = source(options.offline ? null : fake.client);
   const first = options.selected ?? `draft:${crypto.randomUUID()}`;
   const store = createRunStateStore(8, undefined, options.tab, { id: "entry" as EntryId, run: first as RunId });
-  const manager = createSessionManager(connection, store);
+  const writes = createWriteClient(() => ({ client: connection.client, authority: "controller" }));
+  const manager = createSessionManager(connection, store, undefined, writes);
   const failures = new Map<string, string>();
-  const deliveries = createDeliveryManager(() => connection.client, store, manager.execute, manager.abort, (runId, text) => failures.set(store.canonical(runId), text));
+  const deliveries = createDeliveryManager(() => connection.client, writes, store, manager.execute, manager.abort, (runId, text) => failures.set(store.canonical(runId), text));
   const activate = (id: string) => store.activate(id, id.startsWith("draft:") ? { choice: "default" } : { choice: "explicit", model: "" });
   store.get(first); // app.tsx: the first render reads the run (restoring its saved draft) before the mount effect navigates
   store.dispatch({ type: "NAVIGATED", entryId: "entry" as EntryId, runId: first as RunId });
