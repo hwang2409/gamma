@@ -234,3 +234,69 @@ test("refreshCatalog replaces the cached server catalog", async () => {
   await controller.refreshCatalog();
   expect(await controller.completions("/st")).toEqual([]);
 });
+
+describe("@path completion", () => {
+  const paths: CommandCapabilities = { features: new Set(["path_completion"]), requests: new Set(["slash_list", "path_complete"]) };
+  // Zeta 54b9f211 tests/test_server_path_completion.py:60-118: directories first, quoted names with spaces, and
+  // start_position counts the code points of the typed path after `@`.
+  const zetaRows = { entries: [
+    { text: "😀folder/", start_position: -2, display: "@😀folder/", kind: "directory" },
+    { text: '"😀file name.txt"', start_position: -2, display: '@"😀file name.txt"', kind: "file" },
+  ], truncated: false };
+  function pathFake(reply: (params: Record<string, unknown>) => unknown, capabilities = paths) {
+    const frames: Frame[] = [];
+    const request: CommandRequest = async (method, params) => { frames.push({ method, params }); return reply(params); };
+    return { controller: createCommandController("session-1", request, capabilities), frames };
+  }
+  const refused = (code: number) => () => { throw { code, message: "refused" }; };
+
+  test("@ follows zeta's token rule, including inside backticks", () => {
+    expect(findCommandCompletionToken("see @sr")).toEqual({ trigger: "@", prefix: "sr", start: 4 });
+    expect(findCommandCompletionToken('see @"my fi')).toEqual({ trigger: "@", prefix: '"my fi', start: 4 });
+    expect(findCommandCompletionToken("@")).toEqual({ trigger: "@", prefix: "", start: 0 });
+    expect(findCommandCompletionToken("`@sr")).toBeUndefined();
+    expect(findCommandCompletionToken("` @sr")).toEqual({ trigger: "@", prefix: "sr", start: 2 });
+    expect(findCommandCompletionToken("mail a@b")).toBeUndefined();
+    expect(findCommandCompletionToken("@sr done")).toBeUndefined();
+  });
+
+  test("one path_complete carries the exact text before the caret and rows come back in UTF-16 offsets", async () => {
+    const { controller, frames } = pathFake(() => zetaRows);
+    const rows = await controller.completions("😀 before @😀f");
+    expect(frames).toEqual([{ method: "path_complete", params: { session_id: "session-1", text_before_cursor: "😀 before @😀f" } }]);
+    expect(rows).toEqual([
+      { trigger: "@", text: "😀folder/", display: "@😀folder/", kind: "directory", startPosition: -3 },
+      { trigger: "@", text: '"😀file name.txt"', display: '@"😀file name.txt"', kind: "file", startPosition: -3 },
+    ]);
+    const before = "😀 before @😀f";
+    expect(before.slice(0, before.length + rows[0]!.startPosition)).toBe("😀 before @");
+  });
+
+  test("a combining mark keeps its base letter and the @", async () => {
+    // "😀", "e", and U+0301 are three code points and four UTF-16 units.
+    const { controller } = pathFake(() => ({ entries: [{ text: "😀é.md", start_position: -3, display: "@😀é.md", kind: "file" }], truncated: false }));
+    const [row] = await controller.completions("x @😀e\u0301");
+    expect(row).toMatchObject({ trigger: "@", startPosition: -4 });
+  });
+
+  test("old servers, observers, and input zeta refuses show no rows and never retry", async () => {
+    const cases: Array<[string, ReturnType<typeof pathFake>, string, number]> = [
+      ["no feature", pathFake(() => zetaRows, { features: new Set(), requests: paths.requests }), "@sr", 0],
+      ["feature without the request", pathFake(() => zetaRows, { features: paths.features, requests: new Set(["slash_list"]) }), "@sr", 0],
+      ["observer", pathFake(refused(-32008)), "@sr", 1],
+      ["not negotiated", pathFake(refused(-32601)), "@sr", 1],
+      ["invalid params", pathFake(refused(-32602)), "@sr", 1],
+      ["malformed reply", pathFake(() => ({ entries: [{ text: "x", start_position: 1, display: "@x", kind: "file" }], truncated: false })), "@sr", 1],
+      ["over 4,096 UTF-8 bytes", pathFake(() => zetaRows), `@${"é".repeat(2048)}`, 0],
+      ["exactly 4,096 UTF-8 bytes", pathFake(() => ({ entries: [], truncated: false })), `@${"é".repeat(2047)}a`, 1],
+    ];
+    for (const [name, { controller, frames }, text, sent] of cases) {
+      expect({ name, rows: await controller.completions(text) }).toEqual({ name, rows: [] });
+      expect({ name, sent: frames.length }).toEqual({ name, sent });
+    }
+  });
+
+  test("the unavailable adapter offers no paths", async () => {
+    expect(await createUnavailableCommandController("you are observing this run").completions("@sr")).toEqual([]);
+  });
+});

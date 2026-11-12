@@ -1,3 +1,4 @@
+import type { RequestOptions } from "@fulcrum/zeta";
 import { findCommandCompletionToken, type CommandController, type CompletionRow, type CompletionToken } from "./commands";
 
 export type CompletionSnapshot = {
@@ -13,6 +14,15 @@ export type CompletionKeyResult = {
 
 const CLOSED: CompletionSnapshot = { open: false, rows: [], activeIndex: 0 };
 
+/**
+ * `@` asks zeta only after this long without input. Every input clears a waiting lookup, so lookups also start at least
+ * this far apart: at most 10 in any second, and never a queue of stale ones.
+ */
+export const PATH_IDLE_MS = 100;
+
+export type CompletionTimers = { setTimer(run: () => void, ms: number): unknown; clearTimer(timer: unknown): void };
+const BROWSER_TIMERS: CompletionTimers = { setTimer: (run, ms) => setTimeout(run, ms), clearTimer: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>) };
+
 export class CompletionModel {
   private sequence = 0;
   private value = "";
@@ -24,8 +34,12 @@ export class CompletionModel {
   /** Escape closed the menu for the current input; a new command source must not reopen it. */
   private dismissed = false;
   private readonly listeners = new Set<() => void>();
+  /** The `@` lookup waiting for input to go idle, and the one in flight; a newer input, close, or composition ends both. */
+  private idle?: unknown;
+  private remote?: AbortController;
+  private composing = false;
 
-  constructor(private controller: CommandController) {}
+  constructor(private controller: CommandController, private readonly timers: CompletionTimers = BROWSER_TIMERS) {}
 
   /** The run's command source changed (the run attached, reconnected, or reopened): ask the new one about the token still in the field. */
   setController(controller: CommandController, field: { value: string; caret: number }) {
@@ -57,16 +71,52 @@ export class CompletionModel {
     this.caret = selectionStart;
     this.token = selectionStart === selectionEnd ? findCommandCompletionToken(value.slice(0, selectionStart)) : undefined;
     const sequence = ++this.sequence;
+    this.stopRemote();
     this.setState(CLOSED);
-    if (!this.token) return;
-    const token = this.token;
-    void this.controller.completions(value.slice(0, selectionStart)).then(
+    if (!this.token || this.composing) return;
+    if (this.token.trigger === "@") {
+      this.idle = this.timers.setTimer(() => this.lookup(sequence), PATH_IDLE_MS);
+      return;
+    }
+    this.ask(sequence);
+  }
+
+  private lookup(sequence: number) {
+    this.idle = undefined;
+    this.remote = new AbortController();
+    this.ask(sequence, this.remote.signal);
+  }
+
+  private ask(sequence: number, signal?: AbortSignal) {
+    const token = this.token!;
+    const options: RequestOptions | undefined = signal && { signal };
+    void this.controller.completions(this.value.slice(0, this.caret), options).then(
       (rows) => {
         if (sequence !== this.sequence || !this.sameToken(token)) return;
         this.setState({ open: rows.length > 0, rows, activeIndex: 0 });
       },
       () => { if (sequence === this.sequence) this.setState(CLOSED); },
     );
+  }
+
+  private stopRemote() {
+    if (this.idle !== undefined) this.timers.clearTimer(this.idle);
+    this.idle = undefined;
+    this.remote?.abort();
+    this.remote = undefined;
+  }
+
+  /** An input method is composing text: nothing completes, and the committed text asks once when it ends. */
+  startComposition() {
+    this.composing = true;
+    this.sequence++;
+    this.stopRemote();
+    this.setState(CLOSED);
+  }
+
+  endComposition(value: string, selectionStart: number, selectionEnd = selectionStart) {
+    this.composing = false;
+    this.update(value, selectionStart, selectionEnd);
   }
 
   private sameToken(token: CompletionToken) {
@@ -77,20 +127,30 @@ export class CompletionModel {
   accept(index = this.state.activeIndex): { value: string; caret: number } | undefined {
     const row = this.state.rows[index];
     if (!this.state.open || !row || !this.token || !this.sameToken(this.token)) return;
-    const before = this.value.slice(0, this.token.start);
     const after = this.value.slice(this.caret);
+    // Zeta's start_position, already in UTF-16 units: the row replaces the typed path after `@` and adds no space.
+    if (row.trigger === "@") {
+      const before = this.value.slice(0, this.caret + row.startPosition);
+      return { value: before + row.text + after, caret: before.length + row.text.length };
+    }
+    const before = this.value.slice(0, this.token.start);
     const insert = `${row.trigger}${row.name}${!/^\s/.test(after) ? " " : ""}`;
     return { value: before + insert + after, caret: before.length + insert.length };
   }
 
   choose(index: number) {
+    const row = this.state.rows[index];
     const accepted = this.accept(index);
     this.close();
+    // A directory is half a path: the list continues inside it, as in the TUI.
+    if (accepted && row?.trigger === "@" && row.kind === "directory") this.update(accepted.value, accepted.caret);
     return accepted;
   }
 
   /** `modified`: Shift, Alt, Ctrl, or Meta is held; then Tab and Enter keep their normal meaning and close the menu. */
   key(key: string, isComposing = false, modified = false): CompletionKeyResult {
+    // A key outside composition means any composition is over, even if the field unmounted before its compositionend.
+    if (!isComposing) this.composing = false;
     if (isComposing || !this.state.open) return { handled: false };
     if (key === "Escape") { const input = this.input; this.close(); this.input = input; this.dismissed = true; return { handled: true }; }
     if ((key === "Tab" || key === "Enter") && modified) { this.close(); return { handled: false }; }
@@ -100,17 +160,15 @@ export class CompletionModel {
       this.setState({ ...this.state, activeIndex: (this.state.activeIndex + delta + count) % count });
       return { handled: true };
     }
-    if (key === "Tab" || key === "Enter") {
-      const accepted = this.accept();
-      this.close();
-      return { handled: true, accepted };
-    }
+    if (key === "Tab" || key === "Enter") return { handled: true, accepted: this.choose(this.state.activeIndex) };
     return { handled: false };
   }
 
+  /** Also the teardown: it ends any `@` lookup, so nothing launches or publishes after the composer unmounts. */
   close() {
     this.input = undefined;
     this.sequence++;
+    this.stopRemote();
     this.setState(CLOSED);
   }
 }

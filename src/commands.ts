@@ -1,8 +1,13 @@
 import {
+  completePath,
   listSlashCommands,
+  PATH_COMPLETION_FEATURE,
   runSlashCommand,
   type CommandClient,
   type ParsedSlashRunResult,
+  type PathCompletionClient,
+  type PathCompletionEntry,
+  type RequestOptions,
   type SlashCommandInfo,
 } from "@fulcrum/zeta";
 
@@ -30,24 +35,23 @@ export type LocalActionName = Extract<ClientActionName, "new_session" | "theme" 
 const LOCAL_ACTIONS: ReadonlySet<ClientActionName> = new Set<LocalActionName>(["new_session", "theme", "paste", "keys", "restart"]);
 export const isLocalAction = (name: ClientActionName): name is LocalActionName => LOCAL_ACTIONS.has(name);
 
-export type CompletionRow = {
-  trigger: "/" | "$";
-  name: string;
-  description: string;
-  sourceBadge: string;
-};
+export type CompletionRow =
+  | { trigger: "/" | "$"; name: string; description: string; sourceBadge: string }
+  | ({ trigger: "@" } & PathCompletionEntry);
 
-export type CompletionToken = { trigger: "/" | "$"; prefix: string; start: number };
+export type CompletionToken = { trigger: "/" | "$"; prefix: string; start: number } | { trigger: "@"; prefix: string; start: number };
 
 export type CommandController = {
   prepareComposerInput(text: string): Promise<ComposerAction>;
-  completions(valueBeforeCursor: string): Promise<CompletionRow[]>;
+  /** `options.signal` reaches the zeta request, so a superseded `@` lookup frees its pending slot. */
+  completions(valueBeforeCursor: string, options?: RequestOptions): Promise<CompletionRow[]>;
   refreshCatalog(): Promise<void>;
 };
 
 export type CommandRequest = (
-  method: "slash_list" | "slash_run",
+  method: "slash_list" | "slash_run" | "path_complete",
   params: Record<string, unknown>,
+  options?: RequestOptions,
 ) => Promise<unknown>;
 
 export type CommandCapabilities = {
@@ -78,14 +82,17 @@ const CLIENT_ACTIONS: Readonly<Partial<Record<string, ClientActionName>>> = {
 };
 const SLASH_COMPLETION = /^\/([A-Za-z0-9_-]*)$/;
 const DOLLAR_COMPLETION = /(?<!\S)\$([A-Za-z0-9_-]*)$/;
+// Zeta 54b9f211 src/zeta/core/commands/path_completion.py:11-13; unlike `$`, zeta completes `@` inside backticks too.
+const PATH_COMPLETION = /(?<!\S)@((?:"[^"\n]*|[^\s]*))$/;
 
 // Zeta dcc4ce9 src/zeta/skills/invocation.py:46-80 owns these token and backtick rules.
 export function findCommandCompletionToken(valueBeforeCursor: string): CompletionToken | undefined {
   const slash = SLASH_COMPLETION.exec(valueBeforeCursor);
   if (slash) return { trigger: "/", prefix: slash[1], start: 0 };
   const dollar = DOLLAR_COMPLETION.exec(valueBeforeCursor);
-  if (!dollar || inBacktickRange(dollar.index, valueBeforeCursor)) return;
-  return { trigger: "$", prefix: dollar[1], start: dollar.index };
+  if (dollar) return inBacktickRange(dollar.index, valueBeforeCursor) ? undefined : { trigger: "$", prefix: dollar[1], start: dollar.index };
+  const path = PATH_COMPLETION.exec(valueBeforeCursor);
+  if (path) return { trigger: "@", prefix: path[1], start: path.index };
 }
 
 function inBacktickRange(position: number, value: string): boolean {
@@ -111,9 +118,9 @@ export function createCommandController(
 ): CommandController {
   let catalog: SlashCommandInfo[] | undefined;
   const client = {
-    request: (method: string, params?: Record<string, unknown>) => request(method as "slash_list" | "slash_run", params ?? {}),
+    request: (method: string, params?: Record<string, unknown>, options?: RequestOptions) => request(method as "slash_list" | "slash_run" | "path_complete", params ?? {}, options),
     features: [...capabilities.features],
-  } satisfies CommandClient;
+  } satisfies CommandClient & PathCompletionClient;
 
   let loading: Promise<void> | undefined;
   /** One catalog request at a time: an attach asks from both the mount effect and the pending token, and they share it. */
@@ -127,8 +134,9 @@ export function createCommandController(
     ).finally(() => { loading = undefined; });
   }
 
-  async function completions(valueBeforeCursor: string): Promise<CompletionRow[]> {
+  async function completions(valueBeforeCursor: string, options?: RequestOptions): Promise<CompletionRow[]> {
     const token = findCommandCompletionToken(valueBeforeCursor);
+    if (token?.trigger === "@") return pathCompletions(valueBeforeCursor, options);
     if (!token || !capabilities.requests.has("slash_list")) return [];
     if (catalog === undefined) await refreshCatalog();
     const prefix = token.prefix.toLowerCase();
@@ -137,6 +145,13 @@ export function createCommandController(
       .filter((entry) => entry.unavailable === null && (token.trigger === "/" || entry.kind === "skill") && !(busy && REFUSED_WHILE_TURN_RUNS.has(entry.kind)) && entry.name.toLowerCase().startsWith(prefix))
       .sort((a, b) => Number(b.name.toLowerCase() === prefix) - Number(a.name.toLowerCase() === prefix) || a.name.localeCompare(b.name))
       .map((entry) => ({ trigger: token.trigger, name: entry.name, description: entry.description, sourceBadge: entry.source }));
+  }
+
+  /** Like the TUI, an old server, an observer, or input zeta would refuse shows no rows; `truncated` has no UI there either. */
+  async function pathCompletions(valueBeforeCursor: string, options?: RequestOptions): Promise<CompletionRow[]> {
+    if (!capabilities.features.has(PATH_COMPLETION_FEATURE) || !capabilities.requests.has("path_complete")) return [];
+    const result = await completePath(client, sessionId, valueBeforeCursor, options);
+    return result.kind === "entries" ? result.entries.map((entry) => ({ trigger: "@", ...entry })) : [];
   }
 
   async function prepareComposerInput(text: string): Promise<ComposerAction> {

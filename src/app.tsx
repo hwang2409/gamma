@@ -658,7 +658,7 @@ function Dock({ autoFocus, state, view, connection, writes, runs, vim, setVim, t
   }, [grants]);
   const requests = client ? commandRequests(client) : new Set<string>();
   const commands = useMemo(() => writeClient && sessionId
-    ? createCommandController(sessionId, (method, params) => writeClient.request(method, params), { features: new Set(writeClient.features), requests: commandRequests(client!), turnActive: () => activeRun(runState.getCatalog()) === sessionId })
+    ? createCommandController(sessionId, (method, params, options) => writeClient.request(method, params, options), { features: new Set(writeClient.features), requests: commandRequests(client!), turnActive: () => activeRun(runState.getCatalog()) === sessionId })
     : createUnavailableCommandController(observer ? "you are observing this run" : client ? NEEDS_OPEN_RUN : undefined, Boolean(client && !sessionId)), [client, observer, runState, sessionId, writeClient]);
   const approvalDisabledReason = observer ? "you are observing this run; decisions are off" : !client ? "reconnecting — decisions are disabled until the server confirms this run" : open?.stale ? "reconnecting — decisions are disabled until the server confirms this run" : present.openError ? "opening the run — decisions are paused" : undefined;
 
