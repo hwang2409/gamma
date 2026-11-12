@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { reduceWorkspace, createRunStateStore, type DraftRunId, type EntryId, type OperationId, type SessionId, type WorkspaceState } from "../src/run-state";
 import { createDeliveryManager } from "../src/delivery";
 import { settingModel } from "../src/settings";
+import { createWriteClient } from "../src/write-client";
 
 const draft = "draft:settings" as DraftRunId;
 const session = "s-settings" as SessionId;
@@ -9,6 +10,7 @@ const operation = (value: string) => value as OperationId;
 const initial = (): WorkspaceState => ({ entry: { id: "entry" as EntryId, run: draft }, runs: new Map(), aliases: new Map(), attachment: { kind: "detached" } });
 
 const apply = (state: WorkspaceState, event: Parameters<typeof reduceWorkspace>[1]) => reduceWorkspace(state, event);
+const writes = (client: any) => createWriteClient(() => ({ client, authority: "controller" }));
 
 test("readable plan mode is strict and remains outside writable settings", () => {
   expect(settingModel({ model: "opus", approval_mode: "allow", plan_mode: true, extra: "ignored" })).toEqual({ model: "opus", approval_mode: "allow", plan_mode: true });
@@ -57,7 +59,7 @@ test("settings calls cross the effect executor and a failed write keeps the load
   } } as any;
   const store = createRunStateStore(8, undefined, undefined, { id: "entry" as EntryId, run: session });
   store.activate(session);
-  const manager = createDeliveryManager(() => client, store);
+  const manager = createDeliveryManager(() => client, writes(client), store);
   try {
     store.dispatch({ type: "SETTINGS_LOAD", runId: session, operationId: operation("load") });
     await Bun.sleep(0);
@@ -81,7 +83,7 @@ test("an approval-only write reads and preserves zeta's default model", async ()
   } } as any;
   const store = createRunStateStore(8, undefined, undefined, { id: "entry" as EntryId, run: session });
   store.activate(session);
-  const manager = createDeliveryManager(() => client, store);
+  const manager = createDeliveryManager(() => client, writes(client), store);
   try {
     store.dispatch({ type: "SETTINGS_DESIRED", runId: session, approval_mode: "allow" });
     store.dispatch({ type: "SETTINGS_WRITE", runId: session, operationId: operation("default-write") });

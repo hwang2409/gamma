@@ -19,9 +19,9 @@ test("a failure only ends an attempt in flight and counts up", () => {
   let state: ConnectionState = initialConnection;
   state = reduceConnection(state, { type: "not_running", now: 0 });
   expect(state).toEqual({ phase: "not_running", attempt: 1, retryAt: 500, lost: false });
-  expect(reduceConnection(state, { type: "busy", now: 5 })).toBe(state);
-  state = reduceConnection(reduceConnection(state, { type: "attempt" }), { type: "busy", now: 1000 });
-  expect(state).toEqual({ phase: "busy", attempt: 2, retryAt: 2000, lost: false });
+  expect(reduceConnection(state, { type: "unresponsive", now: 5 })).toBe(state);
+  state = reduceConnection(reduceConnection(state, { type: "attempt" }), { type: "unresponsive", now: 1000 });
+  expect(state).toEqual({ phase: "unresponsive", attempt: 2, retryAt: 2000, lost: false });
 });
 
 test("a hello timeout stays visible during the next attempt", () => {
@@ -30,13 +30,13 @@ test("a hello timeout stays visible during the next attempt", () => {
 });
 
 test("a drop stays marked lost, and a protocol mismatch retries after an update", () => {
-  let state = reduceConnection(initialConnection, { type: "connected" });
+  let state = reduceConnection(initialConnection, { type: "connected", authority: "controller" });
   state = reduceConnection(state, { type: "closed", now: 100 });
   expect(state).toEqual({ phase: "dropped", attempt: 1, retryAt: 600, lost: true });
   state = reduceConnection(reduceConnection(state, { type: "attempt" }), { type: "not_running", now: 600 });
   expect(state).toMatchObject({ phase: "not_running", attempt: 2, lost: true });
-  state = reduceConnection(reduceConnection(state, { type: "attempt" }), { type: "connected" });
-  expect(state).toEqual({ phase: "connected" });
+  state = reduceConnection(reduceConnection(state, { type: "attempt" }), { type: "connected", authority: "controller" });
+  expect(state).toEqual({ phase: "connected", authority: "controller" });
   const mismatch = reduceConnection(initialConnection, { type: "incompatible", now: 1_000 });
   expect(mismatch).toEqual({ phase: "incompatible", attempt: 1, retryAt: 1_500, lost: false });
   expect(reduceConnection(mismatch, { type: "attempt" })).toEqual({ phase: "connecting", attempt: 1, lost: false });
@@ -54,13 +54,13 @@ function fakeClient(): Fake {
   return client as unknown as Fake;
 }
 
-function harness(script: Array<() => Promise<ZetaDiscovery | null>>, connects: Array<() => Promise<ZetaClient>> = []) {
+function harness(script: Array<() => Promise<ZetaDiscovery | null>>, connects: Array<(role: "controller" | "observer") => Promise<ZetaClient>> = []) {
   let clock = 0;
   const timers: Array<{ at: number; run: () => void }> = [];
   const connection = createConnection({
     origin: ORIGIN,
     discover: () => (script.shift() ?? (() => Promise.resolve(null)))(),
-    connect: () => (connects.shift() ?? (() => Promise.reject(new ZetaError("connect_failed"))))(),
+    connect: (_discovery, role) => (connects.shift() ?? (() => Promise.reject(new ZetaError("connect_failed"))))(role),
     now: () => clock,
     setTimer: (run, ms) => { const timer = { at: clock + ms, run }; timers.push(timer); return timer; },
     clearTimer: (timer) => { const index = timers.indexOf(timer as never); if (index >= 0) timers.splice(index, 1); },
@@ -82,7 +82,7 @@ test("server not running, then started: it connects on the next scheduled try", 
   await advance(499);
   expect(connection.state.phase).toBe("not_running");
   await advance(1);
-  expect(connection.state).toEqual({ phase: "connected" });
+  expect(connection.state).toEqual({ phase: "connected", authority: "controller" });
   expect(connection.client).toBe(client);
 });
 
@@ -94,17 +94,56 @@ test("an origin missing from the allowlist is named before any socket opens", as
   expect(opened).toBe(false);
 });
 
-test("refused upgrade is auth_failed, busy is busy, version mismatch waits before retrying", async () => {
+test("refused upgrade is auth_failed, two occupied roles reach the observer limit, and version mismatch waits before retrying", async () => {
   const refused = harness([async () => found], [() => Promise.reject(new ZetaError("connect_failed"))]);
   await refused.settle();
   expect(refused.connection.state).toMatchObject({ phase: "auth_failed", reason: "rejected" });
-  const busy = harness([async () => found], [() => Promise.reject(new ZetaError("busy"))]);
+  const busy = harness([async () => found], [() => Promise.reject(new ZetaError("busy")), () => Promise.reject(new ZetaError("busy"))]);
   await busy.settle();
-  expect(busy.connection.state.phase).toBe("busy");
+  expect(busy.connection.state.phase).toBe("observer_limit");
   const old = harness([async () => found], [() => Promise.reject(new ZetaError("version_mismatch"))]);
   await old.settle();
   expect(old.connection.state.phase).toBe("incompatible");
   expect(old.timers).toHaveLength(1);
+});
+
+test("a refused controller hello retries once as an observer and keeps that authority", async () => {
+  const observer = fakeClient();
+  const replacement = fakeClient();
+  const roles: Array<"controller" | "observer"> = [];
+  const { connection, settle, advance } = harness([async () => found, async () => found], [
+    async (role) => { roles.push(role); throw new ZetaError("busy", -32001); },
+    async (role) => { roles.push(role); return observer; },
+    async (role) => { roles.push(role); return replacement; },
+  ]);
+  await settle();
+  expect(roles).toEqual(["controller", "observer"]);
+  expect(connection.state).toEqual({ phase: "connected", authority: "observer" });
+
+  observer.drop();
+  await advance(500);
+  expect(roles).toEqual(["controller", "observer", "observer"]);
+  expect(connection.state).toEqual({ phase: "connected", authority: "observer" });
+});
+
+test("a refused observer hello waits for an explicit retry", async () => {
+  const roles: Array<"controller" | "observer"> = [];
+  const { connection, settle, advance, timers } = harness([async () => found, async () => found], [
+    async (role) => { roles.push(role); throw new ZetaError("busy", -32001); },
+    async (role) => { roles.push(role); throw new ZetaError("busy", -32001); },
+    async (role) => { roles.push(role); return controller; },
+  ]);
+  const controller = fakeClient();
+  await settle();
+  expect(connection.state).toMatchObject({ phase: "observer_limit" });
+  expect(timers).toHaveLength(0);
+  await advance(10_000);
+  expect(roles).toEqual(["controller", "observer"]);
+  // The controller slot freed meanwhile: the manual retry opens like a fresh page, controller first.
+  connection.retryNow();
+  await settle();
+  expect(roles).toEqual(["controller", "observer", "controller"]);
+  expect(connection.state).toEqual({ phase: "connected", authority: "controller" });
 });
 
 test("a drop reconnects with a new client, and retryNow skips the wait", async () => {
@@ -130,7 +169,7 @@ test("hello timeout closes its open socket before retrying", async () => {
   const connection = createConnection({
     origin: ORIGIN,
     discover: async () => found,
-    connect: (_discovery, opened) => { opened?.(() => { closed = true; }); return new Promise(() => {}); },
+    connect: (_discovery, _role, opened) => { opened?.(() => { closed = true; }); return new Promise(() => {}); },
     helloTimeoutMs: 1,
   });
   await new Promise((resolve) => setTimeout(resolve, 5));

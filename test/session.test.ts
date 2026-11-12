@@ -2,13 +2,15 @@ import { expect, test } from "bun:test";
 import { handlers, history, meta, server, source, tick, waitFor } from "./zeta-harness";
 import { createSessionManager, sessionTitle, type RunState, type SessionMeta } from "../src/session";
 import { createRunStateStore, workspaceRunState, type DraftRunId, type EntryId, type RunId } from "../src/run-state";
+import { createWriteClient } from "../src/write-client";
 
 
 function harness(connection: ReturnType<typeof source>, options: { selected?: string; onSelect?(id: string | null): void; bindings?: Parameters<typeof createSessionManager>[2] } = {}) {
   const first = options.selected ?? `draft:${crypto.randomUUID()}`;
   const store = createRunStateStore(8, undefined, undefined, { id: "entry" as EntryId, run: first as RunId });
   store.activate(first, first.startsWith("draft:") ? { choice: "default" } : { choice: "explicit", model: "" });
-  const manager = createSessionManager(connection, store, options.bindings);
+  const writes = createWriteClient(() => ({ client: connection.client, authority: connection.state?.authority ?? "controller" }));
+  const manager = createSessionManager(connection, store, options.bindings, writes);
   store.setEffectExecutor(manager.execute);
   manager.start();
   const select = (id: string) => { store.dispatch({ type: "NAVIGATED", entryId: crypto.randomUUID() as EntryId, runId: id as RunId }); store.activate(id, { choice: "explicit", model: "" }); options.onSelect?.(id); };

@@ -4,6 +4,7 @@ import type { hostBindings, Registration } from "./host-client";
 import type { QueuedImage } from "./image-queue";
 import { evictedResult, refusal } from "./delivery";
 import { decideSend, MISMATCH, sessionMismatch } from "./delivery-owner";
+import type { WriteClient } from "./write-client";
 type HostBindings = typeof hostBindings;
 
 /** The `SessionMetadata` fields this app reads from `list_sessions` (zeta docs/serve-protocol.md). */
@@ -89,6 +90,8 @@ export async function openSession(
   knownStatus?: ServerStatus,
   registration?: Registration,
   onReplay?: () => void,
+  authority: "controller" | "observer" = "controller",
+  writeClient: ZetaClient = client,
 ): Promise<OpenResult> {
   if (client.features.includes("session_replay_seq")) throw new Error("session_replay_seq needs the sequence replay coordinator");
   const approvalReconnect = client.features.includes("approval_reconnect");
@@ -177,13 +180,15 @@ export async function openSession(
   // Attach before the replay: fulcrum's replay disposes the session's old store first, so a busy or failed resume
   // leaves the last transcript readable.
   const before = knownStatus ?? await getStatus(client, signal);
-  if (registration) {
-    const resumed = await client.request("resume", { session_id: id, host_commands: [registration.command] }, { timeoutMs: 30_000, signal }) as { session?: SessionMeta };
+  if (authority === "observer") {
+    initialStatus = before.session?.session_id === id ? before : { session: null, state: "idle", pending_approvals: [] };
+  } else if (registration) {
+    const resumed = await writeClient.request("resume", { session_id: id, host_commands: [registration.command] }, { timeoutMs: 30_000, signal }) as { session?: SessionMeta };
     id = resumed.session?.session_id ?? id;
     initialStatus = before.session?.session_id === id ? before : { session: resumed.session ?? null, state: "idle", pending_approvals: [] };
   } else if (before.session?.session_id === id) initialStatus = before;
   else {
-    const resumed = await client.request("resume", { session_id: id }, { timeoutMs: 30_000, signal }) as { session?: SessionMeta };
+    const resumed = await writeClient.request("resume", { session_id: id }, { timeoutMs: 30_000, signal }) as { session?: SessionMeta };
     id = resumed.session?.session_id ?? id;
     initialStatus = { session: resumed.session ?? null, state: "idle", pending_approvals: [] };
   }
@@ -260,7 +265,7 @@ export type RunState = {
   attached: string | null;
 };
 
-type Source = { readonly client: ZetaClient | null; subscribe(listener: () => void): () => void };
+type Source = { readonly client: ZetaClient | null; readonly state?: { phase: string; authority?: "controller" | "observer" }; subscribe(listener: () => void): () => void };
 type RunStateStore = import("./run-state").RunStateStore;
 type WorkspaceEffect = import("./run-state").WorkspaceEffect;
 type OperationId = import("./run-state").OperationId;
@@ -280,7 +285,7 @@ const ambiguousCandidates = (error: unknown): readonly OpenCandidate[] | undefin
 const turn = (status: ServerStatus) => status.pending_approvals?.length ? "approval" as const : status.state === "idle" ? "idle" as const : status.state;
 
 /** Executes tagged session effects. Run selection, leases, attachment, and active-turn truth remain in RunStateStore. */
-export function createSessionManager(connection: Source, runs: RunStateStore, bindings?: HostBindings) {
+export function createSessionManager(connection: Source, runs: RunStateStore, bindings: HostBindings | undefined, writes: WriteClient) {
   let client: ZetaClient | null = null;
   let unsubscribe = () => {};
   let started = false;
@@ -292,7 +297,8 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
   const knownStatus = new Map<string, ServerStatus>();
   const pending = new Map<string, { resolve(value: unknown): void; reject(error: unknown): void }>();
   const live = (target: ZetaClient) => client === target;
-  const register = (target: ZetaClient, id?: string) => bindings && target.features.includes("session_host_commands") ? bindings.register(id) : undefined;
+  const authority = () => connection.state?.authority ?? "controller";
+  const register = (target: ZetaClient, id?: string) => authority() === "controller" && bindings && target.features.includes("session_host_commands") ? bindings.register(id) : undefined;
   const finish = (operationId: OperationId | undefined, value?: unknown, error?: unknown) => {
     if (!operationId) return;
     const waiter = pending.get(operationId); if (!waiter) return;
@@ -349,10 +355,13 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
       // fulcrum refuses a second replay of a session until the aborted one unwinds (back then forward during an open).
       const prior = replays.get(effect.runId);
       if (prior) { await prior; if (!live(target) || !current(effect.runId, effect.operationId)) return; }
+      const currentAuthority = authority();
+      const writer = currentAuthority === "controller" ? writes.get() : target;
+      if (!writer) throw new Error("not connected to zeta serve");
       const attempt = openSession(target, effect.runId, (messages, complete) => {
         history = { messages, complete };
         runs.dispatch({ type: "OPEN_PROGRESS", runId: effect.runId, operationId: effect.operationId, messages });
-      }, abort.signal, initialStatus, registration, replaced);
+      }, abort.signal, initialStatus, registration, replaced, currentAuthority, writer);
       const settled = attempt.then(() => {}, () => {}).finally(() => { if (replays.get(effect.runId) === settled) replays.delete(effect.runId); });
       replays.set(effect.runId, settled);
       const opened = await attempt;
@@ -383,12 +392,15 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
   };
   const handleCreate = async (effect: Extract<WorkspaceEffect, { type: "new-session" }>) => {
     const target = client;
-    if (!target) { const error = new Error("not connected to zeta serve"); runs.dispatch({ type: "NEW_SESSION_FAIL", runId: effect.runId, operationId: effect.operationId, error: error.message }); return finish(effect.operationId, undefined, error); }
+    let writer: ZetaClient | null;
+    try { writer = writes.get(); }
+    catch (error) { runs.dispatch({ type: "NEW_SESSION_FAIL", runId: effect.runId, operationId: effect.operationId, error: message(error) }); return finish(effect.operationId, undefined, error); }
+    if (!target || !writer) { const error = new Error("not connected to zeta serve"); runs.dispatch({ type: "NEW_SESSION_FAIL", runId: effect.runId, operationId: effect.operationId, error: error.message }); return finish(effect.operationId, undefined, error); }
     try {
       const binding = await register(target);
       const { approval_mode, ...sessionChoice } = effect.choice ?? {};
       const params = { ...sessionChoice, ...(target.features.includes("new_session_settings") && approval_mode ? { approval_mode } : {}), ...(binding ? { host_commands: [binding.command] } : {}) };
-      const { session } = await target.request("new_session", params, { timeoutMs: 30_000 }) as { session: SessionMeta };
+      const { session } = await writer.request("new_session", params, { timeoutMs: 30_000 }) as { session: SessionMeta };
       if (binding) await bindings!.bind(binding.registration_id, session.session_id);
       if (!live(target) || !current(effect.runId, effect.operationId)) return;
       runs.dispatch({ type: "NEW_SESSION_OK", runId: effect.runId, sessionId: session.session_id as SessionId, operationId: effect.operationId, session });
@@ -405,7 +417,9 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
     // Nothing left gamma: the draft keeps its id and says why, the same shape as handleDelivery's pre-send block.
     if (!client || !delivery || blocked) { const error = new Error(client && delivery ? blocked : "session is not attached"); runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false, failed: true, blocked: true, note: error.message }); finish(effect.operationId, undefined, error); return; }
     try {
-      await client.request("send_images", { session_id: sessionId, text: delivery.text, images: delivery.images.map(({ name, mime_type, data }) => ({ name, mime_type, data })), delivery_id: effect.intentId }, { timeoutMs: 30_000 });
+      const writer = writes.get();
+      if (!writer) throw new Error("not connected to zeta serve");
+      await writer.request("send_images", { session_id: sessionId, text: delivery.text, images: delivery.images.map(({ name, mime_type, data }) => ({ name, mime_type, data })), delivery_id: effect.intentId }, { timeoutMs: 30_000 });
       runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, queued: false }); finish(effect.operationId, true);
     } catch (error) {
       if (sessionMismatch(error)) { runs.dispatch({ type: "DELIVERY_ACK", runId: effect.runId, operationId: effect.operationId, intentId: effect.intentId, attemptId: effect.intentId, failed: true, blocked: true, note: MISMATCH }); return finish(effect.operationId, undefined, new Error(MISMATCH)); }
@@ -442,6 +456,7 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
     },
     start() { if (started) return; started = true; unsubscribe = connection.subscribe(onConnection); onConnection(); },
     create(runId: string, choice: { model?: string; provider?: string; approval_mode?: "ask" | "allow" } = {}) {
+      writes.get();
       const operationId = crypto.randomUUID() as OperationId;
       const result = new Promise<string>((resolve, reject) => pending.set(operationId, { resolve: (value) => resolve(String(value)), reject }));
       runs.startSession(runId, choice, operationId);
@@ -457,10 +472,12 @@ export function createSessionManager(connection: Source, runs: RunStateStore, bi
     retryOpen(runId: string) { runs.requestOpen(runId); },
     abort(runId: string) {
       const attachment = runs.getCatalog().attachment;
-      if (!client || attachment.kind !== "attached" || attachment.sessionId !== runId) throw Object.assign(new Error("session is not attached"), { code: -32003 });
-      return client.request("abort", {}, { timeoutMs: 10_000 });
+      const writer = writes.get();
+      if (!writer || attachment.kind !== "attached" || attachment.sessionId !== runId) throw Object.assign(new Error("session is not attached"), { code: -32003 });
+      return writer.request("abort", {}, { timeoutMs: 10_000 });
     },
     sendImages(sessionId: string, deliveryId: string, text: string, images: readonly QueuedImage[]) {
+      writes.get();
       const operationId = crypto.randomUUID() as OperationId;
       return new Promise<void>((resolve, reject) => {
         pending.set(operationId, { resolve: () => resolve(), reject });

@@ -23,6 +23,7 @@ import { createClientActions, createLocalActions, type ActionReceipt } from "./c
 import { alwaysAllowed as getAlwaysAllowed, markAlwaysAllowed, subscribeAlwaysAllowed } from "./always-allowed";
 import { createSessionGrantsModel, type SessionGrantsModel } from "./session-grants";
 import { useChildRoute, type ChildKey, type ChildRunsController } from "./child-runs";
+import { createWriteClient, type WriteClient } from "./write-client";
 
 const highlight = createHighlighter();
 addEventListener("pagehide", () => highlight.dispose(), { once: true });
@@ -31,10 +32,13 @@ const RichMarkdown = (props: MarkdownProps) => <Markdown {...props} highlight={h
 
 // Renderers stay module-level so appends never re-render every row; approvals reach the live client through context.
 type Decide = (requestId: string) => Promise<unknown>;
-const Decisions = createContext<{ approve?: Decide; always?: Decide; deny?: Decide; disabledReason?: string; alwaysAllowed?: ReadonlySet<string>; markAlways?(toolId: string): void } | null>(null);
+const Decisions = createContext<{ approve?: Decide; always?: Decide; deny?: Decide; disabledReason?: string; alwaysAllowed?: ReadonlySet<string>; markAlways?(toolId: string): void; observer?: true } | null>(null);
 function ZetaApproval({ id }: { id: string }) {
   const decide = useContext(Decisions);
   const toolId = useItemSelector(id, (item) => item?.type === "approval" && item.request.type === "approval_request" ? item.request.tool_call.id : "");
+  const pending = useItemSelector(id, (item) => item?.type === "approval" && !item.ended);
+  // An observer sees the request but has no decision to make: no buttons (css hides any a disabled_reason would draw).
+  if (decide?.observer) return <div className="observer-approval"><Approval id={id} />{pending ? <p className="note" role="status">waiting for the controller to approve</p> : null}</div>;
   const approveAlways = decide?.always;
   const always = approveAlways && ((requestId: string) => approveAlways(requestId).then((result) => { decide?.markAlways?.(toolId); return result; }));
   return <Approval id={id} onApprove={decide?.approve} onApproveAlways={always} approveAlwaysLabel="always allow" onDeny={decide?.deny} disabledReason={decide?.disabledReason} />;
@@ -214,12 +218,16 @@ export function App() {
   }, [browserEntry.gammaEntryId, browserEntry.run, browserEntry.child]);
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
-  const runs = useMemo(() => createSessionManager(connection, runState, hostBindings), [connection, runState]);
+  const writes = useMemo(() => createWriteClient(() => ({
+    client: connectionRef.current.client,
+    authority: connectionRef.current.state.phase === "connected" ? connectionRef.current.state.authority : null,
+  })), []);
+  const runs = useMemo(() => createSessionManager(connection, runState, hostBindings, writes), [connection, runState, writes]);
   const receipts = useMemo(createReceiptStore, []);
-  const deliveries = useMemo(() => createDeliveryManager(() => connectionRef.current.client, runState, runs.execute, runs.abort, (runId, text) => {
+  const deliveries = useMemo(() => createDeliveryManager(() => connectionRef.current.client, writes, runState, runs.execute, runs.abort, (runId, text) => {
     const id = runState.canonical(runId);
     receipts.set(id, { text: runState.get(id).attachments.length ? `${text}\nattachments are still attached and were not sent.` : text, tone: "error" });
-  }), [receipts, runState, runs]);
+  }), [receipts, runState, runs, writes]);
   useEffect(() => {
     const activate = (id: string) => {
       const nextModel = nextRunModel().model;
@@ -263,8 +271,9 @@ export function App() {
   const closeViewer = useCallback(() => { setViewer(null); requestAnimationFrame(() => viewerOpener.current?.focus()); }, []);
   const deliveryStates = selectedRecord.deliveries;
   useEffect(() => {
-    deliveries.observeActive(view.active, state.phase === "connected");
-    if (state.phase === "connected" && view.attached) void deliveries.reconcile(view.attached);
+    const controls = state.phase === "connected" && state.authority === "controller";
+    deliveries.observeActive(view.active, controls);
+    if (controls && view.attached) void deliveries.reconcile(view.attached);
   }, [deliveries, state.phase, view.active, view.attached]);
   const newRun = useCallback(() => {
     const next = { gammaEntryId: entryId(), run: draftId() };
@@ -287,6 +296,7 @@ export function App() {
     writeEntry(next, "push"); runState.dispatch({ type: "NAVIGATED", entryId: next.gammaEntryId as EntryId, runId: id as RunId }); runState.activate(id, { choice: "explicit", model: "" });
   }, [runState]);
   const client = state.phase === "connected" ? connection.client : null;
+  const writeClient = state.phase === "connected" && state.authority === "controller" ? writes.get() : null;
   const attachedOwner = open?.id === browserEntry.run ? open.id : null;
   const pushChild = useCallback((runId: string) => {
     if (!attachedOwner) return;
@@ -302,11 +312,13 @@ export function App() {
     setBrowserChild(undefined);
   }, [browserEntry.gammaEntryId, browserEntry.run]);
   const childRoute = useChildRoute({
-    client,
-    authority: "controller",
+    client: state.phase === "connected" && state.authority === "controller" ? writeClient : client,
+    authority: state.phase === "connected" ? state.authority : "controller",
     owner: attachedOwner,
     child: browserEntry.child,
-    canList: client?.features.includes(CHILD_RUNS_FEATURE) ?? false,
+    // Zeta offers each role only the methods it may call (zeta origin/main src/zeta/server/protocol.py:372-384): an observer
+    // gets child_run_list from #1175 (protocol.py:357), an older zeta keeps it controller-only and refuses it with -32008.
+    canList: (client?.features.includes(CHILD_RUNS_FEATURE) && commandRequests(client).has("child_run_list")) ?? false,
     canOpenHistory: client?.features.includes(CHILD_RUN_HISTORY_FEATURE) ?? false,
     onPushChild: pushChild,
     onBack: backFromChild,
@@ -318,19 +330,20 @@ export function App() {
   return (
     <HighlightContext value={highlight}>
       <ApprovalModeContext value={yolo}>
-        <RunProvider store={store} highlight={highlight} onRetry={client && open ? () => client.retrySession(open.id) : undefined}>
+        <RunProvider store={store} highlight={highlight} onRetry={writeClient && open ? () => writeClient.retrySession(open.id) : undefined}>
           <SubAgentNavigationProvider value={childRoute.navigation}>
           <DeliveryStates value={deliveryStates}>
           <RetryTurn value={retryTurn}>
-            <ResendDelivery value={resendDelivery}>
+            <ResendDelivery value={writeClient ? resendDelivery : null}>
             <div className="app">
               <TestRenderError area="app" />
               <header className="topbar">
                 <span className="brand"><span className="brand-mark" aria-hidden="true" /><span className="brand-name">gamma</span></span>
                 <RunTitle session={view.session} blank={!view.selected} opening={Boolean(view.opening)} />
+                {state.phase === "connected" && state.authority === "observer" ? <span className="authority-badge"><span className="authority-mark" aria-hidden="true" />observing</span> : null}
                 {childRoute.canList && attachedOwner ? <button ref={childRoute.childrenButtonRef} type="button" className="ghost children-button" onClick={(event) => childRoute.openCatalog(event.currentTarget)}>{childSnapshot.catalog.reportedAt === null ? "children" : `children ${childSnapshot.catalog.runs.length}${childSnapshot.catalog.nextOffset !== undefined ? "+" : ""}`}</button> : null}
                 <YoloIndicator className="topbar-yolo" />
-                <button type="button" className="ghost new-run" aria-label="new run" onClick={() => void newRun()}><span className="new-run-label">new run</span><span className="new-run-short" aria-hidden="true">+</span></button>
+                {state.phase !== "connected" || state.authority === "controller" ? <button type="button" className="ghost new-run" aria-label="new run" onClick={() => void newRun()}><span className="new-run-label">new run</span><span className="new-run-short" aria-hidden="true">+</span></button> : null}
                 <SettingsMenu>
                   <ThemePicker theme={theme} onChange={setTheme} />
                   <VimToggle on={vim} onChange={setVim} />
@@ -339,9 +352,9 @@ export function App() {
               <main ref={childRoute.parentRef} className="main" tabIndex={-1}>
                 {landedNotice ? <div className="landed-notice" role="status">your message started run {landedNotice.runId} <button type="button" className="ghost" onClick={() => { runState.dismissNotice(); selectRun(landedNotice.runId); }}>open</button><button type="button" className="ghost" onClick={() => runState.dismissNotice()}>dismiss</button></div> : null}
                 <RenderErrorBoundary className="run-render-failure" focusMode="transcript" title="run view broke" description="your draft is safe below. switch runs or reload gamma." resetKey={`${browserEntry.run}:${browserEntry.child ?? ""}`}>
-                  {browserEntry.child ? childController && attachedOwner ? <ChildView key={`${attachedOwner}:${browserEntry.child}`} owner={attachedOwner} runId={browserEntry.child} controller={childController} snapshot={childSnapshot} historyAvailable={client?.features.includes(CHILD_RUN_HISTORY_FEATURE) ?? null} canList={childRoute.canList} canSend={childRoute.canSend} onBack={childRoute.closeChild} /> : <section className="child-view" aria-label="child run"><button type="button" className="ghost child-back" onClick={childRoute.closeChild}>back to parent run</button><p className="note" data-tone="busy" role="status">connecting to the parent run…</p></section> : <Body state={state} view={view} connection={connection} runs={runs} onNewRun={newRun} onSelectRun={selectRun} followRequest={followRequest} />}
+                  {browserEntry.child ? childController && attachedOwner ? <ChildView key={`${attachedOwner}:${browserEntry.child}`} owner={attachedOwner} runId={browserEntry.child} controller={childController} snapshot={childSnapshot} historyAvailable={client?.features.includes(CHILD_RUN_HISTORY_FEATURE) ?? null} canList={childRoute.canList} canSend={childRoute.canSend} onBack={childRoute.closeChild} /> : <section className="child-view" aria-label="child run"><button type="button" className="ghost child-back" onClick={childRoute.closeChild}>back to parent run</button><p className="note" data-tone="busy" role="status">connecting to the parent run…</p></section> : <Body state={state} view={view} connection={connection} writes={writes} runs={runs} onNewRun={newRun} onSelectRun={selectRun} followRequest={followRequest} />}
                 </RenderErrorBoundary>
-                {!browserEntry.child ? <Dock key={browserEntry.run} autoFocus={!suppressComposerFocus} runId={browserEntry.run} runState={runState} onCreated={onCreated} onAccepted={() => setFollowRequest((request) => request + 1)} deliveries={deliveries} receipts={receipts} state={state} view={view} connection={connection} runs={runs} vim={vim} setVim={setVim} theme={theme} setTheme={setTheme} onNewRun={newRun} onRetryTurn={setRetryTurn} onImageOpen={openViewer} /> : null}
+                {!browserEntry.child ? <Dock key={browserEntry.run} autoFocus={!suppressComposerFocus} runId={browserEntry.run} runState={runState} onCreated={onCreated} onAccepted={() => setFollowRequest((request) => request + 1)} deliveries={deliveries} receipts={receipts} state={state} view={view} connection={connection} writes={writes} runs={runs} vim={vim} setVim={setVim} theme={theme} setTheme={setTheme} onNewRun={newRun} onRetryTurn={setRetryTurn} onImageOpen={openViewer} /> : null}
                 {childRoute.catalogOpen && childController && attachedOwner ? <ChildCatalog owner={attachedOwner} controller={childController} snapshot={childSnapshot.catalog} onOpen={childRoute.openChild} onClose={childRoute.closeCatalog} /> : null}
                 {viewer ? <Inspector value={viewer} onClose={closeViewer} /> : null}
               </main>
@@ -434,11 +447,11 @@ function ChildView({ owner, runId, controller, snapshot, historyAvailable, canLi
       <button type="button" className="ghost child-back" onClick={onBack}>back to parent run</button>
       <h2 ref={heading} tabIndex={-1} className="child-identity"><span className="child-owner">{owner}</span><span aria-hidden="true">/</span><strong>{row?.description || runId}</strong>{row && childAgentType(row) ? <span>{childAgentType(row)}</span> : null}</h2>
       <span className="saved-label">{historyAvailable === false ? "child details" : "saved transcript"}</span>
-      {row ? <div className="child-meta"><span className="status-mark" data-state={childStatus(row)} aria-hidden="true" /><span>{childStatus(row)}</span>{row.currentStep ? <span>{row.currentStep}</span> : null}<span>{elapsed(row.elapsedSeconds)}</span><span>{row.turnsUsed} turns</span><span>{row.toolCount} tools</span></div> : null}
+      {row ? <div className="child-meta"><span className="status-mark" data-state={childStatus(row)} aria-hidden="true" /><span>{childStatus(row)}</span>{row.currentStep ? <span>{row.currentStep}</span> : null}<span>{elapsed(row.elapsedSeconds)}</span><span>{row.turnsUsed} {row.turnsUsed === 1 ? "turn" : "turns"}</span><span>{row.toolCount} {row.toolCount === 1 ? "tool" : "tools"}</span></div> : null}
     </header>
     {missing ? <div className="child-route-note"><p>{snapshot.catalog.nextOffset !== undefined ? "this child is not in the latest report" : "this child is no longer listed"}</p><div className="actions">{snapshot.catalog.nextOffset !== undefined ? <button type="button" className="ghost" onClick={() => void controller.load(owner, "more")}>load more</button> : null}<button type="button" className="ghost" onClick={() => void controller.load(owner, "refresh")}>refresh</button><button type="button" className="ghost" onClick={onBack}>back</button></div></div> : null}
     {snapshot.historyLoading ? <p className="note" data-tone="busy" role="status">loading saved transcript…</p> : null}
-    {historyAvailable === false ? <p className="note child-history-note" role="status">this zeta version cannot show the child transcript yet; details and follow-up still work</p> : null}
+    {historyAvailable === false ? <p className="note child-history-note" role="status">{canSend ? "this zeta version cannot show the child transcript yet; details and follow-up still work" : "this zeta version cannot show the child transcript yet"}</p> : null}
     {!canSend ? <p className="note" role="status">read-only: follow-ups are available from the controller connection</p> : null}
     {!canSend && !canList ? <p className="note" role="status">this zeta connection cannot list child details</p> : null}
     {errorCopy && historyAvailable !== false ? <div className="note" data-tone="danger" role="alert"><span>{errorCopy}</span> <button type="button" className="ghost" onClick={retry}>try again</button> <button type="button" className="ghost" onClick={onBack}>back</button></div> : null}
@@ -520,12 +533,15 @@ function focusApproval() {
  * one action: connection and run-open problems in the main panel, a failed turn on its transcript row, a failed send,
  * steer, or stop in the composer note. While a problem panel shows, the status line is absent.
  */
-function StatusLine({ phase }: { phase: RunPhase }) {
-  const tone = phase.kind === "approval" ? "warn" : phase.kind === "ready" ? "ok" : "busy";
-  const text = { ready: "ready", thinking: "working…", connecting: "connecting…", reconnecting: "reconnecting…", opening: "opening the run…", approval: "", running: "" }[phase.kind];
+function StatusLine({ phase, observer }: { phase: RunPhase; observer: boolean }) {
+  const idle = observer && phase.kind === "ready";
+  const tone = phase.kind === "approval" ? "warn" : idle ? "neutral" : phase.kind === "ready" ? "ok" : "busy";
+  const text = idle ? "idle" : { ready: "ready", thinking: "working…", connecting: "connecting…", reconnecting: "reconnecting…", opening: "opening the run…", approval: "", running: "" }[phase.kind];
   return (
-    <div className="status-line" data-state={phase.kind} data-tone={tone} role="status">
-      {phase.kind === "approval" ? (
+    <div className="status-line" data-state={idle ? "idle" : phase.kind} data-tone={tone} role="status">
+      {phase.kind === "approval" && observer ? (
+        <span className="status-text">waiting for the controller to approve</span>
+      ) : phase.kind === "approval" ? (
         <button type="button" className="status-link" onClick={focusApproval}>waiting for your approval</button>
       ) : (
         <span className="status-text">{phase.kind === "running" ? `running ${phase.tool}` : text}</span>
@@ -613,8 +629,8 @@ function connectionBlockedReason(state: ConnectionState) {
   return null;
 }
 
-function Dock({ autoFocus, state, view, connection, runs, vim, setVim, theme, setTheme, onNewRun, onRetryTurn, onImageOpen, runState, runId, onCreated, onAccepted, deliveries, receipts }: {
-  autoFocus: boolean; state: ConnectionState; view: RunState; connection: Connection; runs: SessionManager; vim: boolean; setVim(value: boolean): void; theme: ThemeChoice; setTheme(value: ThemeChoice): void; onNewRun(): void; onRetryTurn: Dispatch<SetStateAction<RetryAction | null>>; onImageOpen(block: any): void; runState: RunStateStore; runId: string; onCreated(from: string, sessionId: string): void; onAccepted(): void; deliveries: DeliveryManager; receipts: ReceiptStore;
+function Dock({ autoFocus, state, view, connection, writes, runs, vim, setVim, theme, setTheme, onNewRun, onRetryTurn, onImageOpen, runState, runId, onCreated, onAccepted, deliveries, receipts }: {
+  autoFocus: boolean; state: ConnectionState; view: RunState; connection: Connection; writes: WriteClient; runs: SessionManager; vim: boolean; setVim(value: boolean): void; theme: ThemeChoice; setTheme(value: ThemeChoice): void; onNewRun(): void; onRetryTurn: Dispatch<SetStateAction<RetryAction | null>>; onImageOpen(block: any): void; runState: RunStateStore; runId: string; onCreated(from: string, sessionId: string): void; onAccepted(): void; deliveries: DeliveryManager; receipts: ReceiptStore;
 }) {
   const present = view;
   const open = present.open;
@@ -622,6 +638,7 @@ function Dock({ autoFocus, state, view, connection, runs, vim, setVim, theme, se
   const fileInput = useRef<HTMLInputElement | null>(null);
   const blank = !present.selected;
   const client = state.phase === "connected" ? connection.client : null;
+  const writeClient = state.phase === "connected" && state.authority === "controller" ? writes.get() : null;
   const agent = useAgentPhase();
   const agentRunning = agent.kind === "thinking" || agent.kind === "approval" || agent.kind === "running";
   const running = state.phase === "connected" && agentRunning && open?.id === view.active;
@@ -631,7 +648,8 @@ function Dock({ autoFocus, state, view, connection, runs, vim, setVim, theme, se
   const starting = record.lifecycle.kind === "creating";
   const input = runInput(runState.getCatalog(), runId as RunId);
   const sessionId = blank || starting || view.attached !== open?.id ? null : open.id;
-  const grants = useMemo(() => client && sessionId && client.features.includes(SESSION_GRANTS_FEATURE) ? createSessionGrantsModel(client, sessionId) : null, [client, sessionId]);
+  const observer = state.phase === "connected" && state.authority === "observer";
+  const grants = useMemo(() => writeClient && sessionId && writeClient.features.includes(SESSION_GRANTS_FEATURE) ? createSessionGrantsModel(writeClient, sessionId) : null, [writeClient, sessionId]);
   const [permissionsOpenRequest, setPermissionsOpenRequest] = useState(0);
   useEffect(() => {
     if (!grants) return;
@@ -639,12 +657,13 @@ function Dock({ autoFocus, state, view, connection, runs, vim, setVim, theme, se
     return () => grants.stop();
   }, [grants]);
   const requests = client ? commandRequests(client) : new Set<string>();
-  const commands = useMemo(() => client && sessionId
-    ? createCommandController(sessionId, (method, params) => client.request(method, params), { features: new Set(client.features), requests: commandRequests(client), turnActive: () => activeRun(runState.getCatalog()) === sessionId })
-    : createUnavailableCommandController(client ? NEEDS_OPEN_RUN : undefined, Boolean(client && !sessionId)), [client, runState, sessionId]);
-  const approvalDisabledReason = !client ? "reconnecting — decisions are disabled until the server confirms this run" : open?.stale ? "reconnecting — decisions are disabled until the server confirms this run" : present.openError ? "opening the run — decisions are paused" : undefined;
+  const commands = useMemo(() => writeClient && sessionId
+    ? createCommandController(sessionId, (method, params) => writeClient.request(method, params), { features: new Set(writeClient.features), requests: commandRequests(client!), turnActive: () => activeRun(runState.getCatalog()) === sessionId })
+    : createUnavailableCommandController(observer ? "you are observing this run" : client ? NEEDS_OPEN_RUN : undefined, Boolean(client && !sessionId)), [client, observer, runState, sessionId, writeClient]);
+  const approvalDisabledReason = observer ? "you are observing this run; decisions are off" : !client ? "reconnecting — decisions are disabled until the server confirms this run" : open?.stale ? "reconnecting — decisions are disabled until the server confirms this run" : present.openError ? "opening the run — decisions are paused" : undefined;
 
   const onSubmit: Submit = useCallback(async (action, images, { steer, deliveryId, sourceText }) => {
+    writes.get();
     // Without an open run nothing was attempted, so the attachments wait for the message that opens one.
     const kept = sessionId ? "attachments are still attached and were not sent." : "attachments stay queued for your next message.";
     const setReceipt = (text: string, tone: "quiet" | "error", extra: Pick<import("./receipts").CommandReceipt, "action"> = {}) => receipts.set(runState.canonical(runId), { text: images.length ? `${text}\n${kept}` : text, tone, ...extra });
@@ -667,10 +686,10 @@ function Dock({ autoFocus, state, view, connection, runs, vim, setVim, theme, se
     if (action.kind === "client-action") {
       const local = { newRun: onNewRun, themes: themeChoices, currentTheme: () => theme, setTheme, openFilePicker: () => fileInput.current?.click() };
       // Resolve the action table first (zeta-backed for an open run, gamma's own otherwise), then index it.
-      const actions: Partial<Record<ClientActionName, (args: string) => Promise<ActionReceipt | void>>> = client && sessionId ? createClientActions({
-        ...local, sessionId, requests, request: (method, params) => client.request(method as never, params as never),
-        refreshStatus: runs.refreshStatus, retrySession: (id) => client.retrySession(id), currentName: () => sessionTitle(present.session) ?? undefined,
-        approvalStore, approvalDisabledReason, decide: createApprovalDecider(client, open!.lease.store), markAlways: (toolId) => markAlwaysAllowed(sessionId, toolId),
+      const actions: Partial<Record<ClientActionName, (args: string) => Promise<ActionReceipt | void>>> = writeClient && sessionId ? createClientActions({
+        ...local, sessionId, requests, request: (method, params) => writeClient.request(method as never, params as never),
+        refreshStatus: runs.refreshStatus, retrySession: (id) => writeClient.retrySession(id), currentName: () => sessionTitle(present.session) ?? undefined,
+        approvalStore, approvalDisabledReason, decide: createApprovalDecider(writeClient, open!.lease.store), markAlways: (toolId) => markAlwaysAllowed(sessionId, toolId),
         ...(grants ? { permissions: {
           get grants() { return grants.state.snapshot?.session_grants ?? []; },
           open: () => setPermissionsOpenRequest((request) => request + 1),
@@ -716,16 +735,18 @@ function Dock({ autoFocus, state, view, connection, runs, vim, setVim, theme, se
       if (runState.get(runId).retryDelivery?.id !== deliveryId) setReceipt(error instanceof Error ? error.message : String(error), "error");
       throw error;
     }
-  }, [approvalDisabledReason, approvalStore, client, connection, deliveries, grants, onAccepted, onCreated, onNewRun, present.session, receipts, record.model, requests, runId, runState, runs, sessionId, setTheme, setVim, theme, yolo]);
+  }, [approvalDisabledReason, approvalStore, client, connection, deliveries, grants, onAccepted, onCreated, onNewRun, present.session, receipts, record.model, requests, runId, runState, runs, sessionId, setTheme, setVim, theme, writeClient, writes, yolo]);
   const onStop = useCallback(async () => { await deliveries.stop(runId); await runs.refreshStatus(); }, [deliveries, runId, runs]);
   const lastPrompt = useLastPrompt();
 
-  useDockRetry(agent, client, deliveries, runState, runId, lastPrompt, onRetryTurn);
+  useDockRetry(agent, writeClient, deliveries, runState, runId, lastPrompt, onRetryTurn);
 
   const failure = present.openError;
   const problem = (state.phase !== "connected" && state.phase !== "connecting" && state.phase !== "dropped") || Boolean(failure);
   const phase = dockPhase(state, Boolean(present.opening) || input.block === "opening" || input.block === "syncing", open, agent, starting);
-  const readOnly = blank ? null : dockReadOnlyReason(open?.id ?? null, view.active);
+  // Both roles were refused: this tab can never send until a manual retry gets a slot, so nothing is editable.
+  const readOnly = state.phase === "observer_limit" ? "this run has the most observers zeta allows; close another observer tab, then retry"
+    : observer ? "another client controls this run; you are observing, sending is off" : blank ? null : dockReadOnlyReason(open?.id ?? null, view.active);
   const blockedReason = starting ? null : input.block === "pending" || input.block === "waits-for-active" ? inputBlockText(input.block, view.activeTitle) : connectionBlockedReason(state) ?? inputBlockText(input.block, view.activeTitle);
   const onPreparationFailure = useCallback((error: unknown, images: readonly import("./image-queue").QueuedImage[], text: string) => {
     const attachment = runState.getCatalog().attachment;
@@ -741,7 +762,7 @@ function Dock({ autoFocus, state, view, connection, runs, vim, setVim, theme, se
   }, [approvalStore, receipts, runId, runState]);
   // The opening panel already says what the run waits for; the composer note says what that means for sending.
   const panel = problem || (!open && Boolean(present.opening));
-  return <div className="dock"><>{panel ? null : <StatusLine phase={phase} />}</><CommandReceiptLine store={receipts} runId={runId} /><DockComposer autoFocus={autoFocus} commands={commands} deliveries={deliveries} readOnly={readOnly} blockedReason={blockedReason} blockedStatic={input.block === "waits-for-active" || state.phase === "not_running"} settingsReason={settingsBlockText(input.settingsBlock)} running={running} vim={vim} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onStop={onStop} onImageOpen={onImageOpen} onFileInput={(input) => { fileInput.current = input; }} client={client} sessionId={sessionId} createdWithDefault={record.model.choice === "default"} planMode={record.settings.loaded?.plan_mode === true} runState={runState} runId={runId} grants={grants} permissionsOpenRequest={permissionsOpenRequest} /></div>;
+  return <div className="dock" data-authority={observer ? "observer" : undefined}><>{panel ? null : <StatusLine phase={phase} observer={observer} />}</><CommandReceiptLine store={receipts} runId={runId} /><DockComposer autoFocus={autoFocus} commands={commands} deliveries={deliveries} readOnly={readOnly} blockedReason={blockedReason} blockedStatic={input.block === "waits-for-active" || state.phase === "not_running"} settingsReason={settingsBlockText(input.settingsBlock)} running={running} vim={vim} onSubmit={onSubmit} onPreparationFailure={onPreparationFailure} onStop={onStop} onImageOpen={onImageOpen} onFileInput={(input) => { fileInput.current = input; }} client={writeClient} sessionId={sessionId} createdWithDefault={record.model.choice === "default"} planMode={record.settings.loaded?.plan_mode === true} runState={runState} runId={runId} grants={grants} permissionsOpenRequest={permissionsOpenRequest} /></div>;
 }
 
 /** The last prompt the user sent, so a failed turn can be retried with it. */
@@ -754,17 +775,19 @@ function useLastPrompt() {
   }, [store]));
 }
 
-function OpenBody({ state, connection, present, runs, followRequest }: { state: ConnectionState; connection: Connection; present: RunState; runs: SessionManager; followRequest: number }) {
+function OpenBody({ state, connection, writes, present, runs, followRequest }: { state: ConnectionState; connection: Connection; writes: WriteClient; present: RunState; runs: SessionManager; followRequest: number }) {
   const open = present.open!;
   const failed = present.openError;
   const offline = state.phase !== "connected";
-  return <><>{offline && (state.phase !== "connecting" || state.lastFailure) && state.phase !== "dropped" ? <ConnectionNotice state={state} connection={connection} compact /> : null}</><>{!open.history.complete ? <p className="note" data-tone="busy" role="status">loading history… {open.history.messages.toLocaleString("en")} loaded</p> : null}</><>{open.syncing ? <p className="note" data-tone="busy" role="status">live updates paused while this run is busy; it will catch up</p> : null}</><>{failed ? <div className="note" data-tone={failed.busy ? "busy" : "danger"} role="alert"><span>{failed.busy ? `this run waits while ${present.active ?? "another run"} has the active zeta turn` : `could not reopen this run: ${failed.message}`}</span> <button type="button" className="ghost" onClick={() => runs.dismissOpenError(failed.id)}>dismiss</button> <button type="button" className="ghost" onClick={() => runs.retryOpen(failed.id)}>try again</button></div> : null}</><Run client={offline ? null : connection.client} open={open} readOnly={Boolean(failed)} followRequest={followRequest} /></>;
+  const writeClient = state.phase === "connected" && state.authority === "controller" ? writes.get() : null;
+  return <><>{offline && (state.phase !== "connecting" || state.lastFailure) && state.phase !== "dropped" ? <ConnectionNotice state={state} connection={connection} compact /> : null}</><>{!open.history.complete ? <p className="note" data-tone="busy" role="status">loading history… {open.history.messages.toLocaleString("en")} loaded</p> : null}</><>{open.syncing ? <p className="note" data-tone="busy" role="status">live updates paused while this run is busy; it will catch up</p> : null}</><>{failed ? <div className="note" data-tone={failed.busy ? "busy" : "danger"} role="alert"><span>{failed.busy ? `this run waits while ${present.active ?? "another run"} has the active zeta turn` : `could not reopen this run: ${failed.message}`}</span> <button type="button" className="ghost" onClick={() => runs.dismissOpenError(failed.id)}>dismiss</button> <button type="button" className="ghost" onClick={() => runs.retryOpen(failed.id)}>try again</button></div> : null}</><Run client={offline ? null : writeClient} open={open} readOnly={Boolean(failed)} observer={state.phase === "connected" && state.authority === "observer"} followRequest={followRequest} /></>;
 }
-function Body({ state, view, connection, runs, onNewRun, onSelectRun, followRequest }: { state: ConnectionState; view: RunState; connection: Connection; runs: SessionManager; onNewRun(): void; onSelectRun(id: string): void; followRequest: number }) {
+function Body({ state, view, connection, writes, runs, onNewRun, onSelectRun, followRequest }: { state: ConnectionState; view: RunState; connection: Connection; writes: WriteClient; runs: SessionManager; onNewRun(): void; onSelectRun(id: string): void; followRequest: number }) {
   const present = view;
   const offline = state.phase !== "connected";
-  const ownerActions = present.active ? <div className="actions"><button type="button" className="primary" onClick={() => onSelectRun(present.active!)}>go to running run</button><button type="button" className="ghost" onClick={() => connection.client && void stopTurn(connection.client)}>stop running run</button></div> : null;
-  if (present.open) return <OpenBody state={state} connection={connection} present={present} runs={runs} followRequest={followRequest} />;
+  const observer = state.phase === "connected" && state.authority === "observer";
+  const ownerActions = present.active ? <div className="actions"><button type="button" className="primary" onClick={() => onSelectRun(present.active!)}>go to running run</button>{observer ? null : <button type="button" className="ghost" onClick={() => { const client = writes.get(); if (client) void stopTurn(client); }}>stop running run</button>}</div> : null;
+  if (present.open) return <OpenBody state={state} connection={connection} writes={writes} present={present} runs={runs} followRequest={followRequest} />;
   if (offline && (state.phase !== "connecting" || state.lastFailure) && state.phase !== "dropped") return <div className="scroll"><ConnectionNotice state={state} connection={connection} /></div>;
   if (present.opening) return <div className="scroll"><Panel title="opening the run" tone="busy"><p>{present.active ? `this run waits while ${present.active} has the active zeta turn` : !present.opening.loading ? "waiting for zeta to attach this run" : `loading history${present.opening.messages ? ` · ${present.opening.messages.toLocaleString("en")} messages` : ""}`}</p>{ownerActions}</Panel></div>;
   if (present.openError) { const failure = present.openError; return <div className="scroll"><Panel title={failure.busy ? "another run is active" : "could not open this run"} tone={failure.busy ? "warn" : "danger"}><p className="mono">{failure.busy ? `this run waits while ${present.active ?? "another run"} has the active zeta turn` : failure.message}</p>{failure.candidates?.length ? <div className="actions" aria-label="matching runs">{failure.candidates.map((candidate) => candidate.unique ? <a key={candidate.id} className="ghost" href={`?run=${encodeURIComponent(candidate.id)}`}>{candidate.id}</a> : <span key={candidate.id} className="candidate-guidance"><span className="mono">{candidate.id}</span> · type a longer id</span>)}</div> : null}{ownerActions}<div className="actions"><button type="button" className="primary" onClick={() => runs.retryOpen(failure.id)}>try again</button><button type="button" className="ghost" onClick={onNewRun}>new run</button></div></Panel></div>; }
@@ -772,7 +795,7 @@ function Body({ state, view, connection, runs, onNewRun, onSelectRun, followRequ
   return <div className="scroll"><div className="empty-run" role="note"><h2>start a conversation</h2><p>write below to start. zeta creates the run when you send the first message.</p></div></div>;
 }
 
-function Run({ client, open, readOnly, followRequest }: { client: ZetaClient | null; open: OpenRun; readOnly: boolean; followRequest: number }) {
+function Run({ client, open, readOnly, observer, followRequest }: { client: ZetaClient | null; open: OpenRun; readOnly: boolean; observer: boolean; followRequest: number }) {
   const scroll = useRef<HTMLDivElement>(null);
   const [jumpLane, setJumpLane] = useState<HTMLDivElement | null>(null);
   const artifacts = useArtifacts(open.id, open.lease.store);
@@ -782,10 +805,11 @@ function Run({ client, open, readOnly, followRequest }: { client: ZetaClient | n
   const closeViewer = useCallback(() => { setViewer(null); requestAnimationFrame(() => viewerOpener.current?.focus()); }, []);
   const alwaysAllowed = useSyncExternalStore((listener) => subscribeAlwaysAllowed(open.id, listener), () => getAlwaysAllowed(open.id));
   const decisions = useMemo(() => {
+    if (observer) return { observer: true as const };
     if (!client || open.stale || readOnly) return { disabledReason: readOnly ? "opening the run — decisions are paused" : "reconnecting — decisions are disabled until the server confirms this run" };
     const decide = createApprovalDecider(client, open.lease.store);
     return { approve: (requestId: string) => decide("approve", requestId), always: (requestId: string) => decide("approve", requestId, true), deny: (requestId: string) => decide("deny", requestId), alwaysAllowed, markAlways: (toolId: string) => markAlwaysAllowed(open.id, toolId) };
-  }, [alwaysAllowed, client, open.lease.store, open.stale, readOnly]);
+  }, [alwaysAllowed, client, observer, open.lease.store, open.stale, readOnly]);
   return (
     <Decisions.Provider value={decisions}>
       <TestRenderError area="transcript" />
@@ -901,7 +925,7 @@ function formatConnectionNotice(state: ConnectionState, command: string) {
     case "not_running": return { title: lost ? "connection lost: zeta serve stopped" : "zeta serve is not running", tone: "danger", detail: "start zeta serve", copy: true, body: <><p>start it with this page's origin in the allowlist. this page connects as soon as it is up.</p><Copy value={command} /></> };
     case "auth_failed": return { title: "auth failed", tone: "danger", detail: state.reason === "origin" ? "this page origin is not allowed" : "controller credential refused; restart zeta serve", copy: true, body: state.reason === "origin" ? <><p>zeta serve does not allow this page's origin <code>{location.origin}</code>. restart it with this origin:</p><Copy value={command} /></> : <><p>zeta serve refused this controller credential. restart zeta serve so the dev server can hand gamma the new credential:</p><Copy value={command} /></> };
     case "unresponsive": return { title: "zeta serve did not answer", tone: "danger", detail: "hello did not finish within 15 seconds", body: <p>the server accepted the socket but did not finish hello within 15 seconds. check its terminal, then retry.</p> };
-    case "busy": return { title: "zeta serve is in use", tone: "warn", detail: "another client has the controller", body: <p>zeta serve accepts one client at a time. close the other client (another tab, the playground, or the zeta app) and this page takes over.</p> };
+    case "observer_limit": return { title: "observer limit reached", tone: "warn", detail: "zeta serve has no observer slot available", body: <p>close another observer, then retry.</p> };
     case "incompatible": return { title: "unsupported protocol version", tone: "danger", detail: "zeta serve does not speak protocol 1.2; update zeta", body: <><p>gamma requires zeta protocol 1.2, but the server rejected that version. update zeta, then reload this page to retry.</p><button type="button" className="ghost" onClick={() => location.reload()}>reload and retry</button></> };
   }
 }
@@ -909,9 +933,9 @@ function formatConnectionNotice(state: ConnectionState, command: string) {
 function ConnectionNotice({ state, connection, compact = false }: { state: ConnectionState; connection: Connection; compact?: boolean }) {
   const wait = useCountdown("retryAt" in state ? state.retryAt : null);
   const command = serveCommand(location.origin, connection.port);
-  const retry = wait === null ? null : (
+  const retry = wait === null && state.phase !== "observer_limit" ? null : (
     <div className="actions">
-      <span className="wait" aria-live="off">{wait > 0 ? `retrying in ${wait}s` : "retrying"}</span>
+      {wait !== null ? <span className="wait" aria-live="off">{wait > 0 ? `retrying in ${wait}s` : "retrying"}</span> : null}
       <button type="button" className="primary" onClick={() => connection.retryNow()}>retry now</button>
     </div>
   );
@@ -923,7 +947,7 @@ function ConnectionNotice({ state, connection, compact = false }: { state: Conne
         <strong>{notice.title}</strong>
         <span>{notice.detail}</span>
         <span className="wait">{wait === null ? "" : wait > 0 ? `retrying in ${wait}s` : "retrying"}</span>
-        {wait !== null ? <button type="button" className="ghost" onClick={() => connection.retryNow()}>retry now</button> : null}
+        {wait !== null || state.phase === "observer_limit" ? <button type="button" className="ghost" onClick={() => connection.retryNow()}>retry now</button> : null}
         {notice.copy ? <Copy value={command} /> : null}
       </div>
     );

@@ -22,7 +22,7 @@ describe("child runs controller", () => {
     expect(childNavigationUnavailable({ authority: "controller", canList: true, canOpenHistory: false })).toBeUndefined();
     expect(childNavigationUnavailable({ authority: "observer", canList: true, canOpenHistory: false })).toBeUndefined();
     expect(childNavigationUnavailable({ authority: "controller", canList: false, canOpenHistory: true })).toBeUndefined();
-    expect(childNavigationUnavailable({ authority: "observer", canList: false, canOpenHistory: false })).toBe("child details need a newer zeta server");
+    expect(childNavigationUnavailable({ authority: "observer", canList: false, canOpenHistory: false })).toBeUndefined();
   });
   test("refresh generations and freshness barriers never publish an older page", async () => {
     const calls: Call[] = [];
@@ -154,7 +154,7 @@ describe("child runs controller", () => {
     expect(controller.draft(key)).toBe("");
   });
 
-  test("observer authority opens history without list or send requests", async () => {
+  test("observer authority lists and opens history but never sends", async () => {
     const calls: Call[] = [];
     const zeta = client((method) => Promise.resolve(method === "child_run_history"
       ? { messages: [], next_before: null, history_validator: { end: 0, entry_id: null } }
@@ -164,8 +164,8 @@ describe("child runs controller", () => {
     controller.setOwner("owner");
     await controller.load("owner");
     await controller.open(key);
-    await controller.send(key, "must not send");
-    expect(calls.map((call) => call.method)).toEqual(["child_run_history"]);
+    expect(await controller.send(key, "must not send")).toEqual({ kind: "read_only" });
+    expect(calls.map((call) => call.method)).toEqual(["child_run_list", "child_run_history"]);
     controller.closeHistory();
   });
 
