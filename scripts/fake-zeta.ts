@@ -125,6 +125,33 @@ function invalidParams(method: string, checks: ParamChecks | undefined, params: 
 }
 
 const SETTINGS_REQUESTS = ["model_catalog", "session_settings", "set_settings", "send_images"];
+// The fake session workspace for path_complete: emoji, spaces, nesting, a hidden entry, and a name too long for a phone row, as in zeta 54b9f211
+// tests/test_server_path_completion.py:60-70. Keys are the typed directory prefix; values are [name, is directory].
+const PATH_WORKSPACE: Readonly<Record<string, ReadonlyArray<readonly [string, boolean]>>> = {
+  "": [["src", true], ["😀 my folder", true], ["src-notes.md", false], ["README.md", false], [".hidden", false], ["a-generated-report-with-a-name-far-too-long-for-one-phone-row.md", false]],
+  "src/": [["lib", true], ["app.ts", false]],
+  "😀 my folder/": [["deep note.txt", false]],
+};
+/** Zeta 54b9f211 src/zeta/core/commands/path_completion.py:11-13 and :31-57, :109-133 over PATH_WORKSPACE. */
+function completeFakePath(textBeforeCursor: string) {
+  const match = /(?<!\S)@(?:"([^"\n]*)|(\S*))$/.exec(textBeforeCursor);
+  if (!match) return { entries: [], truncated: false };
+  const quoted = match[1] !== undefined;
+  const pathText = match[1] ?? match[2] ?? "";
+  const prefix = pathText.slice(0, pathText.lastIndexOf("/") + 1);
+  const basename = pathText.slice(prefix.length);
+  const entries = (PATH_WORKSPACE[prefix] ?? [])
+    .filter(([name]) => name.startsWith(basename) && (!name.startsWith(".") || basename.startsWith(".")))
+    .sort((a, b) => Number(b[1]) - Number(a[1]) || (a[0] < b[0] ? -1 : 1))
+    .map(([name, directory]) => {
+      const candidate = `${prefix}${name}${directory ? "/" : ""}`;
+      const close = directory ? "" : '"';
+      const text = quoted ? `${candidate}${close}` : /\s/.test(candidate) ? `"${candidate}${close}` : candidate;
+      return { text, start_position: -[...pathText].length, display: `@${text}`, kind: directory ? "directory" : "file" };
+    });
+  return { entries, truncated: false };
+}
+
 // Zeta origin/main src/zeta/server/protocol.py:277-357, 372-384: observers receive only Access.READ methods.
 // child_run_list became Access.READ in zeta #1175 (protocol.py:357); before it, it was CONTROLLER_READ (a88e60133^1).
 const OBSERVER_READABLE = new Set(["status", "session_tree", "session_history", "child_run_history", "child_run_list", "model_catalog", "session_settings", "delivery_status", "session_grants"]);
@@ -814,11 +841,11 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
           if (mode === "slow") await wait(helloDelay);
           if (!sockets.has(socket)) return;
           if (socket.data.role === "controller") controller = socket;
-          const features = protocolVersion === "1.0" ? [] : (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "send_images_delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || name === "served_turn_end" || name === "session_history_fidelity" || name === "delivery_session_guard" || (name === "model_input_ids" && modelInputIds) || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings) || (name === "session_grants" && sessionGrants) || name === "child_runs" || name === "serve_observers" || (name === "child_run_history" && childRunHistoryEnabled)) ?? [];
+          const features = protocolVersion === "1.0" ? [] : (params.features as string[] | undefined)?.filter((name) => name === "list_sessions_paging" || name === "delivery_id" || name === "send_images_delivery_id" || name === "user_message_event" || name === "user_message_delivery_id" || name === "served_turn_end" || name === "session_history_fidelity" || name === "delivery_session_guard" || (name === "model_input_ids" && modelInputIds) || (name === "approval_history" && approvalHistoryMode === "advertised-with-rows") || (name === "approval_reconnect" && approvalReconnect) || (name === "new_session_settings" && advertiseNewSessionSettings) || (name === "session_grants" && sessionGrants) || name === "child_runs" || name === "serve_observers" || name === "path_completion" || (name === "child_run_history" && childRunHistoryEnabled)) ?? [];
           socket.data.features = features;
           const reconnect = features.includes("approval_reconnect");
           if (reconnect) reconnectControllers.add(socket as object);
-          const advertised = protocolVersion === "1.0" ? ["list_sessions", "new_session", "resume", "send", "steer", "approve", "deny", "abort", "status"] : ["status", "approve", "deny", "rename_session", "session_tree", "switch_branch", "slash_list", "slash_run", ...(sessionGrants ? ["session_grants", "revoke_session_grants"] : []), "child_run_list", "child_run_send", "child_run_history", ...(settingsEnabled ? ["model_catalog", "session_settings", "set_settings", "send_images", ...(advertiseNewSessionSettings ? ["new_session_settings"] : [])] : []), ...extraRequests];
+          const advertised = protocolVersion === "1.0" ? ["list_sessions", "new_session", "resume", "send", "steer", "approve", "deny", "abort", "status"] : ["status", "approve", "deny", "rename_session", "session_tree", "switch_branch", "slash_list", "slash_run", ...(sessionGrants ? ["session_grants", "revoke_session_grants"] : []), "child_run_list", "child_run_send", "child_run_history", "path_complete", ...(settingsEnabled ? ["model_catalog", "session_settings", "set_settings", "send_images", ...(advertiseNewSessionSettings ? ["new_session_settings"] : [])] : []), ...extraRequests];
           const offered = advertised.filter((name) => !omittedRequests.has(name) && (socket.data.role === "controller" || observerReadable(name)));
           reply({ result: { ...extraHelloFields, protocol_version: protocolVersion, server: "fake-zeta", capabilities: protocolVersion === "1.0" ? { requests: offered, notifications: ["event"] } : { features, requests: offered } } });
           if (decide && !approvalAborted) {
@@ -924,6 +951,14 @@ export async function startFakeZeta({ origins, port = 0, live = true, historyMod
         // As in zeta (server/ergonomics.py `active`): these name the active session or fail.
         // send_images under delivery_session_guard answers with data.code in deliver(); before it, zeta sent no data (serve-protocol.md:508-510).
         if (SETTINGS_REQUESTS.includes(method) && method !== "model_catalog" && params.session_id !== active && !(method === "send_images" && socket.data.features?.includes("delivery_session_guard"))) return reply({ error: { code: -32003, message: "session is not active" } });
+        // Zeta 54b9f211 tests/test_server_path_completion.py:194-271: -32601 without the feature, -32003 for another
+        // session; observers already got -32008 above (:223-240).
+        if (method === "path_complete") {
+          if (!socket.data.features?.includes("path_completion")) return reply({ error: { code: -32601, message: `method not found: ${method}` } });
+          if (typeof params.session_id !== "string" || typeof params.text_before_cursor !== "string") return reply({ error: { code: -32602, message: "session_id and text_before_cursor must be strings" } });
+          if (params.session_id !== active) return reply({ error: { code: -32003, message: "session is not active" } });
+          return reply({ result: completeFakePath(params.text_before_cursor) });
+        }
         if (method === "slash_list") return reply({ result: { commands: params.include_unavailable === true ? completeSlashCatalog : defaultSlashCatalog, notices: [] } });
         const failure = failures.get(method)?.shift();
         if (failure) return reply({ error: { code: -32000, message: failure } });

@@ -591,6 +591,115 @@ try {
       await field(page).press("Escape");
     });
 
+    await check("@path rows list, insert by keyboard and pointer, continue into folders, and never send", async () => {
+      await page.setViewportSize({ width: 1024, height: 800 });
+      const paths = () => requests("path_complete");
+      const sends = requests("send").length;
+      const caret = () => field(page).evaluate((node) => (node as HTMLTextAreaElement).selectionStart);
+      const listbox = page.getByRole("listbox", { name: "path suggestions" });
+      const options = () => listbox.getByRole("option").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-label")));
+      /** Exactly one path_complete since `before`, with exactly this text. */
+      const asks = async (label: string, text: string, before: number) => {
+        await step(page, `${label}: one path_complete`, () => until(() => paths().length > before && paths().at(-1)!.replied !== undefined, 10_000));
+        await Bun.sleep(300);
+        const asked = paths().slice(before);
+        // The attached run's own id, as the page names it.
+        const run = new URL(page.url()).searchParams.get("run");
+        if (asked.length !== 1 || !run || asked[0]!.params.session_id !== run || asked[0]!.params.text_before_cursor !== text) throw new Error(`${label} asked ${JSON.stringify(asked.map((request) => request.params))}`);
+      };
+      await field(page).fill("");
+      let since = paths().length;
+      await field(page).fill("see @sr");
+      await listbox.waitFor({ timeout: 3_000 }).catch(() => {});
+      await page.screenshot({ path: join(shots, "path-list-1024.png") });
+      await asks("typing see @sr", "see @sr", since);
+      await step(page, "the path list opens", () => listbox.waitFor());
+      if (JSON.stringify(await options()) !== JSON.stringify(["@src/, directory", "@src-notes.md, file"])) throw new Error(`see @sr listed ${JSON.stringify(await options())}`);
+
+      // Keyboard: Enter on a folder inserts it with no space and asks about the folder; Enter on the next row only edits the draft.
+      since = paths().length;
+      await field(page).press("Enter");
+      if (await field(page).inputValue() !== "see @src/" || await caret() !== 9) throw new Error(`folder enter left ${JSON.stringify(await field(page).inputValue())} at ${await caret()}`);
+      await asks("the folder continues", "see @src/", since);
+      await listbox.getByRole("option", { name: "@src/app.ts, file" }).waitFor();
+      await field(page).press("ArrowDown");
+      await field(page).press("Enter");
+      if (await field(page).inputValue() !== "see @src/app.ts" || await caret() !== 15) throw new Error(`file enter left ${JSON.stringify(await field(page).inputValue())} at ${await caret()}`);
+      await Bun.sleep(400);
+      if (await listbox.count()) throw new Error("an entered file left the list open");
+
+      // Pointer, with text after the caret: an emoji and space folder keeps the suffix, then a file closes the list.
+      const pointerStart = paths().length;
+      await field(page).fill("see  tail");
+      // Type the path in the middle of the text, as a person would: each input reports its caret.
+      for (let index = 0; index < 5; index++) await field(page).press("ArrowLeft");
+      await page.keyboard.type("@😀");
+      await asks("the caret after @😀", "see @😀", pointerStart);
+      since = paths().length;
+      await listbox.getByRole("option", { name: '@"😀 my folder/, directory' }).click();
+      if (await field(page).inputValue() !== 'see @"😀 my folder/ tail' || await caret() !== 19) throw new Error(`folder click left ${JSON.stringify(await field(page).inputValue())} at ${await caret()}`);
+      if (!await field(page).evaluate((node) => node === document.activeElement)) throw new Error("a pointer acceptance moved focus off the field");
+      await asks("the clicked folder continues", 'see @"😀 my folder/', since);
+      await listbox.getByRole("option", { name: '@😀 my folder/deep note.txt", file' }).click();
+      if (await field(page).inputValue() !== 'see @"😀 my folder/deep note.txt" tail' || await caret() !== 33) throw new Error(`file click left ${JSON.stringify(await field(page).inputValue())} at ${await caret()}`);
+      await Bun.sleep(400);
+      if (await listbox.count()) throw new Error("a clicked file left the list open");
+      if (paths().length !== pointerStart + 2) throw new Error(`the pointer flow asked ${paths().length - pointerStart} times`);
+      if (requests("send").length !== sends) throw new Error("accepting a path sent the draft");
+
+      // Only a separate Enter sends.
+      await field(page).press("Enter");
+      await step(page, "a separate enter sends the draft", () => until(() => requests("send").length === sends + 1, 10_000));
+      if (requests("send").at(-1)!.params.text !== 'see @"😀 my folder/deep note.txt" tail') throw new Error(`enter sent ${JSON.stringify(requests("send").at(-1)!.params)}`);
+      await stopTurn(page);
+    });
+
+    await check("@path waits out ime composition and keeps combobox semantics at 390px", async () => {
+      const paths = () => requests("path_complete");
+      const listbox = page.getByRole("listbox", { name: "path suggestions" });
+      await page.setViewportSize({ width: 1024, height: 800 });
+      await field(page).fill("@sr");
+      await step(page, "typing @sr opens the path list", () => listbox.waitFor());
+      const before = paths().length;
+      const sends = requests("send").length;
+      await field(page).evaluate((node) => node.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true })));
+      await step(page, "composition closes the list", () => listbox.waitFor({ state: "detached" }));
+      await field(page).dispatchEvent("keydown", { key: "Enter", code: "Enter", isComposing: true });
+      // A composing input event, as an input method sends it: React sees the change, the model must not ask.
+      await field(page).evaluate((node) => {
+        const area = node as HTMLTextAreaElement;
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(area, "@src");
+        area.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true, inputType: "insertCompositionText", data: "c" }));
+      });
+      await Bun.sleep(400);
+      if (paths().length !== before || requests("send").length !== sends || await field(page).inputValue() !== "@src") throw new Error(`composition asked ${paths().length - before} times, sent ${requests("send").length - sends}, value ${JSON.stringify(await field(page).inputValue())}`);
+      await field(page).evaluate((node) => node.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "c" })));
+      await step(page, "composition end asks once", () => until(() => paths().length > before, 10_000));
+      await Bun.sleep(400);
+      if (paths().length !== before + 1 || paths().at(-1)!.params.text_before_cursor !== "@src") throw new Error(`composition end asked ${JSON.stringify(paths().slice(before).map((request) => request.params))}`);
+      await listbox.waitFor();
+
+      await page.setViewportSize({ width: 390, height: 844 });
+      await field(page).fill("@");
+      await step(page, "typing @ at 390px opens the path list", () => listbox.waitFor());
+      await field(page).press("ArrowDown");
+      await page.screenshot({ path: join(shots, "path-list-390.png") });
+      const semantics = await field(page).evaluate((node) => {
+        const list = document.getElementById(node.getAttribute("aria-controls") ?? "");
+        const active = document.getElementById(node.getAttribute("aria-activedescendant") ?? "");
+        const rows = [...(list?.querySelectorAll('[role="option"]') ?? [])].map((row) => row.getBoundingClientRect().height);
+        return {
+          role: node.getAttribute("role"), expanded: node.getAttribute("aria-expanded"), focused: node === document.activeElement,
+          list: list?.getAttribute("aria-label"), active: active?.getAttribute("aria-selected"), activeIndex: list ? [...list.querySelectorAll('[role="option"]')].indexOf(active!) : -1,
+          tallest: Math.max(...rows), listSideways: list ? list.scrollWidth > list.clientWidth + 1 : true, pageSideways: document.documentElement.scrollWidth > innerWidth,
+        };
+      });
+      if (semantics.role !== "combobox" || semantics.expanded !== "true" || !semantics.focused || semantics.list !== "path suggestions" || semantics.active !== "true" || semantics.activeIndex !== 1 || semantics.tallest > 56 || semantics.listSideways || semantics.pageSideways) throw new Error(`390px path list: ${JSON.stringify(semantics)}`);
+      await field(page).press("Escape");
+      await field(page).fill("");
+      await page.setViewportSize({ width: 1440, height: 900 });
+    });
+
     await check("desktop command list sits apart from the field, shows whole rows, and marks rows beyond its edge", () => listGeometry(page));
     await check("chromium edge shades stay visible over the active and the hovered edge row", () => listShades(page, "chromium"));
     await check("chromium free wheel scrolling rests on whole rows", () => listWheel(page, "chromium"));

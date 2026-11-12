@@ -70,26 +70,29 @@ function Suggestions({ id, snapshot, onAccept }: { id: string; snapshot: Complet
     markEdges(list.current);
   }, [id, snapshot]);
   if (!snapshot.open) return null;
-  return <div ref={list} id={id} className="command-listbox" role="listbox" aria-label="command suggestions" onScroll={(event) => markEdges(event.currentTarget)}>{snapshot.rows.map((row, index) => <button
+  const paths = snapshot.rows[0]?.trigger === "@";
+  return <div ref={list} id={id} className="command-listbox" role="listbox" aria-label={paths ? "path suggestions" : "command suggestions"} onScroll={(event) => markEdges(event.currentTarget)}>{snapshot.rows.map((row, index) => <button
     type="button"
     role="option"
     id={`${id}-${index}`}
     aria-selected={index === snapshot.activeIndex}
     className="command-option"
-    aria-label={`${row.trigger}${row.name}: ${row.description}`}
-    key={`${row.trigger}${row.name}`}
+    aria-label={row.trigger === "@" ? `${row.display}, ${row.kind}` : `${row.trigger}${row.name}: ${row.description}`}
+    key={row.trigger === "@" ? row.display : `${row.trigger}${row.name}`}
     onPointerDown={(event) => { event.preventDefault(); onAccept(index); }}
-  ><span className="command-name">{row.trigger}{row.name}</span><span className="command-description">{row.description}</span>{row.sourceBadge ? <span className="command-source">{row.sourceBadge}</span> : null}</button>)}</div>;
+  >{row.trigger === "@"
+    ? <><span className="command-name command-path" title={row.display}>{row.display}</span><span className="command-source">{row.kind}</span></>
+    : <><span className="command-name">{row.trigger}{row.name}</span><span className="command-description">{row.description}</span>{row.sourceBadge ? <span className="command-source">{row.sourceBadge}</span> : null}</>}</button>)}</div>;
 }
 
 type ComposerBodyProps = {
-  field: { id: string; state: ComposerState; vimOn: boolean; vim: Vim; text: string; input: RefObject<HTMLTextAreaElement | null>; completion: CompletionSnapshot; listboxId: string; onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void; onChange(value: string, start: number, end: number): void; onSelect(value: string, start: number, end: number): void; onAccept(index: number): void };
+  field: { id: string; state: ComposerState; vimOn: boolean; vim: Vim; text: string; input: RefObject<HTMLTextAreaElement | null>; completion: CompletionSnapshot; listboxId: string; onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void; onChange(value: string, start: number, end: number): void; onSelect(value: string, start: number, end: number): void; onAccept(index: number): void; onCompositionStart(): void; onCompositionEnd(value: string, start: number, end: number): void };
   attachments: { images: readonly QueuedImage[]; error: string; dragging: boolean; files: RefObject<HTMLInputElement | null>; onPaste(event: ClipboardEvent): void; onImageOpen?(block: { url: string; mediaType: string; alt: string }): void; onRemove(index: number): void; onFiles(files: Iterable<File>): Promise<void>; setDragging: Dispatch<SetStateAction<boolean>> };
   submission: { steer: boolean; sending: boolean; stopping: boolean; error?: string; message: string; /** busy pulses (gamma is working); note is a static note the user reads. */ tone?: "busy" | "note"; canSubmit: boolean; onSubmit(event: FormEvent): void; onStop?: () => void; onStopRef?: (button: HTMLButtonElement | null) => void | (() => void) };
   footer?: ReactNode;
 };
 
-function ComposerBody({ field: { id, state, vimOn, vim, text, input, completion, listboxId, onKeyDown, onChange, onSelect, onAccept }, attachments: { images, error: attachError, dragging, files, onPaste, onImageOpen, onRemove, onFiles, setDragging }, submission: { steer, sending, stopping, error, message, tone, canSubmit, onSubmit, onStop, onStopRef }, footer }: ComposerBodyProps) {
+function ComposerBody({ field: { id, state, vimOn, vim, text, input, completion, listboxId, onKeyDown, onChange, onSelect, onAccept, onCompositionStart, onCompositionEnd }, attachments: { images, error: attachError, dragging, files, onPaste, onImageOpen, onRemove, onFiles, setDragging }, submission: { steer, sending, stopping, error, message, tone, canSubmit, onSubmit, onStop, onStopRef }, footer }: ComposerBodyProps) {
   return (
     <form data-part="composer" data-state={state} data-error={error ? "submit" : undefined} data-pending={sending ? "submit" : stopping ? "stop" : undefined} data-drop={dragging ? "active" : undefined} data-vim={vimOn ? vim.mode : undefined} aria-label="message" aria-busy={sending || stopping || undefined} onSubmit={onSubmit} onPaste={onPaste}
       onDragEnter={(event) => { if (hasFiles(event)) { event.preventDefault(); setDragging(true); } }}
@@ -100,7 +103,7 @@ function ComposerBody({ field: { id, state, vimOn, vim, text, input, completion,
       <AttachmentsStrip images={images} onOpen={onImageOpen} onRemove={onRemove} />
       {attachError ? <p className="attach-error" role="alert">{attachError}</p> : null}
       <Suggestions id={listboxId} snapshot={completion} onAccept={onAccept} />
-      <div data-part="composer-field" data-value={text}><textarea ref={input} rows={1} value={text} placeholder={steer ? "steer the running turn" : "message zeta"} aria-label="message" aria-describedby={`${id}-hint ${id}-message`} role="combobox" aria-autocomplete="list" aria-expanded={completion.open} aria-controls={listboxId} aria-activedescendant={completion.open ? `${listboxId}-${completion.activeIndex}` : undefined} onChange={(event) => onChange(event.target.value, event.target.selectionStart, event.target.selectionEnd)} onSelect={(event) => onSelect(event.currentTarget.value, event.currentTarget.selectionStart, event.currentTarget.selectionEnd)} onKeyDown={onKeyDown} /></div>
+      <div data-part="composer-field" data-value={text}><textarea ref={input} rows={1} value={text} placeholder={steer ? "steer the running turn" : "message zeta"} aria-label="message" aria-describedby={`${id}-hint ${id}-message`} role="combobox" aria-autocomplete="list" aria-expanded={completion.open} aria-controls={listboxId} aria-activedescendant={completion.open ? `${listboxId}-${completion.activeIndex}` : undefined} onChange={(event) => onChange(event.target.value, event.target.selectionStart, event.target.selectionEnd)} onSelect={(event) => onSelect(event.currentTarget.value, event.currentTarget.selectionStart, event.currentTarget.selectionEnd)} onCompositionStart={onCompositionStart} onCompositionEnd={(event) => onCompositionEnd(event.currentTarget.value, event.currentTarget.selectionStart, event.currentTarget.selectionEnd)} onKeyDown={onKeyDown} /></div>
       <div data-part="composer-bar">
         {vimOn ? <span className="vim-mode" data-mode={vim.mode} aria-live="polite">{vim.mode === "insert" ? "INSERT" : "NORMAL"}</span> : null}
         <p data-part="composer-status" data-tone={error ? "danger" : message ? tone ?? "busy" : undefined} title={error}><span data-part="composer-hint" id={`${id}-hint`} hidden={Boolean(message)}>{hint({ vim: vimOn, mode: vim.mode, steer, images: images.length > 0 })}</span><span data-part="composer-message" id={`${id}-message`} role="status">{message}</span></p>
@@ -256,6 +259,7 @@ export function GammaComposer({ state, reason, blockedReason, blockedStatic, vim
   // One model for the composer's life: a new command source re-asks about the typed token instead of dropping it.
   const [completions] = useState(() => new CompletionModel(commands));
   const completion = useSyncExternalStore(completions.subscribe, completions.getSnapshot);
+  useEffect(() => () => completions.close(), [completions]);
   const submission = useSubmission(state, Boolean(blockedReason), commands, onSubmit, onPreparationFailure, onStop, draft, attachments, store, runId, pending);
   useEffect(() => { if (autoFocus && (!document.activeElement || document.activeElement === document.body)) draft.input.current?.focus({ preventScroll: true }); }, [autoFocus]);
   useEffect(() => {
@@ -291,7 +295,7 @@ export function GammaComposer({ state, reason, blockedReason, blockedStatic, vim
   const message = submission.error ?? (submission.stopping ? "stopping" : submission.sending ? (submission.steer ? "steering" : "sending") : blockedReason ?? deliveryNote(record) ?? "");
   const tone = working || (blockedReason && !blockedStatic) ? "busy" : "note";
   return <ComposerBody
-    field={{ id, state, vimOn, vim: draft.vim, text: draft.text, input: draft.input, completion, listboxId: `${id}-commands`, onKeyDown, onChange: (value, start, end) => { draft.setText(value); completions.update(value, start, end); }, onSelect: (value, start, end) => completions.select(value, start, end), onAccept: (index) => applyCompletion(completions.choose(index)) }}
+    field={{ id, state, vimOn, vim: draft.vim, text: draft.text, input: draft.input, completion, listboxId: `${id}-commands`, onKeyDown, onChange: (value, start, end) => { draft.setText(value); completions.update(value, start, end); }, onSelect: (value, start, end) => completions.select(value, start, end), onAccept: (index) => applyCompletion(completions.choose(index)), onCompositionStart: () => completions.startComposition(), onCompositionEnd: (value, start, end) => completions.endComposition(value, start, end) }}
     attachments={{ images: attachments.images, error: attachments.attachError, dragging: attachments.dragging, files: attachments.files, onPaste: attachments.onPaste, onImageOpen, onRemove: attachments.remove, onFiles: attachments.addFiles, setDragging: attachments.setDragging }}
     submission={{ steer: submission.steer, sending: submission.sending, stopping: submission.stopping, error: submission.error, message, tone, canSubmit: submission.canSubmit, onSubmit: onFormSubmit, onStop: onStop ? submission.stop : undefined, onStopRef: stopRef }}
     footer={footer}
