@@ -221,6 +221,7 @@ describe("@path completion", () => {
     const model = new CompletionModel(commands, clock.api);
     model.update("@sr", 3);
     await clock.advance(100);
+    expect(launches.length).toBe(1);
     model.update("@src", 4);
     expect(launches[0]!.signal!.aborted).toBe(true);
     await clock.advance(100);
@@ -248,6 +249,20 @@ describe("@path completion", () => {
     expect(model.key("Enter")).toEqual({ handled: true, accepted: { value: 'see @"😀file name.txt" tail', caret: 22 } });
     await clock.advance(1_000);
     expect(launches.length).toBe(3);
+    expect(model.getSnapshot().open).toBe(false);
+  });
+
+  test("the field's select echo of an accepted file does not reopen the list", async () => {
+    const clock = fakeClock();
+    const plain: CompletionRow = { trigger: "@", text: "app.ts", display: "@app.ts", kind: "file", startPosition: -2 };
+    const { launches, commands } = recorder(clock, async () => [plain]);
+    const model = new CompletionModel(commands, clock.api);
+    model.update("@ap", 3);
+    await clock.advance(100);
+    expect(model.choose(0)).toEqual({ value: "@app.ts", caret: 7 });
+    model.select("@app.ts", 7, 7);
+    await clock.advance(1_000);
+    expect(launches.length).toBe(1);
     expect(model.getSnapshot().open).toBe(false);
   });
 
@@ -288,6 +303,7 @@ describe("@path completion", () => {
     const model = new CompletionModel(commands, clock.api);
     model.update("@sr", 3);
     await clock.advance(100);
+    expect(launches.length).toBe(1);
     model.close();
     expect(launches[0]!.signal!.aborted).toBe(true);
     model.update("@src", 4);

@@ -142,8 +142,11 @@ export class CompletionModel {
     const row = this.state.rows[index];
     const accepted = this.accept(index);
     this.close();
+    if (!accepted) return;
     // A directory is half a path: the list continues inside it, as in the TUI.
-    if (accepted && row?.trigger === "@" && row.kind === "directory") this.update(accepted.value, accepted.caret);
+    if (row?.trigger === "@" && row.kind === "directory") this.update(accepted.value, accepted.caret);
+    // Otherwise the field's select event echoes the accepted text, which (a path has no trailing space) must not reopen.
+    else { this.input = `${accepted.caret}:${accepted.caret}:${accepted.value}`; this.dismissed = true; }
     return accepted;
   }
 
