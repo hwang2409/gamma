@@ -67,7 +67,7 @@ async function run(name: "chromium" | "webkit", engine: BrowserType) {
       if (childRequests(fake, "child_run_send").length !== 0) throw new Error(`${name}: opening the owner sent a child follow-up`);
 
       const children = page.getByRole("button", { name: /^children(?: |$)/ });
-      if (await children.innerText() !== "children") throw new Error(`${name}: unopened catalog exposed a count`);
+      if (/\d/.test(await children.innerText()) || !(await children.locator(".children-count[data-pending]").count())) throw new Error(`${name}: unopened catalog exposed a count`);
       await children.click();
       const drawer = page.getByRole("dialog", { name: "children" });
       await drawer.waitFor();
@@ -225,7 +225,7 @@ async function run(name: "chromium" | "webkit", engine: BrowserType) {
       if (screenshots) await mobilePage.screenshot({ path: join(screenshots, `${name}-mobile-before.png`), fullPage: true });
       const mobileButton = mobilePage.getByRole("button", { name: /^children(?: |$)/ });
       const mobileButtonSize = await mobileButton.evaluate((button) => ({ client: button.clientWidth, scroll: button.scrollWidth, text: button.textContent }));
-      if (mobileButtonSize.text !== "children" || mobileButtonSize.scroll > mobileButtonSize.client) throw new Error(`${name}: mobile children control was clipped: ${JSON.stringify(mobileButtonSize)}`);
+      if (/\d/.test(mobileButtonSize.text ?? "") || mobileButtonSize.scroll > mobileButtonSize.client) throw new Error(`${name}: mobile children control was clipped: ${JSON.stringify(mobileButtonSize)}`);
       const mobileTitle = await mobilePage.locator(".run-title h1").evaluate((title) => ({ client: title.clientWidth, text: title.textContent }));
       if (!mobileTitle.text?.includes("child hold notification") || mobileTitle.client < 160) throw new Error(`${name}: mobile run title did not keep a readable row: ${JSON.stringify(mobileTitle)}`);
       await mobileButton.click();

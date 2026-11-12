@@ -68,7 +68,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .children-button { flex: none; }
 .authority-badge { display: inline-flex; flex: none; align-items: center; gap: 7px; min-height: var(--control); color: var(--fulcrum-fg); font-size: 12px; font-weight: 700; }
 .authority-mark { width: 7px; height: 7px; background: var(--fulcrum-accent); outline: 1px solid var(--fulcrum-bg); }
-.dock[data-authority="observer"] [data-part="composer-reason"]::before { background: var(--fulcrum-accent); outline-color: var(--fulcrum-bg); }
+[data-authority="observer"] [data-part="composer-reason"]::before { background: var(--fulcrum-accent); outline-color: var(--fulcrum-bg); }
 .new-run-short { display: none; }
 .yolo-indicator { display: inline-flex; flex: none; align-items: center; min-height: var(--control); padding: 3px 8px; border: 1px solid var(--fulcrum-danger); color: var(--fulcrum-fg); font-size: 12px; font-weight: 700; white-space: nowrap; }
 /* A danger mark: fulcrum's 7 px square, ringed in bg so it reads against bg wherever it sits. The word next to it stays fg and bold:
@@ -400,7 +400,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
   .topbar .brand { display: none; }
   .topbar .run-title { order: initial; flex: 1 1 auto; }
   .topbar .authority-badge { margin-left: 8px; }
-  .topbar .children-button { padding-inline: 4px; }
+  .topbar .children-button { padding-inline: 8px; }
   .topbar .settings-menu > button { width: var(--control); padding: 0; font-size: 0; }
   .topbar .settings-menu > button::after { content: "•••"; font-size: 12px; letter-spacing: 1px; }
   .new-run { margin-left: 0; }
@@ -413,7 +413,10 @@ button:active:not(:disabled) { transform: scale(0.97); }
 }
 
 /* Child runs keep the transcript grammar, with one compact catalog surface and one saved-run header. */
-.children-button { flex: none; font-variant-numeric: tabular-nums; }
+.children-button { flex: none; gap: 4px; font-variant-numeric: tabular-nums; }
+/* The count keeps its place before the first report, so the button does not grow when the list loads. */
+.children-count { min-width: 1ch; }
+.children-count[data-pending] { color: var(--fulcrum-muted); }
 .child-catalog-backdrop { position: fixed; inset: 0; z-index: 40; display: flex; justify-content: flex-end; background: color-mix(in srgb, var(--fulcrum-bg) 72%, transparent); }
 .child-catalog { display: flex; flex-direction: column; width: min(440px, 100%); min-height: 0; padding: 16px; border-left: 1px solid var(--fulcrum-fg); background: var(--fulcrum-bg); }
 .child-catalog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--fulcrum-border); }
@@ -429,7 +432,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .child-row-heading { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .child-row-heading strong { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .child-row > span:not(.child-row-heading), .child-row-metrics { overflow: hidden; color: var(--fulcrum-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.status-mark { display: inline-block; flex: none; width: 7px; height: 7px; background: var(--fulcrum-muted); outline: 1px solid var(--fulcrum-bg); }
+.status-mark { display: inline-block; flex: none; width: 7px; height: 7px; margin-top: 0; background: var(--fulcrum-muted); outline: 1px solid var(--fulcrum-bg); }
 .status-mark[data-state="failed"] { background: var(--fulcrum-danger); }
 .status-mark[data-state="running"], .status-mark[data-state="finishing"] { background: var(--fulcrum-accent); }
 .load-more { margin-top: 8px; }
@@ -439,7 +442,9 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .child-identity > * { overflow: hidden; text-overflow: ellipsis; }
 .child-owner, .child-identity > span:last-child, .saved-label { color: var(--fulcrum-muted); font-size: 12px; }
 .saved-label { justify-self: end; }
-.child-meta { grid-column: 2 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; color: var(--fulcrum-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.child-meta { grid-column: 2 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-width: 0; color: var(--fulcrum-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.child-state { display: inline-flex; align-items: center; gap: 8px; }
+.child-metrics { white-space: nowrap; }
 .child-route-note { width: min(var(--measure), calc(100% - 2 * var(--gutter))); margin: 12px auto 0; padding: 12px; border-left: var(--rail) solid var(--fulcrum-border); }
 .child-history-note { padding-inline: 0; }
 .child-transcript { flex: 1; min-height: 0; }

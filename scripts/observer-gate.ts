@@ -78,6 +78,24 @@ async function matrix(type: BrowserType, browserName: string, width: number) {
     if (mutated.length) throw new Error(`observer made mutating calls: ${mutated.map(({ method }) => method).join(", ")}`);
     await observer.close();
 
+    // An observer's open can fail (zeta has another session attached: fake session_history -32003, as zeta's
+    // handlers refuse a session that is not the active one). Its card may offer a read retry, never a write.
+    fake.attachQuietly(CHILD_HOLD);
+    const failedStart = fake.requests.length;
+    const failedOpen = await context.newPage();
+    await failedOpen.goto(`${origin}/?run=${runId}`);
+    await ready(failedOpen);
+    await failedOpen.getByText("observing", { exact: true }).waitFor({ timeout: 15_000 });
+    await failedOpen.getByRole("heading", { name: "could not open this run" }).waitFor({ timeout: 15_000 });
+    if (screenshots) { await Bun.sleep(400); await failedOpen.screenshot({ path: join(screenshots, `observer-open-failed-${browserName}-${width}.png`), fullPage: true }); }
+    const writeActions = await failedOpen.getByRole("button", { name: /new run|stop|rename|delete|resend|send/ }).allInnerTexts();
+    if (writeActions.length) throw new Error(`observer open-failure card offered write actions: ${writeActions.join(", ")}`);
+    await failedOpen.getByRole("button", { name: "try again" }).click();
+    await Bun.sleep(500);
+    const failedWrites = fake.requests.slice(failedStart).filter(({ method }) => mutatingMethods.includes(method as typeof mutatingMethods[number]));
+    if (failedWrites.length) throw new Error(`observer open-failure retry made mutating calls: ${failedWrites.map(({ method }) => method).join(", ")}`);
+    await failedOpen.close();
+
     // Zeta origin/main src/zeta/server/protocol.py:357 (#1175): an observer lists children; child_run_send stays controller-only.
     fake.attachQuietly(CHILD_HOLD);
     const childStart = fake.requests.length;
@@ -198,7 +216,7 @@ async function matrix(type: BrowserType, browserName: string, width: number) {
     const afterWait = fake.requests.slice(limitStart).filter(({ method }) => method === "hello").length;
     if (beforeWait !== 2 || afterWait !== 2) throw new Error(`observer limit made ${afterWait} hello attempts instead of waiting after 2`);
     const limitedDock = limited.locator(".dock");
-    if (!(await limitedDock.getByText("this run has the most observers zeta allows; close another observer tab, then retry", { exact: true }).isVisible())) throw new Error(`observer limit dock does not say why sending is off: ${await limitedDock.innerText()}`);
+    if (!(await limitedDock.getByText("observer limit reached; this tab is read-only", { exact: true }).isVisible())) throw new Error(`observer limit dock does not say why sending is off: ${await limitedDock.innerText()}`);
     if (await limitedDock.getByText("sending is paused until zeta reconnects").count()) throw new Error("observer limit dock promises a reconnect that never comes");
     if (await limitedDock.locator('textarea[aria-label="message"]').count()) throw new Error("observer limit kept an editable composer");
     if (await limitedDock.locator('[data-part="composer-submit"]').count()) throw new Error("observer limit kept a send button");
