@@ -66,6 +66,9 @@ button:active:not(:disabled) { transform: scale(0.97); }
 .run-meta .cwd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topbar .ghost { padding: 0 12px; font-size: 12px; }
 .children-button { flex: none; }
+.authority-badge { display: inline-flex; flex: none; align-items: center; gap: 7px; min-height: var(--control); color: var(--fulcrum-fg); font-size: 12px; font-weight: 700; }
+.authority-mark { width: 7px; height: 7px; background: var(--fulcrum-accent); outline: 1px solid var(--fulcrum-bg); }
+.dock[data-authority="observer"] [data-part="composer-reason"]::before { background: var(--fulcrum-accent); outline-color: var(--fulcrum-bg); }
 .new-run-short { display: none; }
 .yolo-indicator { display: inline-flex; flex: none; align-items: center; min-height: var(--control); padding: 3px 8px; border: 1px solid var(--fulcrum-danger); color: var(--fulcrum-fg); font-size: 12px; font-weight: 700; white-space: nowrap; }
 /* A danger mark: fulcrum's 7 px square, ringed in bg so it reads against bg wherever it sits. The word next to it stays fg and bold:
@@ -175,6 +178,10 @@ button:active:not(:disabled) { transform: scale(0.97); }
 /* The dock: the status line, then the composer, on the transcript's measure. */
 .dock { flex: none; padding: 6px var(--gutter) max(16px, env(safe-area-inset-bottom)); }
 .dock > * { max-width: var(--measure); margin-inline: auto; }
+
+/* An observer never decides: hide the decision row even when a disabled_reason would draw disabled buttons. */
+.observer-approval [data-part="approval-actions"] { display: none; }
+.observer-approval > .note { width: auto; margin: 0; padding: 6px 13px 0; }
 
 /* Status line: one state word with its square mark; a waiting approval is a link to it. Never a problem. */
 .status-line { --tone: var(--fulcrum-muted); display: flex; align-items: center; gap: 10px; min-height: 28px; font-size: 12px; }
@@ -390,6 +397,7 @@ button:active:not(:disabled) { transform: scale(0.97); }
   .topbar { flex-wrap: nowrap; gap: 4px; }
   .topbar .brand { display: none; }
   .topbar .run-title { order: initial; flex: 1 1 auto; }
+  .topbar .authority-badge { margin-left: 8px; }
   .topbar .children-button { padding-inline: 4px; }
   .topbar .settings-menu > button { width: var(--control); padding: 0; font-size: 0; }
   .topbar .settings-menu > button::after { content: "•••"; font-size: 12px; letter-spacing: 1px; }
