@@ -81,7 +81,7 @@ function Suggestions({ id, snapshot, onAccept }: { id: string; snapshot: Complet
     key={row.trigger === "@" ? row.display : `${row.trigger}${row.name}`}
     onPointerDown={(event) => { event.preventDefault(); onAccept(index); }}
   >{row.trigger === "@"
-    ? <><span className="command-name">{row.display}</span><span className="command-source">{row.kind}</span></>
+    ? <><span className="command-name command-path" title={row.display}>{row.display}</span><span className="command-source">{row.kind}</span></>
     : <><span className="command-name">{row.trigger}{row.name}</span><span className="command-description">{row.description}</span>{row.sourceBadge ? <span className="command-source">{row.sourceBadge}</span> : null}</>}</button>)}</div>;
 }
 

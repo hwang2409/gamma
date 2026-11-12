@@ -127,10 +127,10 @@ function invalidParams(method: string, checks: ParamChecks | undefined, params: 
 const SETTINGS_REQUESTS = ["model_catalog", "session_settings", "set_settings", "send_images"];
 // Zeta origin/main src/zeta/server/protocol.py:277-357, 372-384: observers receive only Access.READ methods.
 // child_run_list became Access.READ in zeta #1175 (protocol.py:357); before it, it was CONTROLLER_READ (a88e60133^1).
-// The fake session workspace for path_complete: emoji, spaces, nesting, and a hidden entry, as in zeta 54b9f211
+// The fake session workspace for path_complete: emoji, spaces, nesting, a hidden entry, and a name too long for a phone row, as in zeta 54b9f211
 // tests/test_server_path_completion.py:60-70. Keys are the typed directory prefix; values are [name, is directory].
 const PATH_WORKSPACE: Readonly<Record<string, ReadonlyArray<readonly [string, boolean]>>> = {
-  "": [["src", true], ["😀 my folder", true], ["src-notes.md", false], ["README.md", false], [".hidden", false]],
+  "": [["src", true], ["😀 my folder", true], ["src-notes.md", false], ["README.md", false], [".hidden", false], ["a-generated-report-with-a-name-far-too-long-for-one-phone-row.md", false]],
   "src/": [["lib", true], ["app.ts", false]],
   "😀 my folder/": [["deep note.txt", false]],
 };
