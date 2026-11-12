@@ -724,7 +724,7 @@ function Dock({ autoFocus, state, view, connection, runs, vim, setVim, theme, se
 
   const failure = present.openError;
   const problem = (state.phase !== "connected" && state.phase !== "connecting" && state.phase !== "dropped") || Boolean(failure);
-  const phase = dockPhase(state, Boolean(present.opening) || input.block === "opening", open, agent, starting);
+  const phase = dockPhase(state, Boolean(present.opening) || input.block === "opening" || input.block === "syncing", open, agent, starting);
   const readOnly = blank ? null : dockReadOnlyReason(open?.id ?? null, view.active);
   const blockedReason = starting ? null : input.block === "pending" || input.block === "waits-for-active" ? inputBlockText(input.block, view.activeTitle) : connectionBlockedReason(state) ?? inputBlockText(input.block, view.activeTitle);
   const onPreparationFailure = useCallback((error: unknown, images: readonly import("./image-queue").QueuedImage[], text: string) => {

@@ -30,6 +30,26 @@ try {
   for (const width of [1440, 390]) {
     const page = await browser.newPage({ viewport: { width, height: 900 } });
     await page.goto(`${origin}/?run=${LONG}`);
+    // While the rest of the history loads the composer is paused, so the dock status must not say ready.
+    const syncing = await page.evaluate(() => new Promise<{ frames: number; ready: string | null }>((resolve) => {
+      let frames = 0;
+      let seen = false;
+      const sample = () => {
+        const loading = [...document.querySelectorAll(".note")].some((note) => note.textContent?.startsWith("loading history…"));
+        const paused = document.querySelector('.dock [data-part="composer-message"]')?.textContent === "sending is paused until the run opens";
+        if (loading && paused) {
+          seen = true;
+          frames++;
+          const status = document.querySelector(".dock .status-line");
+          if (status?.getAttribute("data-state") === "ready") return resolve({ frames, ready: status.textContent });
+        } else if (seen && !loading) return resolve({ frames, ready: null });
+        requestAnimationFrame(sample);
+      };
+      setTimeout(() => resolve({ frames, ready: null }), 20_000);
+      sample();
+    }));
+    if (syncing.ready !== null) throw new Error(`${width}: the dock said ${JSON.stringify(syncing.ready)} while the composer waited for the history (frame ${syncing.frames})`);
+    if (syncing.frames === 0) throw new Error(`${width}: the syncing window was not sampled`);
     const scroll = page.locator(".scroll");
     await page.locator('[data-part="timeline"] [data-kind="user"]').last().waitFor({ timeout: 20_000 });
     await page.locator(".note", { hasText: "loading history…" }).waitFor({ state: "detached", timeout: 20_000 });
