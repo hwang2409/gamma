@@ -18,7 +18,7 @@ const CLOSED: CompletionSnapshot = { open: false, rows: [], activeIndex: 0 };
  * `@` asks zeta only after this long without input. Every input clears a waiting lookup, so lookups also start at least
  * this far apart: at most 10 in any second, and never a queue of stale ones.
  */
-export const PATH_IDLE_MS = 100;
+const PATH_IDLE_MS = 100;
 
 export type CompletionTimers = { setTimer(run: () => void, ms: number): unknown; clearTimer(timer: unknown): void };
 const BROWSER_TIMERS: CompletionTimers = { setTimer: (run, ms) => setTimeout(run, ms), clearTimer: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>) };

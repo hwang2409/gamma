@@ -125,8 +125,6 @@ function invalidParams(method: string, checks: ParamChecks | undefined, params: 
 }
 
 const SETTINGS_REQUESTS = ["model_catalog", "session_settings", "set_settings", "send_images"];
-// Zeta origin/main src/zeta/server/protocol.py:277-357, 372-384: observers receive only Access.READ methods.
-// child_run_list became Access.READ in zeta #1175 (protocol.py:357); before it, it was CONTROLLER_READ (a88e60133^1).
 // The fake session workspace for path_complete: emoji, spaces, nesting, a hidden entry, and a name too long for a phone row, as in zeta 54b9f211
 // tests/test_server_path_completion.py:60-70. Keys are the typed directory prefix; values are [name, is directory].
 const PATH_WORKSPACE: Readonly<Record<string, ReadonlyArray<readonly [string, boolean]>>> = {
@@ -154,6 +152,8 @@ function completeFakePath(textBeforeCursor: string) {
   return { entries, truncated: false };
 }
 
+// Zeta origin/main src/zeta/server/protocol.py:277-357, 372-384: observers receive only Access.READ methods.
+// child_run_list became Access.READ in zeta #1175 (protocol.py:357); before it, it was CONTROLLER_READ (a88e60133^1).
 const OBSERVER_READABLE = new Set(["status", "session_tree", "session_history", "child_run_history", "child_run_list", "model_catalog", "session_settings", "delivery_status", "session_grants"]);
 
 // Opaque command inputs by id. Zeta echoes an opaque input's display_text, the typed command line, as the user
