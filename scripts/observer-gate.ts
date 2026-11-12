@@ -197,10 +197,15 @@ async function matrix(type: BrowserType, browserName: string, width: number) {
     await Bun.sleep(1_200);
     const afterWait = fake.requests.slice(limitStart).filter(({ method }) => method === "hello").length;
     if (beforeWait !== 2 || afterWait !== 2) throw new Error(`observer limit made ${afterWait} hello attempts instead of waiting after 2`);
+    const limitedDock = limited.locator(".dock");
+    if (!(await limitedDock.getByText("this run has the most observers zeta allows; close another observer tab, then retry", { exact: true }).isVisible())) throw new Error(`observer limit dock does not say why sending is off: ${await limitedDock.innerText()}`);
+    if (await limitedDock.getByText("sending is paused until zeta reconnects").count()) throw new Error("observer limit dock promises a reconnect that never comes");
+    if (await limitedDock.locator('textarea[aria-label="message"]').count()) throw new Error("observer limit kept an editable composer");
+    if (await limitedDock.locator('[data-part="composer-submit"]').count()) throw new Error("observer limit kept a send button");
     await limited.getByRole("button", { name: "retry now" }).click();
-    for (let attempt = 0; attempt < 50 && fake.requests.slice(limitStart).filter(({ method }) => method === "hello").length < 3; attempt++) await Bun.sleep(100);
-    const afterRetry = fake.requests.slice(limitStart).filter(({ method }) => method === "hello");
-    if (afterRetry.length !== 3 || afterRetry[2]?.params.role !== "observer") throw new Error("explicit retry did not make one observer hello attempt");
+    for (let attempt = 0; attempt < 50 && fake.requests.slice(limitStart).filter(({ method }) => method === "hello").length < 4; attempt++) await Bun.sleep(100);
+    const afterRetry = fake.requests.slice(limitStart).filter(({ method }) => method === "hello").map(({ params }) => params.role);
+    if (afterRetry.join() !== "controller,observer,controller,observer") throw new Error(`explicit retry did not open controller first, then observer: ${afterRetry.join()}`);
     await limited.close();
 
     fake.setMode("ok");

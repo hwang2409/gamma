@@ -200,6 +200,8 @@ export function createConnection({
     retryNow() {
       if (state.phase === "connected" || state.phase === "connecting" || stopped) return;
       if (timer !== null) { clearTimer(timer); timer = null; }
+      // A slot may have freed since both roles were refused: start again as a fresh open does, controller first.
+      if (state.phase === "observer_limit") desiredRole = "controller";
       void attempt();
     },
     stop() {

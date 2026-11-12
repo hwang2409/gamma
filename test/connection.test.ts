@@ -131,16 +131,19 @@ test("a refused observer hello waits for an explicit retry", async () => {
   const { connection, settle, advance, timers } = harness([async () => found, async () => found], [
     async (role) => { roles.push(role); throw new ZetaError("busy", -32001); },
     async (role) => { roles.push(role); throw new ZetaError("busy", -32001); },
-    async (role) => { roles.push(role); throw new ZetaError("busy", -32001); },
+    async (role) => { roles.push(role); return controller; },
   ]);
+  const controller = fakeClient();
   await settle();
   expect(connection.state).toMatchObject({ phase: "observer_limit" });
   expect(timers).toHaveLength(0);
   await advance(10_000);
   expect(roles).toEqual(["controller", "observer"]);
+  // The controller slot freed meanwhile: the manual retry opens like a fresh page, controller first.
   connection.retryNow();
   await settle();
-  expect(roles).toEqual(["controller", "observer", "observer"]);
+  expect(roles).toEqual(["controller", "observer", "controller"]);
+  expect(connection.state).toEqual({ phase: "connected", authority: "controller" });
 });
 
 test("a drop reconnects with a new client, and retryNow skips the wait", async () => {

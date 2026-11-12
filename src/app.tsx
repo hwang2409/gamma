@@ -447,7 +447,7 @@ function ChildView({ owner, runId, controller, snapshot, historyAvailable, canLi
       <button type="button" className="ghost child-back" onClick={onBack}>back to parent run</button>
       <h2 ref={heading} tabIndex={-1} className="child-identity"><span className="child-owner">{owner}</span><span aria-hidden="true">/</span><strong>{row?.description || runId}</strong>{row && childAgentType(row) ? <span>{childAgentType(row)}</span> : null}</h2>
       <span className="saved-label">{historyAvailable === false ? "child details" : "saved transcript"}</span>
-      {row ? <div className="child-meta"><span className="status-mark" data-state={childStatus(row)} aria-hidden="true" /><span>{childStatus(row)}</span>{row.currentStep ? <span>{row.currentStep}</span> : null}<span>{elapsed(row.elapsedSeconds)}</span><span>{row.turnsUsed} turns</span><span>{row.toolCount} tools</span></div> : null}
+      {row ? <div className="child-meta"><span className="status-mark" data-state={childStatus(row)} aria-hidden="true" /><span>{childStatus(row)}</span>{row.currentStep ? <span>{row.currentStep}</span> : null}<span>{elapsed(row.elapsedSeconds)}</span><span>{row.turnsUsed} {row.turnsUsed === 1 ? "turn" : "turns"}</span><span>{row.toolCount} {row.toolCount === 1 ? "tool" : "tools"}</span></div> : null}
     </header>
     {missing ? <div className="child-route-note"><p>{snapshot.catalog.nextOffset !== undefined ? "this child is not in the latest report" : "this child is no longer listed"}</p><div className="actions">{snapshot.catalog.nextOffset !== undefined ? <button type="button" className="ghost" onClick={() => void controller.load(owner, "more")}>load more</button> : null}<button type="button" className="ghost" onClick={() => void controller.load(owner, "refresh")}>refresh</button><button type="button" className="ghost" onClick={onBack}>back</button></div></div> : null}
     {snapshot.historyLoading ? <p className="note" data-tone="busy" role="status">loading saved transcript…</p> : null}
@@ -744,7 +744,9 @@ function Dock({ autoFocus, state, view, connection, writes, runs, vim, setVim, t
   const failure = present.openError;
   const problem = (state.phase !== "connected" && state.phase !== "connecting" && state.phase !== "dropped") || Boolean(failure);
   const phase = dockPhase(state, Boolean(present.opening) || input.block === "opening", open, agent, starting);
-  const readOnly = observer ? "another client controls this run; you are observing, sending is off" : blank ? null : dockReadOnlyReason(open?.id ?? null, view.active);
+  // Both roles were refused: this tab can never send until a manual retry gets a slot, so nothing is editable.
+  const readOnly = state.phase === "observer_limit" ? "this run has the most observers zeta allows; close another observer tab, then retry"
+    : observer ? "another client controls this run; you are observing, sending is off" : blank ? null : dockReadOnlyReason(open?.id ?? null, view.active);
   const blockedReason = starting ? null : input.block === "pending" || input.block === "waits-for-active" ? inputBlockText(input.block, view.activeTitle) : connectionBlockedReason(state) ?? inputBlockText(input.block, view.activeTitle);
   const onPreparationFailure = useCallback((error: unknown, images: readonly import("./image-queue").QueuedImage[], text: string) => {
     const attachment = runState.getCatalog().attachment;
