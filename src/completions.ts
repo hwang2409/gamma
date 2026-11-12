@@ -29,6 +29,8 @@ export class CompletionModel {
   private caret = 0;
   private token?: CompletionToken;
   private state = CLOSED;
+  /** The field text the shown rows answer; while typing continues it is older than `value`. */
+  private shown = { value: "", caret: 0 };
   /** Value and selection of the last update; kept across Escape so a repeated select event does not reopen. */
   private input?: string;
   /** Escape closed the menu for the current input; a new command source must not reopen it. */
@@ -45,7 +47,9 @@ export class CompletionModel {
   setController(controller: CommandController, field: { value: string; caret: number }) {
     if (controller === this.controller) return;
     this.controller = controller;
-    if (this.input !== undefined && this.token && !this.dismissed) this.update(field.value, field.caret);
+    if (this.input === undefined || !this.token || this.dismissed) return;
+    this.setState(CLOSED);
+    this.update(field.value, field.caret);
   }
 
   readonly getSnapshot = (): CompletionSnapshot => this.state;
@@ -69,10 +73,13 @@ export class CompletionModel {
     this.dismissed = false;
     this.value = value;
     this.caret = selectionStart;
+    const previous = this.token;
     this.token = selectionStart === selectionEnd ? findCommandCompletionToken(value.slice(0, selectionStart)) : undefined;
     const sequence = ++this.sequence;
     this.stopRemote();
-    this.setState(CLOSED);
+    // While the same `@` token is typed, the shown rows stay until the newer reply replaces them, so the list does not blink per key.
+    const keep = this.token?.trigger === "@" && previous?.trigger === "@" && previous.start === this.token.start && !this.composing;
+    if (!keep) this.setState(CLOSED);
     if (!this.token || this.composing) return;
     if (this.token.trigger === "@") {
       this.idle = this.timers.setTimer(() => this.lookup(sequence), PATH_IDLE_MS);
@@ -89,10 +96,12 @@ export class CompletionModel {
 
   private ask(sequence: number, signal?: AbortSignal) {
     const token = this.token!;
+    const asked = { value: this.value, caret: this.caret };
     const options: RequestOptions | undefined = signal && { signal };
     void this.controller.completions(this.value.slice(0, this.caret), options).then(
       (rows) => {
         if (sequence !== this.sequence || !this.sameToken(token)) return;
+        this.shown = asked;
         this.setState({ open: rows.length > 0, rows, activeIndex: 0 });
       },
       () => { if (sequence === this.sequence) this.setState(CLOSED); },
@@ -128,9 +137,12 @@ export class CompletionModel {
     const row = this.state.rows[index];
     if (!this.state.open || !row || !this.token || !this.sameToken(this.token)) return;
     const after = this.value.slice(this.caret);
-    // Zeta's start_position, already in UTF-16 units: the row replaces the typed path after `@` and adds no space.
+    // Zeta's start_position, already in UTF-16 units, counts back from the caret of the text the row answers. A row kept
+    // from older text replaces from that same point up to the caret now, and only while the text before that point is unchanged.
     if (row.trigger === "@") {
-      const before = this.value.slice(0, this.caret + row.startPosition);
+      const from = this.shown.caret + row.startPosition;
+      if (from > this.caret || this.value.slice(0, from) !== this.shown.value.slice(0, from)) return;
+      const before = this.value.slice(0, from);
       return { value: before + row.text + after, caret: before.length + row.text.length };
     }
     const before = this.value.slice(0, this.token.start);
