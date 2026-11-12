@@ -92,6 +92,17 @@ try {
     if (Math.abs(rowBefore.top - rowAfter) > 0.5) throw new Error(`${width}: showing the control shifted row ${rowBefore.id} (${rowBefore.top} to ${rowAfter})`);
     if (control.y < transcriptAfter.y + transcriptAfter.height - 0.5) throw new Error(`${width}: control overlaps transcript text`);
 
+    // Measure the end rows first: an estimated end row can shrink by more than 10 px when it mounts, which would leave
+    // the reader truly at the bottom (following) instead of 10 px above it. Half a viewport above the end mounts the
+    // end rows (overscan is one viewport) without reaching the bottom, so the reader stays unpinned.
+    await scroll.evaluate((element) => { element.scrollTop = element.scrollHeight - element.clientHeight * 1.5; });
+    await page.waitForFunction(() => {
+      const rows = [...document.querySelectorAll<HTMLElement>('[data-part="timeline"] [data-id]')].slice(-3);
+      const next = rows.map((row) => `${row.dataset.id}:${row.getBoundingClientRect().height}`).join("|");
+      const state = window as typeof window & { __jumpEndRows?: { value: string; frames: number } };
+      state.__jumpEndRows = state.__jumpEndRows?.value === next ? { value: next, frames: state.__jumpEndRows.frames + 1 } : { value: next, frames: 1 };
+      return rows.length > 0 && state.__jumpEndRows.frames >= 3;
+    }, undefined, { polling: "raf" });
     await scroll.evaluate(async (element) => {
       element.scrollTop = element.scrollHeight - element.clientHeight - 10;
       await new Promise(requestAnimationFrame);
